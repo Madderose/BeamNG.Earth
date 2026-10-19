@@ -45,7 +45,7 @@ VERTEX_STEP = 4.0           # m between the plan's vertices (segments for the gr
                             # grading a 1 km block 0.06 -> 0.14 s)
 BUCKET = 32.0               # m, query-point buckets
 PAIR_BATCH = 2_000_000      # (segment, point) pairs graded at once (bounds the temporaries, ~200 MB)
-ROAD_LIFT = 0.08            # m the physics ground is raised under roads (see Grader.apply)
+ROAD_LIFT = 0.04            # m the physics ground is raised under roads (see Grader.apply)
 BLEND_R = 4.0               # m: roads near each other blend their targets by 1 / (1 + (d / BLEND_R)^2)
 PROFILE_ZOOM = 15           # DEM zoom of the profiles (one zoom for every caller)
 RETRY_S = 60.0              # s before a cell whose road data failed is asked for again

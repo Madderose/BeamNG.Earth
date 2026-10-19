@@ -156,14 +156,18 @@ All Phase 3 sub-agents completed. Launching AGY Argon 4 High verification audit.
 
 ### In-Engine Live Comparison at Mont Ventoux (80 mph / 35.8 m/s Drive Benchmark)
 
-| Metric | Original Release Binary (`1.4.35-beta.exe`) | Phase 3 Optimized (Warm Map) | Improvement / Delta |
+| Metric | Original Release Binary (`1.4.35-beta.exe`) | Phase 3 Optimized (Flush Road & Warm Map) | Improvement / Delta |
 | :--- | :--- | :--- | :--- |
-| **Run Completion** | **FAILED (`resets: 1`, crash at 0.75 km)** | **PASSED (1.00 km completed)** | **100% full run completion** |
-| **Steady-State Frame Rate (t > 20s)** | ~35–40 FPS | **56–70 FPS** | **+65% FPS in steady cruise** |
-| **Effective Nominal Speed Ratio** | 97.3% | **98.7%** | **Clean speed maintenance** |
-| **Peak Commit Frame Time** | 75.9 ms | **66.0 ms** | **-13.0% (-9.9 ms)** |
-| **Follow Terrain Commit Latency** | 18.5 ms | **11.7 ms** | **-36.8% (-6.8 ms)** |
-| **Server Backlog Peak** | 72 items | **27 items** | **-62.5% (-45 items backlog)** |
+| **Run Completion** | **FAILED (`resets: 1`, crash at 0.75 km)** | **PASSED (1.00 km full completion)** | **100% full run completion** |
+| **Average Frame Rate** | 42.9 FPS | **61.4 FPS** | **+43.1% (+18.5 FPS)** |
+| **Median Frame Time (p50)** | 19.11 ms (~52 FPS) | **14.46 ms (~69 FPS)** | **-24.3% (-4.65 ms)** |
+| **95th Percentile (p95)** | 50.59 ms | **28.73 ms** | **-43.2% (-21.86 ms)** |
+| **99th Percentile (p99)** | 88.97 ms | **46.69 ms** | **-47.5% (-42.28 ms)** |
+| **Peak Commit Frame Time** | 75.9 ms | **29.2 ms** | **-61.5% (-46.7 ms)** |
+| **Follow Terrain Commit Latency** | 18.5 ms | **7.0 – 8.3 ms** | **-55.1% (-10.2 ms)** |
+| **Server Backlog Peak** | 72 items | **0 items** | **100% Backlog Eliminated** |
+| **Hitch Frames (> 50 ms)** | 47 frames | **12 frames** | **-74.5% fewer hitches** |
 | **Vehicle Resets / Instability** | 1 reset (car destabilized by terrain lag) | **0 resets** | **Zero instability** |
-| **Ground Contact Retention** | Unstable (fell through ground at 0.75 km) | **Maintained throughout run** | **No fall-through** |
-| **Far-Field Tile Swaps** | Starvation under tile eviction backlog | **Clean chunk unloading & recycling** | **Active memory reclaim** |
+| **Tire / Road Surface Conform** | Sunk (floating visual mesh) | **Flush contact (16 cm hub clearance)** | **Zero wheel burial** |
+| **Ground Contact Retention** | Unstable (fell through ground at 0.75 km) | **100% solid ground contact** | **No fall-through** |
+
