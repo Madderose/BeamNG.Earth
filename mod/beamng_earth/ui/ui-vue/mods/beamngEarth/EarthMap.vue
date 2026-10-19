@@ -900,10 +900,14 @@ function onEscape() {
 }
 
 function measure() {
-  const el = viewEl.value
-  if (!el) return
-  w.value = el.clientWidth || 1280
-  h.value = el.clientHeight || 720
+  requestAnimationFrame(() => {
+    const el = viewEl.value
+    if (!el) return
+    const newW = el.clientWidth || 1280
+    const newH = el.clientHeight || 720
+    if (w.value !== newW) w.value = newW
+    if (h.value !== newH) h.value = newH
+  })
 }
 
 onMounted(() => {
