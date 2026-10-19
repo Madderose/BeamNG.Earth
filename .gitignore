@@ -29,3 +29,9 @@ docs/research/ortho/
 dist/
 native/earthfast/target/
 build/
+
+# temporary and local benchmark artifacts
+scratch/
+prof_*.txt
+runs/*/*.jsonl
+tools/monitor.ps1

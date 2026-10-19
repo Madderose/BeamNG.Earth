@@ -278,14 +278,14 @@ local function loadBlock(tr)
   local ter = M.TER_SWAP and type(tr.ter) == 'string'
   local movingOnSurface = st.block ~= nil and st.player ~= nil and (st.player.speed or 0) > 5
   if ter and terrain.swap(tr.ter, sq, maxH, x, y, tr.zBase, layers, base, tonumber(tr.baseSize)) then
-    groundcover.afterBlockChange()
+    if nearVisual ~= 'mesh' then groundcover.afterBlockChange() end
     return true, nil, true
   end
   local ok, err = terrain.load(tr.heightmap, sq, maxH, x, y, tr.zBase, layers, base, tonumber(tr.baseSize))
   local swapped = false
   if ok and ter then swapped = terrain.swap(tr.ter, sq, maxH, x, y, tr.zBase, layers, base, tonumber(tr.baseSize)) or false end
   -- every block import / move drops all the grass on it; rebuild it before this frame is drawn
-  groundcover.afterBlockChange()
+  if nearVisual ~= 'mesh' then groundcover.afterBlockChange() end
   return ok, err, swapped or movingOnSurface
 end
 
@@ -1420,7 +1420,7 @@ local function onUpdate(dtReal, dtSim)
   drawUi(dtReal)
   t = mark('draw', t)
   if not gov:isHeavyFrame() and not gov.blocked then
-    collectgarbage('step', 100)
+    collectgarbage('step', 1000)
     mark('gc', t)
   end
 end
@@ -1535,8 +1535,38 @@ local function onClientEndMission()
   st.sessionId, st.nextRequestId, st.mapPort = sessionId, nextRequestId, mapPort   -- the connection's (hello)
 end
 
+local origOnFileChanged = nil
+
+local function hookFileWatchers()
+  if origOnFileChanged or not rawget(_G, 'onFileChanged') then return end
+  origOnFileChanged = _G.onFileChanged
+  _G.onFileChanged = function(files)
+    if not files then return end
+    local filtered = {}
+    for _, v in pairs(files) do
+      local fn = v.filename or ''
+      if not fn:find('/beamngEarth/', 1, true) and not fn:find('\\beamngEarth\\', 1, true) then
+        table.insert(filtered, v)
+      end
+    end
+    if #filtered > 0 then
+      return origOnFileChanged(filtered)
+    end
+  end
+end
+
+local function unhookFileWatchers()
+  if origOnFileChanged and rawget(_G, 'onFileChanged') then
+    _G.onFileChanged = origOnFileChanged
+    origOnFileChanged = nil
+  end
+end
+
 local function onExtensionLoaded()
   log('I', 'beamngEarth', 'beamngEarth_core loaded')
+  collectgarbage('setpause', 110)
+  collectgarbage('setstepmul', 400)
+  hookFileWatchers()
   if rawget(_G, 'core_levels') and core_levels.getLevelByName and not core_levels.getLevelByName(LEVEL_ID) then
     pcall(extensions.reload, 'core_levels')
   end
@@ -1545,6 +1575,7 @@ local function onExtensionLoaded()
 end
 
 local function onExtensionUnloaded()
+  unhookFileWatchers()
   net.close()
   farfield.clear()
   roads.clear()

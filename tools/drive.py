@@ -365,6 +365,8 @@ local t = core_vehicles.spawnNewVehicle(%s, opts)
 if not t then return jsonEncode({ error = 'test vehicle spawn failed' }) end
 BNGE_DRIVE_CAR = { carId = car:getID(), testId = t:getID(), lat = s.player.lat, lon = s.player.lon }
 car:setActive(0)
+t:setPositionRotation(p.x, p.y, p.z, opts.rot.x, opts.rot.y, opts.rot.z, opts.rot.w)
+t:applyClusterVelocityScaleAdd(-1, 0, 0, 0, 0)
 return jsonEncode(BNGE_DRIVE_CAR)"""
 
 RESTORE_USER_VEHICLE = r"""

@@ -1043,6 +1043,7 @@ function M.rawView() return rawView end
 -- uncovers far tiles; about 48 setPosition/setHidden calls for a 256 m move. Returns the changes.
 function M.onBlockCommit(cx, cy)
   setBlock(cx, cy)
+  if not blockShown() then return 0 end
   local n = 0
   for _, inst in pairs(live) do if applyCover(inst, true) then n = n + 1 end end
   for _, inst in pairs(old) do if applyCover(inst, true) then n = n + 1 end end
