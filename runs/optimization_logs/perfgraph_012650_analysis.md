@@ -3,7 +3,7 @@
 **Date:** 2026-10-20  
 **Capture File:** `C:\Users\hoppj\AppData\Local\BeamNG\BeamNG.drive\current\PerfCapture_2026-10-20_01-26-50.bngperfgraph.json` (5.07 MB)  
 **Correlated Log:** `C:\Users\hoppj\AppData\Local\BeamNG\BeamNG.drive\current\beamng.log` (`t_log = 201.03s .. 231.73s`, Anchor #15 at Mont Ventoux `44.17128, 5.13917`)  
-**Hardware:** AMD Ryzen 9 9955HX3D (16C/32T) + NVIDIA GeForce RTX 5080 Laptop GPU (Direct3D 12)  
+**Hardware:** 16C/32T High-Performance Mobile CPU + Direct3D 12 Discrete GPU  
 **Configuration Change Under Test:** Incremental Lua GC reduced from `collectgarbage('step', 1000)` to `collectgarbage('step', 30)` in `core.lua`
 
 ---
