@@ -276,15 +276,17 @@ local function loadBlock(tr)
   local base = nil
   if nearVisual == 'detail' then base = type(tr.base) == 'string' and tr.base or false end
   local ter = M.TER_SWAP and type(tr.ter) == 'string'
+  local movingOnSurface = st.block ~= nil and st.player ~= nil and (st.player.speed or 0) > 5
   if ter and terrain.swap(tr.ter, sq, maxH, x, y, tr.zBase, layers, base, tonumber(tr.baseSize)) then
     groundcover.afterBlockChange()
     return true, nil, true
   end
   local ok, err = terrain.load(tr.heightmap, sq, maxH, x, y, tr.zBase, layers, base, tonumber(tr.baseSize))
-  if ok and ter then terrain.swap(tr.ter, sq, maxH, x, y, tr.zBase, layers, base, tonumber(tr.baseSize)) end
+  local swapped = false
+  if ok and ter then swapped = terrain.swap(tr.ter, sq, maxH, x, y, tr.zBase, layers, base, tonumber(tr.baseSize)) or false end
   -- every block import / move drops all the grass on it; rebuild it before this frame is drawn
   groundcover.afterBlockChange()
-  return ok, err
+  return ok, err, swapped or movingOnSurface
 end
 
 -- M1h: in horizon mode LevelInfo.visibleDistance follows the server's radius (+10 %, with
@@ -504,7 +506,8 @@ local function commitTerrain(msg)
     return false
   end
   local tLoad = sw()
-  if not swapped then             -- a swapped .ter collides by the next frame by itself
+  local movingOnSurface = st.block ~= nil and st.player ~= nil and (st.player.speed or 0) > 5
+  if not swapped and not movingOnSurface then -- a swapped .ter or active drive (> 5 m/s) on an existing surface avoids synchronous reloadCollision
     be:reloadCollision()
     roads.collisionRebuilt()      -- the sidewalks made so far collide now too
   end

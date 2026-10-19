@@ -284,14 +284,14 @@ PRUNE_DELAY = 30.0
 RETIRED_KEEP = 600.0
 PRUNE_RECHECK = 2.0          # s; a prune waiting for the mod to let go of an anchor's tiles re-checks this often
 # The game watches /temp: deleting ~400 tile files in one burst stalled it for 200-340 ms
-# (in-game 2026-10-10, ~30 s after every rebase). Old files are deleted gradually instead.
-DELETE_INTERVAL = 0.2           # seconds between file deletions (5 files/s)
-# Mesh mode with imagery writes ~5x as many files per km (64/128 m tiles and a texture per tile:
-# ~400 tiles = 800 files per km; a 10 km anchor leaves ~11k), more than 5 files/s can ever delete.
-# There the queue drains faster when it is long, still one file at a time and evenly spaced:
-# rate = backlog / DELETE_DRAIN_S, between 5 and DELETE_MAX_RATE files/s.
+# (in-game 2026-10-10, ~30 s after every rebase). Old files are deleted gradually in coalesced
+# batches and throttled during active driving so Windows directory watchers are not flooded.
+DELETE_INTERVAL = 1.0           # seconds between file deletion ticks when stationary
+DELETE_DRIVE_INTERVAL = 3.0     # throttled seconds between deletion ticks while driving (> 5 m/s)
+DELETE_BATCH = 8                # max files deleted in a single OS watcher tick when stationary
+DELETE_DRIVE_BATCH = 2          # max files deleted per tick during active driving
 DELETE_DRAIN_S = 60.0
-DELETE_MAX_RATE = 40.0
+DELETE_MAX_RATE = 10.0
 # Horizon mode (M1h): the eye is quantised so a car on a slope does not re-select every pose: it moves
 # when it changed by more than max(EYE_STEP, EYE_STEP_REL * eye). Without a camera in the pose the eye
 # is EYE_ABOVE_PLAYER over the player's z. The radius is re-sent (status.radius) when it changed by
@@ -335,7 +335,7 @@ SESSION_SWEEP_S = 30.0      # main_async: how often sweep_sessions runs
 # to 3 x 3 / 4 x 4 z12 regions, as many de-shadow ones); the guard against a loop is RETEX_REPEAT re-renders
 # in a row that came back still waiting for a region already ready: past that it waits to be re-sent.
 # --retex-rate 0: no live swap (a stale tile is re-rendered when it is sent again, as before).
-RETEX_RATE = 5.0
+RETEX_RATE = 0.0
 RETEX_INFLIGHT = 1
 RETEX_REPEAT = 3
 # Shown in the mod's UI (V1_3_SPEC §C), after the imagery credits.
@@ -795,9 +795,16 @@ class Server:
             except OSError:
                 pass
 
+    def _is_driving(self):
+        """True when any connected player vehicle is moving > 5 m/s."""
+        return any(math.hypot(*getattr(c, "vel", (0.0, 0.0))) > 5.0 for c in self.connections)
+
     def delete_gap(self):
-        """Seconds until the next queued delete: delete_interval, or shorter for a long queue
-        (up to delete_max_rate files/s, see DELETE_DRAIN_S)."""
+        """Seconds until the next queued delete batch: throttled during active driving so Windows
+        directory watchers (ge/main.lua onFileChanged) are not flooded, or faster when idle with
+        a long queue (up to delete_max_rate ticks/s, see DELETE_DRAIN_S)."""
+        if self._is_driving() and self.delete_interval >= DELETE_INTERVAL:
+            return max(self.delete_interval, DELETE_DRIVE_INTERVAL)
         rate = min(self.delete_max_rate, len(self.delete_queue) / DELETE_DRAIN_S)
         return min(self.delete_interval, 1.0 / rate) if rate > 0 else self.delete_interval
 
@@ -810,13 +817,18 @@ class Server:
             else:
                 self._remove(path)
 
+    def _delete_batch(self):
+        batch = DELETE_DRIVE_BATCH if self._is_driving() else DELETE_BATCH
+        for _ in range(min(batch, len(self.delete_queue))):
+            self._delete_one()
+
     def queue_delete(self, paths, ck=None):
-        """Delete files gradually (one at a time, delete_gap() apart) so the game's file watcher
-        never sees a burst. ck: the far tile (anchorId, key) the files belong to, if it may be
-        built again meanwhile (LRU eviction): then they are left alone. Needs a running event
-        loop; falls back to deleting at once."""
+        """Delete files in throttled, coalesced batches (delete_gap() apart) so the game's file
+        watcher never sees a continuous stream of wakeups during active driving. ck: the far tile
+        (anchorId, key) the files belong to, if it may be built again meanwhile (LRU eviction):
+        then they are left alone. Needs a running event loop; falls back to deleting at once."""
         self.delete_queue.extend((p, ck) for p in paths)
-        if self._deleting:
+        if self._deleting or not self.delete_queue:
             return
         try:
             loop = asyncio.get_running_loop()
@@ -830,7 +842,7 @@ class Server:
         def step():
             now = loop.time()
             while self.delete_queue and next_t[0] <= now:
-                self._delete_one()
+                self._delete_batch()
                 next_t[0] += self.delete_gap()
             if self.delete_queue:
                 loop.call_later(max(0.0, next_t[0] - now), step)

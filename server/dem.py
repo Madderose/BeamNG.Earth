@@ -149,7 +149,8 @@ class Dem:
         tmp = f"{path}.{threading.get_ident()}.tmp"
         with open(tmp, "wb") as f:
             f.write(data)
-        os.replace(tmp, path)
+        import staging
+        staging.replace(tmp, path)
         self.disk.wrote(path, len(data))
         if os.path.exists(miss):            # an expired marker: the host has data there now
             os.remove(miss)
