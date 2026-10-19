@@ -949,15 +949,26 @@ local function updateWorld(dt)
     return -- no rebase decisions while the player is being placed
   end
   local pl = st.player
-  if not pl then return end
+  if not pl then
+    gov:setUrgent(false)
+    return
+  end
 
+  local underLevel = farfield.exactState and farfield.exactState() or nil
+  if (pl.speed and pl.speed > 25) or (underLevel and underLevel > -1) then
+    gov:setUrgent(true)
+  else
+    gov:setUrgent(false)
+  end
+
+  local poseInterval = (pl.speed > 25 and 0.20) or (pl.speed > 10 and 0.33) or POSE_INTERVAL
   st.poseTimer = st.poseTimer + dt
   -- no pose before the resync with a restarted server commits (anchorKnown; hello named the
   -- session folders meanwhile)
   -- nor between a rebase's two phases (st.rebasing): the car is already in the new frame while st.anchorId is still the
   -- old one, and the server, reading that position in the old frame, dropped every road tile around the car at each
   -- rebase (2026-10-17, 100 mph on the salt flats: 42 road tiles -> 0 at the rebase)
-  if st.poseTimer >= POSE_INTERVAL and net.isConnected() and anchorKnown() and not st.rebasing then
+  if st.poseTimer >= poseInterval and net.isConnected() and anchorKnown() and not st.rebasing then
     st.poseTimer = 0
     local c = st.cam
     -- held: previous anchors of this server's session only (the far field's older sessions' anchor
@@ -1332,7 +1343,7 @@ local function onUpdate(dtReal, dtSim)
   st.clock = st.clock + dtReal
   -- the governor's frame opens first: its clock is the wall time since the last onUpdate (hptimer)
   gov:setLoading(st.placeFrames ~= nil or st.clock < st.loadingUntil or st.slowFor > SLOW_S)
-  gov:beginFrame(farfield.hasWork() or roads.hasWork())
+  gov:beginFrame(farfield.hasWork() or roads.hasWork() or (trees.hasWork and trees.hasWork(st.anchorId, st.player) or false))
   gov:chargeEngine(engineTickMs())     -- what the engine spent on last frame's new tiles (governor.lua)
   for _, msg in ipairs(net.update(dtReal)) do
     local ok, err = pcall(onMessage, msg)
@@ -1371,32 +1382,44 @@ local function onUpdate(dtReal, dtSim)
     t = mark('player', t)
     updateWorld(dtReal)
     t = mark('world', t)
+    local heavyFrame = gov:isHeavyFrame()
+    local quietOrHeavy = heavyFrame or gov.blocked or gov.heavyPending
     -- the roads before the far tiles: they share the governor's budget and the first to ask gets it; after a
     -- teleport the far field's hundreds of tiles took it frame after frame and the road meshes under the car
     -- came after it had passed (Brasov, Sinaia 2026-10-15: the car drove bare ground)
-    roads.update(gov, st.anchorId, st.player)
+    if not heavyFrame then
+      roads.update(gov, st.anchorId, st.player)
+    end
     t = mark('roads', t)
     farfield.update(gov, (gov.w1 or dtReal * 1000) / 1000, st.cam, st.player)
     t = mark('far', t)
     sea.update(st.anchorId, st.player)
-    trees.update(st.anchorId, st.player)
-    t = mark('sea+trees', t)
-    local pb = nil
-    if st.block then
-      pb = st.parkBox or {}
-      st.parkBox = pb
-      pb[1], pb[2], pb[3], pb[4] = lattice.groundBox(st.block.cx, st.block.cy)
+    if not quietOrHeavy then
+      trees.update(st.anchorId, st.player, gov)
     end
-    parking.update(st.anchorId, st.player, pb)
-    t = mark('parking', t)
-    navgraph.update(st.anchorId, pb)
-    t = mark('navgraph', t)
+    t = mark('sea+trees', t)
+    if not heavyFrame then
+      local pb = nil
+      if st.block then
+        pb = st.parkBox or {}
+        st.parkBox = pb
+        pb[1], pb[2], pb[3], pb[4] = lattice.groundBox(st.block.cx, st.block.cy)
+      end
+      parking.update(st.anchorId, st.player, pb)
+      t = mark('parking', t)
+      navgraph.update(st.anchorId, pb)
+      t = mark('navgraph', t)
+    end
     updateSky(dtReal)
     updateGuard()
     t = mark('sky', t)
   end
   drawUi(dtReal)
-  mark('draw', t)
+  t = mark('draw', t)
+  if not gov:isHeavyFrame() and not gov.blocked then
+    collectgarbage('step', 100)
+    mark('gc', t)
+  end
 end
 
 -- After physics, before rendering (main.lua:819-824): measure when a rebase's vehicle move became
@@ -1463,6 +1486,9 @@ local function onLevelStart()
 end
 
 local function onClientStartMission()
+  if rawget(_G, 'core_levels') and core_levels.getLevelByName and not core_levels.getLevelByName(LEVEL_ID) then
+    pcall(extensions.reload, 'core_levels')
+  end
   onLevelStart()
 end
 
@@ -1508,6 +1534,9 @@ end
 
 local function onExtensionLoaded()
   log('I', 'beamngEarth', 'beamngEarth_core loaded')
+  if rawget(_G, 'core_levels') and core_levels.getLevelByName and not core_levels.getLevelByName(LEVEL_ID) then
+    pcall(extensions.reload, 'core_levels')
+  end
   -- loaded while a level is already running (e.g. extensions.reload from the console)
   if scenetree.MissionGroup and getCurrentLevelIdentifier() then onLevelStart() end
 end

@@ -665,3 +665,40 @@ class ViewOrderTest(unittest.TestCase):
         self.assertEqual(sorted(want, key=plain), [(0, 0), (-2, 0), (3, 0)])
         other = r.view_key(conn, 2, 128.0, 128.0)            # (the camera of another anchor's frame: ignored)
         self.assertEqual(sorted(want, key=other), [(0, 0), (-2, 0), (3, 0)])
+
+    def test_sidewalk_ground_conformance_and_rural_gating(self):
+        import sidewalks
+        # 1. Rural mountain roads and hamlet-fringe lanes (~50% built-up) do not get urban sidewalks
+        f_fringe = features([[(0, 0), (50, 0), (100, 0), (150, 0)]], ["residential"])
+        s_fringe = roads.road_specs(f_fringe, lambda la, lo: np.array([True, True, False, False]))
+        self.assertFalse(s_fringe[0].urban, "50% built-up fringe lane stays rural (URBAN_SHARE = 0.65)")
+        self.assertFalse(roads.has_sidewalks(s_fringe[0]))
+        # 2. On cross-sloped terrain, build_tile conforms curb z to the road edge and back_z to the outer ground
+        f_city = features([[(20, 100), (220, 100)]], ["residential"])
+        w = roads.carriageway("residential", "paved", True)
+
+        def cross_slope(lat, lon):
+            n = (np.asarray(lat) - LAT) * M_LAT
+            return 100.0 + 0.1 * (n - 100.0)        # 10% cross-slope north-south across the east-west street
+
+        walks = []
+        roads.build_tile(FRAME, 0, 0, [f_city], cross_slope, lambda la, lo: np.ones(np.shape(la), bool), walks=walks)
+        self.assertEqual(len(walks), 2)
+        for wk in walks:
+            side = wk["side"]
+            want_curb = 100.0 + 0.1 * (side * (w / 2))
+            want_back = 100.0 + 0.1 * (side * (w / 2 + wk["w"]))
+            self.assertTrue(np.allclose(wk["pts"][:, 2], want_curb, atol=0.05), (side, wk["pts"][0, 2], want_curb))
+            self.assertTrue(np.allclose(wk["back_z"], want_back, atol=0.05), (side, wk["back_z"][0], want_back))
+            # Downhill sidewalk (side = -1): back_z is below curb z, and Builder drops the outer back to back_z
+            if side == -1:
+                curb, out = sidewalks.run_geometry(wk["pts"], side, wk["w"])
+                b = sidewalks.Builder((0.0, 0.0, 0.0), collision=True)
+                b.add_run(curb, out, wk["w"], caps=wk["caps"], back_z=wk["back_z"])
+                P = b.arrays()[0]
+                self.assertAlmostEqual(P[:, 2].min(), float(wk["back_z"].min()) - sidewalks.SINK - sidewalks.SKIRT, delta=0.02)
+        # 3. Sidewalk stop against an uncurbed rural road stops the entire sidewalk width outside the rural carriageway
+        sp_urban = roads.Spec(w, "paved", True, "residential")
+        sp_rural = roads.Spec(9.5, "paved", False, "secondary")
+        self.assertEqual(roads.sidewalk_stop(sp_urban, "u", sp_rural, "r"), sp_rural.width / 2 + sp_urban.walk / 2)
+

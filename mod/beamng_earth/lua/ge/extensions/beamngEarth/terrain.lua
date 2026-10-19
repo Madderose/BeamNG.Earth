@@ -169,15 +169,26 @@ function M.configure(size)
   return n
 end
 
-local function getOrCreate()
+-- Apply the render flag to the block. Terrain mode never calls the engine unless the flag was off
+-- before (keeps the v1.2 path untouched).
+local function applyRender(tb, force)
+  if (force or not renderEnabled) and tb.setRenderEnabled then tb:setRenderEnabled(renderEnabled) end
+end
+
+local function getOrCreate(opts)
   local tb = M.get()
   if tb then return tb end
   ensureMaterials()
-  tb = TerrainBlock()
+  local standbyBlock = TerrainBlock()
+  tb = standbyBlock
   tb:setName(M.NAME)
   -- the resolution the engine bakes the block's base colour at (default 1024; West Coast USA's block 2048;
   -- set before registerObject: the engine sizes it when the block is added)
   tb:setField('baseTexSize', 0, tostring(M.BASE_TEX_SIZE))
+  -- Pre-hide / disable render before registerObject in mesh mode so the engine does not allocate
+  -- GPU render-quadtree or shadow map resources during registration.
+  if (opts and opts.hidden == true) and tb.setHidden then tb:setHidden(true) end
+  applyRender(tb)
   tb:registerObject(M.NAME)
   tb.canSave = false
   -- importMaps keeps its .ter data under this folder; /temp is writable and outside any level.
@@ -192,12 +203,6 @@ local function getOrCreate()
   end)
   if not ok then log('W', 'beamngEarth', 'terrain addMaterial failed: ' .. tostring(err)) end
   return tb
-end
-
--- Apply the render flag to the block. Terrain mode never calls the engine unless the flag was off
--- before (keeps the v1.2 path untouched).
-local function applyRender(tb, force)
-  if (force or not renderEnabled) and tb.setRenderEnabled then tb:setRenderEnabled(renderEnabled) end
 end
 
 -- Draw the block (terrain mode) or not (mesh mode: physics only).
@@ -241,10 +246,12 @@ end
 -- The caller rebuilds collision (be:reloadCollision) once all world edits of the frame are done.
 -- layers (optional, server --surface on): { masks = { path, ... }, materials = { { name, gm }, ... } }
 -- base / baseSize (optional, detail mode): the block's aerial photo (setBase)
-function M.load(path, squareSize, maxHeight, x, y, z, layers, base, baseSize)
+function M.load(path, squareSize, maxHeight, x, y, z, layers, base, baseSize, opts)
   if not FS:fileExists(path) then return false, 'heightmap not found: ' .. tostring(path) end
   M.square = tonumber(squareSize) or M.square
-  local tb = getOrCreate()
+  local tb = getOrCreate(opts)
+  if (opts and opts.hidden == true) and tb.setHidden then tb:setHidden(true) end
+  applyRender(tb)
   if layers then
     local okL = type(layers.masks) == 'table' and type(layers.materials) == 'table' and #layers.masks == #layers.materials
       and #layers.masks > 0 and ensureSurfaceMaterials(layers.materials)
@@ -269,6 +276,8 @@ function M.load(path, squareSize, maxHeight, x, y, z, layers, base, baseSize)
   return true
 end
 
+M.loadBlock = M.load
+
 -- Move the block by swapping in the server's .ter of the new block (terrainFile + postApply, a new file
 -- name each time: the engine skips a name it already has). ~11 ms for 512², and collision follows by the
 -- next frame with no reloadCollision (docs/research/2026-10-12-engine-limits-and-worldgen.md §7) against
@@ -276,7 +285,7 @@ end
 -- importMaps (the block exists with its material set-up) and at the same square size: returns false
 -- (nothing changed) otherwise, and the caller imports. The .ter names its materials (server
 -- surface.write_ter: layers.materials, or M.MATERIAL alone). The caller does NOT rebuild collision.
-function M.swap(terPath, squareSize, maxHeight, x, y, z, layers, base, baseSize)
+function M.swap(terPath, squareSize, maxHeight, x, y, z, layers, base, baseSize, opts)
   local tb = M.get()
   local sq = tonumber(squareSize)
   if not tb or not M.slots or not sq or math.abs(sq - M.square) > 1e-9 then return false end
@@ -291,6 +300,8 @@ function M.swap(terPath, squareSize, maxHeight, x, y, z, layers, base, baseSize)
   end
   local sw = stopwatch.new()
   local ok, err = pcall(function()
+    if (opts and opts.hidden == true) and tb.setHidden then tb:setHidden(true) end
+    applyRender(tb)
     tb:setField('maxHeight', 0, tostring(maxHeight))
     tb:setPosition(vec3(x, y, z))
     tb:setField('terrainFile', 0, terPath)

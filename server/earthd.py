@@ -449,7 +449,7 @@ class Server:
                  colormatch="off", credits=None, cache=None, retex_rate=RETEX_RATE, surface=None,
                  mapdata=None, grading=False, road_widths=False, block_pools=(), sidewalks=True, buildings=False, traffic=False, far_pool=None,
                  road_pool=None, airports_db=None, sea=None, vegetation=None, leaf_on=True, season_mode="off",
-                 far_bld_pool=None):
+                 far_bld_pool=None, warm_qs=()):
         """kfun: K(L) for every level (default: the layout's K table); near_radii: the min-level
         radii (default: the layout's); cells: 32 (v1.3.1) or 64 (M1, mesh mode only); tex: texture
         px per level from the finest (default: tex_near, tex_near, tex_far with 32 cells,
@@ -561,14 +561,16 @@ class Server:
         # lane, LANE_REQUEST and LANE_PREFETCH, so a block the mod asks for never waits behind a prefetch
         # (one shared process: answers up to 4 s at 90 m/s, 2026-10-12). Empty: built in hm_pool's threads.
         self.block_pools = list(block_pools)
+        self.warm_qs = [q for _, q in self.block_pools] + list(warm_qs)
         # Far-tile geometry in worker processes too (blockworker.far_geometry; the texture stays here): a
         # ProcessPoolExecutor of tile_workers, or None (built in tile_pool's threads)
         self.far_pool = far_pool
         self.road_pool = road_pool          # road tiles in processes (blockworker.roads_tile), else threads
+        self._road_pool_rr = itertools.count()
         # far building tiles in a process of their own: in the road pool (first come, first served) a teleport's
         # hundreds of them queued ahead of the road tiles under the car, which drove on bare ground for minutes
         # (Sinaia 2026-10-15); falls back to the road pool
-        self.far_bld_pool = far_bld_pool or road_pool
+        self.far_bld_pool = far_bld_pool or (road_pool[0] if isinstance(road_pool, list) and road_pool else road_pool)
         self.warm_cv = threading.Condition()
         self.warm_thread = None
         self.tile_workers = tile_workers
@@ -823,15 +825,18 @@ class Server:
                 self._delete_one()
             return
         self._deleting = True
+        next_t = [loop.time() + self.delete_gap()]
 
         def step():
-            if self.delete_queue:
+            now = loop.time()
+            while self.delete_queue and next_t[0] <= now:
                 self._delete_one()
+                next_t[0] += self.delete_gap()
             if self.delete_queue:
-                loop.call_later(self.delete_gap(), step)
+                loop.call_later(max(0.0, next_t[0] - now), step)
             else:
                 self._deleting = False
-        loop.call_later(self.delete_gap(), step)
+        loop.call_later(max(0.0, next_t[0] - loop.time()), step)
 
     # --- heightmaps ------------------------------------------------------
     def hm_name(self, key):
@@ -972,7 +977,9 @@ class Server:
             return None
         if self.road_pool is not None:
             t0 = time.perf_counter()
-            res = self.road_pool.submit(
+            pool = (self.road_pool[next(self._road_pool_rr) % len(self.road_pool)]
+                    if isinstance(self.road_pool, list) else self.road_pool)
+            res = pool.submit(
                 blockworker.roads_tile, aid, anchor.lat, anchor.lon, anchor.zooms[0], tx, ty, self.out_dir,
                 self.vfs_dir, self.sidewalks, DETAIL_ROAD_LIFT if self.near_visual == "detail" else 0.0,
                 self.buildings, self.left_hand(anchor), self.mph(anchor)).result()
@@ -1082,7 +1089,7 @@ class Server:
             for k in mapcells.cells_for_bbox(la - dlat, lo - dlon, la + dlat, lo + dlon):
                 if k not in keys:
                     keys.append(k)
-        for _, q in self.block_pools:
+        for q in self.warm_qs:
             try:
                 q.put_nowait((anchor.id, anchor.lat, anchor.lon, keys))
             except Exception as e:      # a full / closed queue only costs the lookahead
@@ -1377,7 +1384,7 @@ class Server:
         t1 = time.perf_counter()
         tmp = staging.tmp_for(path)
         Image.fromarray(rgb, "RGB").save(tmp, format="PNG", compress_level=1)
-        os.replace(tmp, path)
+        staging.replace(tmp, path)
         t2 = time.perf_counter()
         try:            # after the photo: the cache entry must be the newer file
             args = (self.user_dir, f"{self.vfs_dir}/{name}", BASE_AO_VFS, rgb, BASE_AO)
@@ -1600,11 +1607,12 @@ class Server:
         q = self.anchor_q(anchor) if lvl <= 0 else None
         ref_zoom = anchor.zooms[lvl - 1] if lvl > 0 else None
         path = os.path.join(self.out_dir, self.tile_name(anchor.id, tile.key))
-        g = self.grader_for(anchor) if lvl <= 0 and self.far_pool is None else None   # graded like the block
+        far_lift = 0.0 if lvl < 0 else (-0.18 if lvl == 0 else -0.40)
+        g = self.grader_for(anchor) if lvl <= 1 and self.far_pool is None else None   # graded like the block
         base = self.airports.wrap(self.dem) if self.airports is not None else self.dem
         if self.sea is not None:
             base = seacarvemod.SeaDem(base, self.sea if lvl <= seacarvemod.CARVE_MAX_LEVEL else None)
-        src = gradingmod.GradedDem(base, g) if g is not None else base
+        src = gradingmod.GradedDem(base, g, lift=far_lift) if g is not None else base
         if self.far_pool is not None:
             built = self.far_pool.submit(blockworker.far_geometry, anchor.id, anchor.lat, anchor.lon, tile,
                                          anchor.zooms[max(lvl, 0)], q, ref_zoom, self.near_visual in BLOCK_DRAWN,
@@ -2595,6 +2603,9 @@ class Connection:
             self._set_block(aid, *anchor.first_terrain)
         log.info("commit anchor %d", aid)
         self.update_far()
+        if self.s.mapdata is not None:
+            cx, cy = self.focus
+            self.roads.on_pose(self, anchor.id, float(cx), float(cy), asyncio.get_running_loop(), self.s.build_roads_tile, 0.0, 0.0)
 
     def _set_block(self, aid, cx, cy):
         self.block = self.s.layout.block_at(cx, cy)
@@ -2714,7 +2725,7 @@ class Connection:
             self.s.download_ahead(self.s.anchors[aid], *self.focus, *self.vel)
             self.base_refresh(aid)
         if self.s.mapdata is not None and aid == self.active:
-            self.roads.on_pose(self, aid, *self.focus, asyncio.get_running_loop(), self.s.build_roads_tile)
+            self.roads.on_pose(self, aid, *self.focus, asyncio.get_running_loop(), self.s.build_roads_tile, *self.vel)
         if self.s.veg is not None and aid == self.active:
             anchor = self.s.anchors.get(aid)
             if anchor is not None:                            # a teleport's cells built at once, ahead
@@ -2947,10 +2958,25 @@ class Connection:
         self.retired = {ck: t for ck, t in self.retired.items() if now - t < self.s.retired_keep}
         self.node_changed = {n: t for n, t in self.node_changed.items() if now - t < farfield.HOLD_S}
         radius, extra = (self.horizon_select() if self.s.horizon else (self.s.radius, {}))
-        new, refined = farfield.select(*self.focus, self.forced(), self.refined, self.s.kfun,
+        vx, vy = getattr(self, "vel", (0.0, 0.0))
+        speed = math.hypot(vx, vy)
+        dyn_radii = dict(self.s.near_radii)
+        fx, fy = self.focus
+        lead = None
+        if speed > 2.0:
+            ml = self.s.min_level
+            if ml in dyn_radii:
+                dyn_radii[ml] = 160.0
+            if ml + 1 in dyn_radii:
+                dyn_radii[ml + 1] = 380.0
+            t_look = min(7.0, speed * 0.12)
+            scale = min(t_look, 350.0 / speed)
+            lead = (fx + vx * scale, fy + vy * scale)
+
+        new, refined = farfield.select(fx, fy, self.forced(), self.refined, self.s.kfun,
                                        self.s.hysteresis, radius, hold=set(self.node_changed),
-                                       min_level=self.s.min_level, radii=self.s.near_radii, layout=self.s.layout,
-                                       forced_level=self.s.forced_level, view=self.view(), **extra)
+                                       min_level=self.s.min_level, radii=dyn_radii, layout=self.s.layout,
+                                       forced_level=self.s.forced_level, view=self.view(), lead=lead, **extra)
         if self.desired:                # the first selection of an anchor is not a change
             for n in refined ^ self.refined:
                 self.node_changed[n] = now
@@ -3010,6 +3036,13 @@ class Connection:
         cone = (farfield.view_cone(self.cam)
                 if isinstance(self.cam, dict) and getattr(self, "cam_aid", None) == aid else None)
         dist = farfield.view_distances(todo, cone, fx, fy)
+        vx, vy = getattr(self, "vel", (0.0, 0.0))
+        speed = math.hypot(vx, vy)
+        lead_pt = None
+        if speed > 2.0:
+            t_look = min(7.0, speed * 0.12)
+            scale = min(t_look, 350.0 / speed)
+            lead_pt = (fx + vx * scale, fy + vy * scale)
 
         def prio(k):
             t = todo[k]
@@ -3018,7 +3051,24 @@ class Connection:
                 cls = 0
             elif t.key in started:
                 cls = 1
-            return (cls, dist[k], t.level, t.key)
+            d_eff = dist[k]
+            if lead_pt is not None:
+                x0, y0, x1, y1 = t.bbox
+                seg_d = farfield.seg_distance(fx, fy, lead_pt[0], lead_pt[1], x0, y0, x1, y1)
+                if t.level <= 0 and seg_d <= 380.0:
+                    cls = 0
+                    d_eff = min(d_eff, seg_d)
+                else:
+                    tx = (x0 + x1) * 0.5 - fx
+                    ty = (y0 + y1) * 0.5 - fy
+                    t_dist = math.hypot(tx, ty)
+                    if t_dist > 1.0:
+                        cos_v = (tx * vx + ty * vy) / (t_dist * speed)
+                        if cos_v > 0.2:
+                            d_eff = d_eff / (1.0 + cos_v)
+                        elif cos_v < -0.2 and t_dist > 400.0:
+                            d_eff = d_eff * (1.0 - cos_v)
+            return (cls, d_eff, t.level, t.key)
         self.queue = [todo[k] for k in sorted(range(len(todo)), key=prio)]
         self.qi = 0
         self.failed.clear()
@@ -3264,12 +3314,18 @@ async def main_async(args):
         except airportsmod.AirportsUnavailable as e:
             log.warning("airports: no runway grading (%s)", e)
     road_pool = None
+    warm_qs = []
     if args.block_process == "on" and args.roads == "on" and args.road_processes > 0:
-        road_pool = ProcessPoolExecutor(          # road tiles (blockworker.roads_tile)
-            args.road_processes, mp_context=ctx, initializer=blockworker.init,
-            initargs=(args.cache_dir, args.offline, True, args.grading == "on", args.road_widths == "on",
-                      args.surface == "on", ctx.Queue(maxsize=1), logging.getLogger().level,
-                      args.airports == "on", args.sea == "on"))
+        road_pool = []
+        for _ in range(args.road_processes):
+            wq = ctx.Queue(maxsize=8)
+            warm_qs.append(wq)
+            road_pool.append(ProcessPoolExecutor(          # road tiles (blockworker.roads_tile)
+                max_workers=1, mp_context=ctx,
+                initializer=blockworker.init,
+                initargs=(args.cache_dir, args.offline, True, args.grading == "on", args.road_widths == "on",
+                          args.surface == "on", wq, logging.getLogger().level,
+                          args.airports == "on", args.sea == "on")))
     far_bld_pool = None
     if road_pool is not None and args.buildings == "on":
         far_bld_pool = ProcessPoolExecutor(       # far building tiles (blockworker.far_buildings_tile)
@@ -3297,7 +3353,7 @@ async def main_async(args):
                     buildings=args.buildings == "on" and args.roads == "on",
                     traffic=args.traffic == "on" and args.roads == "on",
                     block_pools=block_pools, far_pool=far_pool, road_pool=road_pool, airports_db=airports_db,
-                    far_bld_pool=far_bld_pool,
+                    far_bld_pool=far_bld_pool, warm_qs=warm_qs,
                     sea=seacarvemod.SeaCarver(mapdata, args.cache_dir) if args.sea == "on" else None,
                     vegetation=(vegetationmod.Vegetation(mapdata, args.cache_dir) if args.trees == "on" else None))
     server.update_check = args.update_check == "on"
