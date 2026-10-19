@@ -194,3 +194,59 @@ class FlatpakGameProcess(unittest.TestCase):
         with mock.patch.object(launcher, "IS_WIN", False), mock.patch.object(launcher, "game_pids", lambda: []), \
                 mock.patch("builtins.open", mock.mock_open(read_data=listen)):
             self.assertFalse(launcher.game_alive())
+
+
+class ConsoleEcho(unittest.TestCase):
+    def test_only_warnings_errors_tracebacks_and_connected(self):
+        log = ["2026-10-17 07:04:50,488 INFO earthd: session 1 kept\n",
+               "earthd listening on 127.0.0.1:47613 session x\n",
+               "2026-10-17 07:04:55,466 INFO earthd: client connected ('127.0.0.1', 34278)\n",
+               "2026-10-17 07:05:01,000 WARNING earthd.net: net: host: circuit open for 60 s\n",
+               "2026-10-17 07:05:02,000 ERROR earthd: tile failed\n",
+               "Traceback (most recent call last):\n", '  File "dem.py", line 236\n', "dem.DemUnavailable: x\n",
+               "2026-10-17 07:05:03,000 INFO earthd: anchor 1: land cover wait 3.11 s\n",
+               "2026-10-17 07:05:04,000 INFO earthd: client connected ('127.0.0.1', 1)\n"]
+        state = {}
+        out = launcher.echo_lines(log[:4], state) + launcher.echo_lines(log[4:], state)
+        self.assertEqual(out[0], "  Game          connected to the world server")
+        self.assertTrue(out[1].startswith("  server: ") and "WARNING" in out[1])
+        self.assertIn("ERROR", out[2])
+        self.assertEqual([o.strip() for o in out[3:6]], ["server: Traceback (most recent call last):",
+                                                         'server:   File "dem.py", line 236', "server: dem.DemUnavailable: x"])
+        self.assertEqual(len(out), 6, "no INFO lines, 'connected' once")
+
+
+class ModsOffAfterUpdateTest(unittest.TestCase):
+    """A game update turns every mod off until the player turns them back on (BeamNG 0.40, 2026-10-19): the
+    launcher reads the game's log and says what to do."""
+
+    def test_the_line_is_reported(self):
+        got = []
+        old = launcher.problem
+        launcher.problem = lambda msg, hint=None: got.append((msg, hint))
+        self.addCleanup(setattr, launcher, "problem", old)
+        with tempfile.TemporaryDirectory() as d:
+            since = time.time() - 1
+            launcher.watch_game_log(d, since)
+            with open(os.path.join(d, "beamng.log"), "w") as f:
+                f.write(" 1.2|I|getModsDisabledAfterUpdate| Mods will be disabled after updating from version: '0.39.4'\n")
+            for _ in range(20):
+                if got:
+                    break
+                time.sleep(0.25)
+        self.assertEqual(len(got), 1)
+        self.assertIn("turned all mods off", got[0][0])
+
+    def test_last_runs_log_is_ignored(self):
+        got = []
+        old = launcher.problem
+        launcher.problem = lambda msg, hint=None: got.append(msg)
+        self.addCleanup(setattr, launcher, "problem", old)
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "beamng.log")
+            with open(p, "w") as f:
+                f.write("Mods will be disabled after updating from version: '0.39.4'\n")
+            os.utime(p, (time.time() - 3600, time.time() - 3600))      # an old run's log
+            launcher.watch_game_log(d, time.time())
+            time.sleep(3)
+        self.assertEqual(got, [])

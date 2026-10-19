@@ -115,6 +115,7 @@ MOD_TO_SERVER = {
     "route": {"id": F(int), "lat0": F(NUM), "lon0": F(NUM), "lat1": F(NUM), "lon1": F(NUM),
               "bearing": F(NUM, OPT)},   # the GPS (routing.py); bearing: the car's heading, the route starts that way
     "where": {"id": F(int), "lat": F(NUM), "lon": F(NUM), "online": F(bool)},   # the status bar (geocode.py)
+    "open_page": {"url": F(str)},                                               # the update notice's releases button (updates.py)
 }
 CAM = {"x", "y", "z", "fx", "fy", "fz", "fovDeg", "h"}     # h: the screen height px (screen-space LOD)
 TERRAIN = {"cx": F(NUM), "cy": F(NUM), "heightmap": F(str), "size": F(int), "squareSize": F(NUM),
@@ -147,6 +148,7 @@ SERVER_TO_MOD = {
                "radius": F(NUM, OPT)},      # v1.4 M1h: the far-field radius (m), --horizon only
     "anchor_ready": {"requestId": F(int), "anchorId": F(int), "lat": F(NUM), "lon": F(NUM),
                      "groundZ": F(NUM, NULL), "terrain": F(dict),
+                     "floorZ": F(NUM, NULL, OPT),          # 2026-10-17: in a tunnel, its floor (core.floorCheck)
                      "anchorKey": F(str, OPT)},            # phase 5 (lattice anchors): not sent yet
     "anchor_error": {"requestId": F(int, NULL), "error": F(str)},
     "terrain_ready": {"requestId": F(int), "anchorId": F(int), **TERRAIN},

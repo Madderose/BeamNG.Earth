@@ -171,3 +171,39 @@ All Phase 3 sub-agents completed. Launching AGY Argon 4 High verification audit.
 | **Tire / Road Surface Conform** | Sunk (floating visual mesh) | **Flush contact (16 cm hub clearance)** | **Zero wheel burial** |
 | **Ground Contact Retention** | Unstable (fell through ground at 0.75 km) | **100% solid ground contact** | **No fall-through** |
 
+---
+
+## Phase 4: Upstream 1.5.1 Merge & Sidewalk Ground Conformance
+
+**Orchestrator**: AGY Argon 4 High (`gemini-4-argon-high`, effort=high)  
+**Verification Agent**: AGY Argon 4 High (`gemini-4-argon-high`, effort=high)  
+**Execution Sub-Agents**: AGY Gemini Medium (`gemini-4-argon-medium`)  
+**Upstream Target**: `TecnaGamer/BeamNG.Earth` (Tags `1.5.0`, `1.5.1-beta` @ `1f60d19`)  
+**Local Baseline**: `main` (Commit `de8d1c0`)  
+**Status**: **IN PROGRESS**
+
+### Delegated Tasks & Objectives Matrix
+
+| Task ID | Component / Area | Files Allocated | Sub-Agent Model | Goal & Technical Scope (Our Way vs Their Way) | Execution Status |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| **TASK-M01** | **Native Rust & PyO3 Concurrency** | `native/earthfast/src/lib.rs`<br>`server/fast.py` | `gemini-4-argon-medium` | **Goal**: Merge upstream's new kernels (`subdivide_tris` for plazas, `bc7_encode`, `measure_row`, retaining wall `wall_cut`/`wall_ahead`) with our GIL-free `py.allow_threads` across all kernels, NaN/degenerate guards, and pure-NumPy fallbacks in `fast.py`. | **COMPLETED (Exit Code 0)** |
+| **TASK-M02** | **Buildings & Architecture Harmonization** | `server/buildings.py`<br>`server/tests/test_buildings.py` | `gemini-4-argon-medium` | **Goal**: Adopt upstream's 3m/10m wall skirts, `Colmesh` collision naming fix, open parking garage skins (`_garage_skin`), and LOD meshes (`with_lod`), while preserving our hillside doorway anchoring (`g_base`), roof ridge rise caps, and safe eave drops. | **COMPLETED (Exit Code 0)** |
+| **TASK-M03** | **Roads, Plazas, Bridges & Server** | `server/roads.py`<br>`server/roadmesh.py`<br>`server/earthd.py`<br>`server/bridgetypes.py`<br>`server/plazas.py` | `gemini-4-argon-medium` | **Goal**: Integrate upstream's plazas mesh, 3D bridge types DB, and release update notices, while preserving our velocity lookahead (`lead = min(384.0, speed * 8.0)`), directional priority cone (`_prio`), non-destructive `cbox` filtering, and roadside vegetation grader integration. | **COMPLETED (Exit Code 0)** |
+| **TASK-M04** | **In-Game Lua Extensions & Physics Pauses** | `mod/.../core.lua`<br>`mod/.../roads.lua`<br>`mod/.../farfield.lua`<br>`mod/.../trees.lua`<br>`mod/.../drophold.lua`<br>`mod/.../edgeguard.lua` | `gemini-4-argon-medium` | **Goal**: Adopt upstream's in-engine physics pause drop-hold and edge-guard banners, while keeping our front-of-queue `walkQ` road priority, doomed-tile deletion starvation fix, tree collision cache eviction, and dev mini-map sync. | **COMPLETED (Exit Code 0)** |
+| **TASK-M05** | **Sidewalk True Ground-Level Conformance** | `server/sidewalks.py`<br>`server/roads.py`<br>`server/grading.py` | `gemini-4-argon-medium` | **Goal**: Resolve user issue ("The sidewalk is less floaty but still way too high in the air, it should be near the actual ground level, if any"). Adapt sidewalk curb elevation to conform to graded road edge / natural ground instead of flat road centerline Z, clamp back slope to terrain, and verify urban-only sidewalk gating. | **COMPLETED (Exit Code 0)** |
+| **TASK-M06** | **Full Verification Suite & In-Engine Benchmark** | `tools/parallel_tests.py`<br>`tools/road_bench.py` | `gemini-4-argon-high` | **Goal**: Execute all 225+ tests in parallel across 13 CPU workers. Verify zero regressions, compile native Rust extension (`earthfast.pyd`), install mod to BeamNG, and execute live in-engine Mont Ventoux benchmark comparison. | **COMPLETED & APPROVED (Argon 4 High)** |
+
+> `[2026-10-19 15:16:35]` **TASK-M01**: Status updated to **RUNNING (gemini-4-argon-medium)**
+> `[2026-10-19 15:35:32]` **TASK-M01**: Status updated to **COMPLETED (Exit Code 0)**
+> `[2026-10-19 15:35:33]` **TASK-M02**: Status updated to **RUNNING (PID 25924, gemini-4-argon-medium)**
+> `[2026-10-19 15:35:33]` **TASK-M03**: Status updated to **RUNNING (PID 40820, gemini-4-argon-medium)**
+> `[2026-10-19 15:35:33]` **TASK-M04**: Status updated to **RUNNING (PID 9804, gemini-4-argon-medium)**
+> `[2026-10-19 15:42:00]` **TASK-M02**: Status updated to **COMPLETED (Exit Code 0)**
+> `[2026-10-19 15:46:42]` **TASK-M04**: Status updated to **COMPLETED (Exit Code 0)**
+> `[2026-10-19 15:50:03]` **TASK-M03**: Status updated to **COMPLETED (Exit Code 0)**
+> `[2026-10-19 15:50:03]` **TASK-M05**: Status updated to **RUNNING (PID 14840, gemini-4-argon-medium)**
+> `[2026-10-19 16:11:45]` **TASK-M05**: Status updated to **COMPLETED (Exit Code 0)**
+> `[2026-10-19 16:11:45]` **TASK-M06**: Status updated to **RUNNING (gemini-4-argon-high)**
+> `[2026-10-19 16:22:46]` **TASK-M06**: Protocol agreement schema fix verified and audit complete.
+> `[2026-10-19 16:23:00]` **TASK-M06**: Status updated to **COMPLETED & APPROVED (Argon 4 High)**
+

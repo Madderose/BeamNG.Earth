@@ -127,18 +127,31 @@ def seg_dist_min(line, px, py=None):
     return float(np.min(np.hypot(a[:, 0] + dx * t - px, a[:, 1] + dy * t - py)))
 
 
-def island_ring_rays(poly, lines_hw, c, rays, step, rmax):
-    """(rays, 2) island curb ring from centre c along `rays` directions in steps of `step` up to `rmax`."""
+def island_ring_rays(poly, lines_hw, c, rays, step, rmax, step_r=None, rmax_r=None):
+    """(rays, 2) island curb ring from centre c along `rays` directions in steps of `step` up to `rmax`.
+    Accepts either (poly, lines_hw, c, rays, step, rmax) or (poly, segs, hw, cx, cy, rays, step, rmax)."""
     poly2 = np.ascontiguousarray(np.asarray(poly, dtype=np.float64)[:, :2])
-    segs, hw = segments(lines_hw)
-    cx, cy = float(c[0]), float(c[1])
-    rays = int(rays)
-    step = float(step)
-    rmax = float(rmax)
+    if step_r is not None and rmax_r is not None:
+        segs = np.ascontiguousarray(lines_hw, dtype=np.float64)
+        hw = np.ascontiguousarray(c, dtype=np.float64)
+        cx, cy = float(rays), float(step)
+        rays = int(rmax)
+        step = float(step_r)
+        rmax = float(rmax_r)
+    else:
+        segs, hw = segments(lines_hw)
+        cx, cy = float(c[0]), float(c[1])
+        rays = int(rays)
+        step = float(step)
+        rmax = float(rmax)
     if _ef is not None:
         return _ef.island_ring_rays(poly2, segs, hw, cx, cy, rays, step, rmax)
+    if rays <= 0:
+        return np.zeros((0, 2), dtype=np.float64)
     ang = 2.0 * math.pi * np.arange(rays, dtype=np.float64) / rays
     ux, uy = np.cos(ang), np.sin(ang)
+    if step <= 0.0:
+        return np.column_stack([np.full(rays, cx), np.full(rays, cy)])
     # Build the exact sequence of step radii produced by `r = 0.0; while r < rmax: ... r += step`
     r_list = [0.0]
     r = 0.0

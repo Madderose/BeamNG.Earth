@@ -84,20 +84,24 @@ TACTILE_REPEAT_M = 0.6  # m per tactile pad texture repeat
 PAD_W = 0.6             # m of a ramp's slope from the curb that is the tactile pad (US: 2 ft of domes)
 
 
-def profile(h=CURB_H, w=2.5, hr=None):
+def profile(h=CURB_H, w=2.5, hr=None, dz=0.0):
     """The cross-section points (offset from the curb line outwards, height above the road): face
     bottom, face top, nose end, curb top end, ramp end, slab outer top, back bottom (BACK_RUN out),
     and skirt bottom (-SKIRT below -SINK). hr: the curb's height (h, or lower at a curb ramp: the slab
-    then climbs from hr at the curb top to h at RAMP_RUN)."""
+    then climbs from hr at the curb top to h at RAMP_RUN). dz: ground height offset at the outer edge
+    relative to the curb line (when negative, the slab and back slope drop with the ground)."""
     hr = h if hr is None else hr
     f = hr / h if h > 0 else 0.0
-    zr = h + RAMP_RUN * CROSS_SLOPE
-    zp = hr + (zr - hr) * PAD_W / (RAMP_RUN - CURB_W)       # on the ramp's slope, PAD_W past the curb top
-    top = h + w * CROSS_SLOPE
-    w_back = w + BACK_RUN * (top + SINK)
+    dz_slab = min(0.0, float(dz))
+    span = max(w - CURB_W, 1e-6)
+    zr = h + RAMP_RUN * CROSS_SLOPE + dz_slab * min(1.0, max(0.0, RAMP_RUN - CURB_W) / span)
+    zp = hr + (zr - hr) * PAD_W / max(RAMP_RUN - CURB_W, 1e-6)      # on the ramp's slope, PAD_W past the curb top
+    top = h + w * CROSS_SLOPE + dz_slab
+    back_bot = dz_slab - SINK
+    w_back = w + BACK_RUN * max(0.0, top - back_bot)
     return np.array([[0.0, -SINK], [BATTER * f, hr - NOSE * f], [NOSE_W * f, hr], [CURB_W, hr],
-                     [CURB_W + PAD_W, zp], [RAMP_RUN, zr], [w, top], [w_back, -SINK],
-                     [w_back, -SINK - SKIRT]])
+                     [CURB_W + PAD_W, zp], [RAMP_RUN, zr], [w, top], [w_back, back_bot],
+                     [w_back, back_bot - SKIRT]])
 
 
 # strips: (from profile point, to point, material index, v at from, v at to); material 1 on the
@@ -196,10 +200,11 @@ class Builder:
         self.n += len(P)
         return k
 
-    def _sections(self, curb, toward_out, w, h, hr):
-        """ring (k, 7, 3) of the cross-sections, and the per-point profiles (k, 7, 2)."""
+    def _sections(self, curb, toward_out, w, h, hr, dz=None):
+        """ring (k, 9, 3) of the cross-sections, and the per-point profiles (k, 9, 2)."""
         k = len(curb)
-        prof = np.stack([profile(h, w, float(x)) for x in hr])
+        dz = np.zeros(k) if dz is None else np.asarray(dz, np.float64)
+        prof = np.stack([profile(h, w, float(x), float(d)) for x, d in zip(hr, dz)])
         ring = np.empty((k, prof.shape[1], 3))
         ring[:, :, :2] = curb[:, None, :2] + toward_out[:, None, :] * prof[:, :, 0:1]
         ring[:, :, 2] = curb[:, None, 2] + prof[:, :, 1]
@@ -234,29 +239,33 @@ class Builder:
             self.T.append(base + _orient(tris - base, P, np.concatenate([want, want])))
             self.M.append(np.r_[mats, mats])
 
-    def add_run(self, curb, toward_out, w, h=CURB_H, caps=(True, True), ramps=(), slab=1):
-        """One sidewalk run: curb (k, 3) the curb line (z = the road there), toward_out (k, 2) unit
+    def add_run(self, curb, toward_out, w, h=CURB_H, caps=(True, True), ramps=(), slab=1, back_z=None):
+        """One sidewalk run: curb (k, 3) the curb line (z = the road edge there), toward_out (k, 2) unit
         vectors from the curb outwards (scaled by the miter), w its width; caps: end caps at the
         (start, end) (not where the run goes on in the next tile or meets a corner piece); ramps:
-        curb ramps [(s0, s1)] in arc length along the curb."""
+        curb ramps [(s0, s1)] in arc length along the curb; back_z: optional ground z (k,) at the outer edge."""
         curb = np.asarray(curb, np.float64)
         toward_out = np.asarray(toward_out, np.float64)
         if len(curb) < 2:
             return
         if self.col is not None:
-            self.col.add_run(curb, toward_out, w, h, caps, ramps)
+            self.col.add_run(curb, toward_out, w, h, caps, ramps, back_z=back_z)
         s = np.r_[0.0, np.cumsum(np.hypot(*np.diff(curb[:, :2], axis=0).T))]
+        bz = None if back_z is None else np.asarray(back_z, np.float64)
         if ramps:
             s2 = refine(s, ramps)
+            if bz is not None:
+                bz = np.interp(s2, s, bz)
             curb = np.stack([np.interp(s2, s, curb[:, c]) for c in range(3)], axis=1)
             toward_out = np.stack([np.interp(s2, s, toward_out[:, c]) for c in range(2)], axis=1)
             s = s2
+        dz = np.zeros(len(curb)) if bz is None else np.minimum(0.0, bz - curb[:, 2])
         hr = curb_heights(s, ramps, h)
         if self.lean:                           # the collision mesh: fewer points, the lean profile
-            keep = simplify(np.c_[curb, hr])
-            curb, toward_out, s, hr = curb[keep], toward_out[keep], s[keep], hr[keep]
+            keep = simplify(np.c_[curb, hr, dz])
+            curb, toward_out, s, hr, dz = curb[keep], toward_out[keep], s[keep], hr[keep], dz[keep]
         k = len(curb)
-        ring, prof = self._sections(curb, toward_out, w, h, hr)
+        ring, prof = self._sections(curb, toward_out, w, h, hr, dz)
         if self.lean:
             ring, prof = ring[:, LEAN], prof[:, LEAN]
             self._strips(ring, prof, toward_out, s, LEAN_STRIPS)
@@ -273,7 +282,7 @@ class Builder:
                            * (V_LIGHT_LOW - V_BAND_LOW)], 1)
             # Add bottom point under point 0 at -SINK - SKIRT to seal the end cap down to the foundation
             p_bot0 = P[0].copy()
-            p_bot0[2] = P[-1, 2]
+            p_bot0[2] = min(P[0, 2] - SKIRT, P[-1, 2])
             P_all = np.vstack([P, p_bot0[None, :]])
             UV_all = np.vstack([UV, np.array([[0.0, V_BAND_LOW]])])
             base = self._add(P_all, UV_all)

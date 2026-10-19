@@ -378,6 +378,11 @@ function D.tick(dtReal, dtSim)
     s.cmd = h
     veh:setClusterPosRelRot(-1, s.x, s.y, z, qx, qy, qz, qw)
     veh:applyClusterVelocityScaleAdd(-1, 0, hx * speed, hy * speed, vz)
+    if s.frame % 15 == 1 then
+      veh:queueLuaCommand(string.format(
+        "for _, wd in pairs(wheels.wheels or {}) do wd.tireSoundVolumeCoef = 0 if wd.radius and wd.radius > 0 then wd.angularVelocity = %f / wd.radius * (wd.wheelDir or 1) end end",
+        speed))
+    end
   else
     flags = flags + D.FLAG_SKIP
   end
@@ -423,7 +428,7 @@ function D.install(cfg)
   D.state = {
     prof = prof, km = tonumber(cfg.km), x = startX, y = startY, z = p.z, s = 0, t = 0,
     xOff = 0, yOff = 0,
-    ground = g, base = g, clearance = tonumber(cfg.clearance) or max(0.05, min(5, p.z - g)),
+    ground = g, base = g, clearance = tonumber(cfg.clearance) or max(0.05, min(5, p.z - g + 0.03)),
     cmd = h0, hOff = 0, frame = 0, lastTick = D.clock(), installMs = D.clock(), lastPoll = D.clock(),
     falls = 0, resets = 0, rebases = 0, resyncs = 0, vSum = 0, vProfSum = 0, vN = 0, placed = 0, lastSpeed = 0,
     vehId = veh:getID(), done = false, reason = nil, skip = false, rebaseFrame = nil,
@@ -431,7 +436,7 @@ function D.install(cfg)
   -- from here on uninstall() undoes every step, also when one of them fails
   D.installed = true
   local okI, errI = pcall(function()
-    veh:queueLuaCommand(D.ZERO_INPUTS)
+    veh:queueLuaCommand(D.ZERO_INPUTS .. "; for _, wd in pairs(wheels.wheels or {}) do wd.tireSoundVolumeCoef = 0 end")
 
     -- the mod's rebase moves the player: follow it (restored at uninstall)
     local rb = package.loaded['beamngEarth/rebase']

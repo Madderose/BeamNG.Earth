@@ -38,7 +38,7 @@ def run_single_test(test_file):
     # Parse test count from output
     count = 0
     for line in p.stderr.splitlines():
-        if line.startswith("Ran ") and " tests in " in line:
+        if line.startswith("Ran ") and (" tests in " in line or " test in " in line):
             try:
                 count = int(line.split()[1])
             except ValueError:
