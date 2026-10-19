@@ -10,44 +10,49 @@
 
 | Track | Domain | Focus Area | Assigned Agent | Status |
 | :--- | :--- | :--- | :--- | :--- |
-| **Track 1** | **IPC, Protocol & Serialization** | Zero-copy / binary streaming, JSON parsing elimination on GE Lua main thread, message batching & pose emission throttling | `task-2492` (Argon 4 High) | `RUNNING` |
-| **Track 2** | **Filesystem I/O & VFS Caching** | Eliminating C++ `ResourceManager` / `FileWatchers` stalls, RAM caching, atomic staging, asset slot recycling without disk re-reads | `task-2494` (Argon 4 High) | `RUNNING` |
-| **Track 3** | **Governor, GC & Frame Budgeting** | Time-sliced proactive GC, governor token bucket dynamics, decoupling tile deserialization from frame rendering, pose burst smoothing | Active Session | `ANALYZED / RESOLVED` |
-| **Track 4** | **Scene Graph, Collision & Rendering** | `be:reloadCollision()` debouncing, `DecalRoad` node regeneration batching, TSStatic pooling vs Forest, shadow cascade culling | `task-2496` (Argon 4 High) | `RUNNING` |
-| **Diag** | **Performance Capture 01-12-03** | Deep frame-by-frame correlation with beamng.log and engine hitches | `task-2327` (Argon 4 High) | `RUNNING` |
+| **Track 1** | **IPC, Protocol & Serialization** | Zero-copy / binary streaming, JSON parsing elimination on GE Lua main thread, message batching & pose emission throttling | `task-2492` (Argon 4 High) | **COMPLETED** |
+| **Track 2** | **Filesystem I/O & VFS Caching** | Eliminating C++ `ResourceManager` / `FileWatchers` stalls, RAM caching, atomic staging, asset slot recycling without disk re-reads | `task-2494` (Argon 4 High) | **COMPLETED** |
+| **Track 3** | **Governor, GC & Frame Budgeting** | Time-sliced proactive GC, governor token bucket dynamics, decoupling tile deserialization from frame rendering, pose burst smoothing | Active Session | **VALIDATED** |
+| **Track 4** | **Scene Graph, Collision & Rendering** | `be:reloadCollision()` debouncing, `DecalRoad` node regeneration batching, TSStatic pooling vs Forest, shadow cascade culling | `task-2496` (Argon 4 High) | **COMPLETED** |
+| **Diag** | **Performance Captures** | Frame-by-frame correlation across baseline (22-06-16), intermediate (01-12-03), and calibrated (01-26-50) captures | `task-2327`, `task-2506` | **COMPLETED** |
 
 ---
 
-## 2. Key Hypotheses & Areas for Scope Changes
+## 2. Key Audit Findings by Track
 
-1. **JSON Deserialization Overhead on Main Thread (Track 1):**
-   - Current: Every 0.20s, tile messages with hundreds of coordinates, properties, and arrays are decoded via pure Lua `jsonDecode`.
-   - Scope Change: Binary message packing (e.g. struct packing, typed arrays, msgpack) or micro-batched parsing to eliminate GC object churn.
+### Track 1: IPC, Protocol & Serialization ([`track1_ipc_protocol_audit.md`](file:///c:/Users/hoppj/SynologyDrive/01_Projets/Projet_BeamEarth/BeamNG.Earth/runs/optimization_logs/track1_ipc_protocol_audit.md))
+1. **Unbounded Pre-Governor JSON Deserialization:** `net.update()` reads all incoming TCP frames in an unbounded loop, and `core.lua` executes `onMessage` on all of them *before* `governor.beginFrame` starts. In dense sessions, an 8-tile burst allocates up to 72,100 Lua tables in a single frame, retaining over 370k tables in LuaJIT GC heap.
+2. **Synchronized 5 Hz Server Message Storm:** `sendPoseIfDue` triggers every 0.200s (27.6 frames at 138 FPS), causing `earthd` to simultaneously push road, vegetation, building, farfield, and sea updates within the same frame interval.
+3. **Quadratic String Copy in `Reassembler:pop()`:** `self.buf:sub(5 + n)` copies the entire buffer suffix on every popped message, generating ~19.6 MB of transient garbage during a 300-message burst.
+4. **Missing `TCP_NODELAY` on Server Socket:** Server socket in `earthd.py` does not enable `TCP_NODELAY`, introducing Nagle buffering delays on outgoing streaming packets.
 
-2. **Disk I/O and OS File Watcher Contention (Track 2):**
-   - Current: Every farfield shape (`.cdae`) and texture (`.dds`) is written to disk in `<userpath>/temp/beamngEarth/<sid>/`.
-   - Problem: BeamNG's Torque3D engine monitors `<userpath>` via Win32 `ReadDirectoryChangesW`. Even with Lua hooks, Torque3D's C++ `ResourceManager` triggers synchronous file checks on the render thread.
-   - Scope Change: In-memory slot recycling, custom VFS mount or isolating temp storage outside watched directories.
+### Track 2: Filesystem I/O & VFS Pipeline ([`track2_filesystem_vfs_audit.md`](file:///c:/Users/hoppj/SynologyDrive/01_Projets/Projet_BeamEarth/BeamNG.Earth/runs/optimization_logs/track2_filesystem_vfs_audit.md))
+1. **Why C++ `FileWatchers` Spikes (3.1–33.4 ms) Persist:** `hookFileWatchers()` in Lua only intercepts `_G.onFileChanged` (the final Lua dispatch). Prior to this, Torque3D's C++ directory watcher (Win32 `ReadDirectoryChangesW`) on `<userpath>` queries NTFS metadata on the main thread and triggers `ResourceManager::reloadResource` whenever pooled mesh slots (`slot_<n>.cdae`) are overwritten.
+2. **Severe Write Amplification in Watched Temp:** Master `.cdae` files are written directly into watched `self.out_dir`, then hardlinked/moved again as `slot_<n>.cdae`. Staging master meshes outside the watched folder eliminates 50% of `.cdae` writes and 100% of `.cdae` deletions in `<userpath>`.
+3. **Unused Disk Writes:** When `.ter` swapping is enabled, `make_heightmap` still unconditionally writes `hm_*.png` and 10 grayscale mask PNGs that the engine never loads.
+4. **Synchronous `fileExists` Syscalls:** `satmat.lua` and `farfield.lua` invoke multiple synchronous `FS:fileExists()` calls on the main thread per tile.
 
-3. **Governor and GC Co-Scheduling (Track 3):**
-   - Current: Incremental GC stepping ran independently of governor budgets and would either fall behind (causing 91ms stop-the-world spikes) or step too aggressively (causing 20ms frame drops).
-   - Scope Change: Adaptive GC stepping dynamically tied to governor idle frame margins, never exceeding 0.3ms wall clock.
+### Track 3: Governor, GC & Frame Budgeting ([`perfgraph_012650_analysis.md`](file:///c:/Users/hoppj/SynologyDrive/01_Projets/Projet_BeamEarth/BeamNG.Earth/runs/optimization_logs/perfgraph_012650_analysis.md))
+1. **The 1000 KB GC Trap:** Stepping 1000 KB (`collectgarbage('step', 1000)`) attempted to sweep 1 MB of small Lua tables in a single frame, costing 15–22.5 ms every 0.20s.
+2. **Calibrated 30 KB Stepping:** Reducing step size to 30 KB maintained smooth GC collection at ~3.9 MB/s, slashing Lua hitches by **>90%** (from 4.1/s to 0.39/s) and boosting average FPS to **147.2 FPS**.
 
-4. **Synchronous Collision & Road Rebuilding (Track 4):**
-   - Current: Road tile arrivals and building placements trigger `DecalRoad` regeneration and potential physics collision rebuilds.
-   - Scope Change: Asynchronous collision slicing, batched road mesh commits, and strict LOD distance clipping for shadow casters.
-
----
-
-## 3. Findings Log (Syndication)
-
-*(Findings from active agents will be appended here as they complete their investigations)*
-
-### Diag Agent & Capture Progress:
-- **`task-2327` (Diag Capture 01-12-03, Argon 4 High):** Dissected the 5 Hz rhythmic 20 ms GC hitches caused by `collectgarbage('step', 1000)` taking up to 22.5 ms per frame during 0.20s pose bursts. (Report: [`perfgraph_011203_analysis.md`](file:///c:/Users/hoppj/SynologyDrive/01_Projets/Projet_BeamEarth/BeamNG.Earth/runs/optimization_logs/perfgraph_011203_analysis.md)).
-- **`task-2506` (Diag Capture 01-26-50, Argon 4 Medium):** Evaluated the 30.7s drive after reducing GC step to 30KB. Confirmed average FPS leaped from **113.9 to 147.2 FPS (+29.3%)**, $p_{50}$ dropped to **6.67 ms**, and 95% of frames ran above **66 FPS**. Lua hitches collapsed by **>90%** (from 4.1/s down to 0.39/s). Remaining bottlenecks: Frame 667 `RenderShadows = 58.8 ms` (tile batch insertion into scene quadtree) and Frame 3801 `FileWatchers = 21.6 ms` (C++ `ResourceManager` scanning DDS writes). (Report: [`perfgraph_012650_analysis.md`](file:///c:/Users/hoppj/SynologyDrive/01_Projets/Projet_BeamEarth/BeamNG.Earth/runs/optimization_logs/perfgraph_012650_analysis.md)).
+### Track 4: Scene Graph, Collision & Rendering ([`track4_scenegraph_render_audit.md`](file:///c:/Users/hoppj/SynologyDrive/01_Projets/Projet_BeamEarth/BeamNG.Earth/runs/optimization_logs/track4_scenegraph_render_audit.md))
+1. **"Ghost Bridge" Vulnerability (P1-A):** In `roads.lua`, `RELOAD_DRIVE_MAX_S = 60` defers collision rebuilds while driving faster than 3 m/s. At 40–50 m/s, the car leaves its 600m collision bubble in 14s, leaving upcoming bridges, tunnels, and curbs completely intangible for the remaining 46 seconds!
+2. **Collision Isolation Spike (P1-B):** `roads.lua` calls `be:reloadCollision()` without registering quiet frames in `governor.lua`, causing 12–56 ms BVH swaps to collide with farfield tile imports.
+3. **Dead Road Chunks JSON Deserialization (P2-A):** Server still serializes 50–250 KB of `chunks` arrays in `roads_*.json` even when `road_mesh` (`.cdae`) is used, wasting main-thread parse time.
+4. **Shadow Cascade Quadtree Fragmentation (P3-A):** Farfield meshes, `bldfar` meshes, and outer-ring billboard vegetation leave shadow casting enabled, causing recurring 58.8 ms `RenderShadows` spikes during tile batch swaps.
 
 ---
 
-## 4. Synthesis & Action Plan
-*(To be populated following cross-agent analysis)*
+## 3. Prioritized Implementation Roadmap
+
+| Priority | Track | Item | Target File(s) | Expected Benefit |
+| :--- | :--- | :--- | :--- | :--- |
+| **P1** | Track 4 | **Fix "Ghost Bridge" collision deferral:** Replace 60s hard drive timer with distance-horizon trigger (250m ahead or >60% radius traveled). | `mod/beamng_earth/lua/ge/extensions/beamngEarth/roads.lua` | Eliminates falling through bridge decks and curbs at high speeds. |
+| **P1** | Track 4 | **Collision Governor Isolation Gate:** Enforce `gov.blocked = true` on collision reload frame and subsequent frame to protect physics BVH swaps. | `mod/beamng_earth/lua/ge/extensions/beamngEarth/roads.lua`, `core.lua` | Eliminates multi-subsystem compound collision hitches. |
+| **P2** | Track 1 | **Fix $O(M \cdot B)$ string buffer copy:** Replace `buf:sub(5 + n)` with integer read cursor in `Reassembler:pop()`. | `mod/beamng_earth/lua/ge/extensions/beamngEarth/framing.lua` | Eliminates ~20 MB of transient string garbage during message bursts. |
+| **P2** | Track 1 & 4 | **Omit Dead Road Chunks from JSON:** Only serialize `chunks` when `road_mesh` is not generated. | `server/roads.py`, `mod/.../roads.lua` | Saves 50–250 KB JSON parse per tile on main thread. |
+| **P2** | Track 4 | **Disable Shadow Casting on Farfield & Outer Meshes:** Set `castShadows = false` on farfield terrain tiles and distant building footprints. | `mod/.../farfield.lua`, `mod/.../trees.lua` | Eliminates 58.8 ms `RenderShadows` cascade re-indexing spikes. |
+| **P3** | Track 2 | **Isolate Staging from Watched Mod Path:** Write temporary master `.cdae` files to external directory outside `<userpath>/temp/`. | `server/staging.py`, `server/earthd.py` | Eliminates 50% of Torque3D `ReadDirectoryChangesW` / `FileWatchers` C++ stalls. |
+| **P3** | Track 2 | **Suppress Unused PNG Masks in `.ter` Mode:** Skip grayscale mask PNG writes when follow-block `.ter` swap is active. | `server/earthd.py`, `server/surface.py` | Eliminates 11 disk writes per terrain block transition. |
+| **P4** | Track 1 | **Time-Sliced Inbound IPC & Binary Vegetation:** Cap frame message processing at 0.5 ms and stream vegetation via compact binary records. | `mod/.../net.lua`, `mod/.../trees.lua`, `server/vegetation.py` | Eliminates 370k Lua table allocations and bounds network frame cost. |
