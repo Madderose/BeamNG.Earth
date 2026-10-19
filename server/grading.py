@@ -45,7 +45,7 @@ VERTEX_STEP = 4.0           # m between the plan's vertices (segments for the gr
                             # grading a 1 km block 0.06 -> 0.14 s)
 BUCKET = 32.0               # m, query-point buckets
 PAIR_BATCH = 2_000_000      # (segment, point) pairs graded at once (bounds the temporaries, ~200 MB)
-ROAD_LIFT = 0.04            # m the physics ground is raised under roads (see Grader.apply)
+ROAD_LIFT = 0.08            # m the physics ground is raised under roads (see Grader.apply)
 BLEND_R = 4.0               # m: roads near each other blend their targets by 1 / (1 + (d / BLEND_R)^2)
 PROFILE_ZOOM = 15           # DEM zoom of the profiles (one zoom for every caller)
 RETRY_S = 60.0              # s before a cell whose road data failed is asked for again
@@ -342,12 +342,22 @@ def grade_points(px, py, base, plans, lift=0.0):
 class GradedDem:
     """dem.Dem with sample() graded under the roads; everything else passes through."""
 
-    def __init__(self, dem, grader):
-        self._dem, self._grader = dem, grader
+    def __init__(self, dem, grader, lift=0.0):
+        self._dem = dem
+        self._grader = grader
+        self._lift = float(lift)
 
-    def sample(self, lat, lon, zoom, progress=None):
-        base = self._dem.sample(lat, lon, zoom, progress) if progress is not None else self._dem.sample(lat, lon, zoom)
-        return self._grader.apply(lat, lon, base)
+    def sample(self, lat, lon, zoom=None, progress=None):
+        if zoom is None:
+            base = self._dem.sample(lat, lon)
+        elif progress is not None:
+            base = self._dem.sample(lat, lon, zoom, progress)
+        else:
+            base = self._dem.sample(lat, lon, zoom)
+        return self._grader.apply(lat, lon, base, lift=self._lift)
+
+    def pinned(self, zoom):
+        return GradedDem(self._dem.pinned(zoom), self._grader, lift=self._lift)
 
     def __getattr__(self, name):
         return getattr(self._dem, name)

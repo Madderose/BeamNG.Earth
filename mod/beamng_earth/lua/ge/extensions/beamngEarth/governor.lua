@@ -48,7 +48,7 @@ M.EST_ALPHA = 0.2          -- cost EMA gain
 -- kept importing at full rate and every frame ran 100+ ms): each frame's engine tick beyond ENGINE_FREE_MS is a debt on
 -- the bucket (chargeEngine), at most ENGINE_MAX_DEBT_MS, so imports wait until the budget has paid for it.
 M.ENGINE_FREE_MS = 2.0
-M.ENGINE_MAX_DEBT_MS = 50.0
+M.ENGINE_MAX_DEBT_MS = 25.0
 -- Prior cost estimates (ms) per unit kind: in-game P5/P6 (2026-10-10): a 2k-tri .cdae first load
 -- 3.4 ms (8k-tri 1.5 ms; v1.2 drive EMA 1.93), a 2k-tri .dae 7.5-25 ms; unhide is free; setPosition
 -- ~0.006 ms (p6). v1.3 satellite imagery (lead probe p_sat.lua): a Lua-created per-tile Material
@@ -65,6 +65,9 @@ M.ENGINE_MAX_DEBT_MS = 50.0
 -- 'roadChunk' (roads.lua: one DecalRoad of <= 100 nodes, insertNodeNoRegen + regenerate) ~0.45 ms in
 -- probe P3; 'roadDelete' 0.02-0.04 ms (P3); 'roadWalk' (a road tile's sidewalk TSStatic, a .cdae like a far tile) ~3 ms, a guess.
 M.PRIOR = { cdae = 3.0, dae = 8.0, reveal = 0.05, delete = 0.3, cdaeTex = 3.0, material = 0.3, matDelete = 0.2, cdaeTex128 = 3.9, cdaeTex256 = 4.0, cdaeTex512 = 4.2, retex = 1.0, roadChunk = 0.5, roadDelete = 0.05, roadWalk = 3.0 }
+M.DELETE_BUDGET_MS = 0.5   -- dedicated per-frame delete budget (ms) independent of import tokens
+
+local DELETE_KINDS = { delete = true, matDelete = true, roadDelete = true }
 
 -- Unit kind of a textured .cdae import from its far_tile.tex (px): cdaeTex<px> for a size with a
 -- prior, else (FORMAT 3 tiles have no tex) 'cdaeTex'.
@@ -100,8 +103,11 @@ function M.new(opts)
     lastStart = nil,
     w1 = nil, w2 = nil, -- wall durations of the previous two frames
     prevHeavy = false,  -- the frame that just ended was heavy (its time is not part of base)
-    frameSpent = 0,     -- ms charged this frame (units + motion)
+    frameSpent = 0,     -- ms charged this frame (import/reveal units + motion)
+    delSpent = 0,       -- ms charged this frame for delete units
+    engineDebt = 0,     -- unpaid engine tick debt (ms) from chargeEngine
     frameUnits = 0,     -- units run this frame
+    units = 0,          -- alias for units run this frame
     lastStreamFrame = -huge, -- last frame a unit ran in
     heavyPending = false, heavySince = nil, heavyReqFrame = nil,
     heavyFrame = -huge, -- last frame that ran a heavy op
@@ -154,7 +160,7 @@ function Gov:beginFrame(hasWork, wallMs)
     self.w1, self.w2 = wallMs, self.w1
   end
   self.prevHeavy = false
-  self.frameSpent, self.frameUnits = 0, 0
+  self.frameSpent, self.delSpent, self.frameUnits, self.units = 0, 0, 0, 0
   -- a heavy request lives as long as the caller repeats it every frame
   if self.heavyPending and self.heavyReqFrame < self.frame - 1 then self.heavyPending = false end
 
@@ -162,7 +168,7 @@ function Gov:beginFrame(hasWork, wallMs)
   self.bPrev = self.b
   if self.quiet > 0 then
     self.quiet = self.quiet - 1
-    self.b, self.tokens, self.blocked = 0, 0, true
+    self.b, self.tokens, self.engineDebt, self.blocked = 0, 0, 0, true
     return
   end
   self.blocked = false
@@ -177,6 +183,7 @@ function Gov:beginFrame(hasWork, wallMs)
   else
     self.b = max(0, self.b - M.RAMP_DOWN_IDLE)
   end
+  self.engineDebt = max(0, (self.engineDebt or 0) - self.b)
   self.tokens = min(self.tokens + self.b, 2 * self:maxUnit())     -- (a debt stays: chargeEngine)
   -- no banking while idle or while a heavy op waits: the budget must really go down to zero
   if self.heavyPending or not hasWork then self.tokens = min(self.tokens, self.b) end
@@ -187,22 +194,34 @@ function Gov:try(kind)
   self.used[kind] = true
   if self.blocked or self.heavyFrame == self.frame then return false end
   local e = self.est[kind] or 1
-  if self.tokens < e then return false end
   if self.frameSpent + e > self.b + self:maxUnit() then return false end
+  if self.tokens < e then
+    if DELETE_KINDS[kind] and (self.engineDebt or 0) > 0 and not self.heavyPending and self.b > 0 then
+      return self.delSpent + min(e, M.DELETE_BUDGET_MS) <= M.DELETE_BUDGET_MS
+    end
+    return false
+  end
   return true
 end
 
 -- Charge a unit that ran (ms = its measured cost).
 function Gov:charge(kind, ms)
   ms = max(0, ms or 0)
-  self.tokens = self.tokens - ms
+  if DELETE_KINDS[kind] and (self.engineDebt or 0) > 0 then
+    local freeDel = max(0, M.DELETE_BUDGET_MS - self.delSpent)
+    self.delSpent = self.delSpent + ms
+    self.tokens = self.tokens - max(0, ms - freeDel)
+  else
+    self.tokens = self.tokens - ms
+  end
   self.frameSpent = self.frameSpent + ms
+  if self.frameSpent > self.stats.maxFrameSpent then self.stats.maxFrameSpent = self.frameSpent end
   self.frameUnits = self.frameUnits + 1
+  self.units = (self.units or 0) + 1
   self.lastStreamFrame = self.frame
   local e = self.est[kind] or ms
   self.est[kind] = max(0.005, e + M.EST_ALPHA * (ms - e))
   self.stats.units = self.stats.units + 1
-  if self.frameSpent > self.stats.maxFrameSpent then self.stats.maxFrameSpent = self.frameSpent end
 end
 
 -- The previous frame's engine tick (ms, Engine.Debug metrics "Ticking"): its excess is a debt on the bucket.
@@ -210,6 +229,7 @@ function Gov:chargeEngine(tickMs)
   local debt = max(0, (tickMs or 0) - M.ENGINE_FREE_MS)
   if debt <= 0 then return 0 end
   self.tokens = max(-M.ENGINE_MAX_DEBT_MS, self.tokens - debt)
+  self.engineDebt = min(M.ENGINE_MAX_DEBT_MS, (self.engineDebt or 0) + debt)
   self.stats.engineDebt = (self.stats.engineDebt or 0) + debt
   return debt
 end

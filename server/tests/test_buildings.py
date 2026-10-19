@@ -194,6 +194,27 @@ class PlanTest(unittest.TestCase):
         self.assertTrue(s.roof_mat.startswith(bld.ROOF_METAL))
         self.assertGreater(s.height, 5.0)
 
+    def test_l_shaped_or_wide_house_stays_flat_not_inflated_box(self):
+        # L-shaped house (box_fill = 0.75 < 0.90) keeps its true footprint via a flat roof
+        L = np.array([(0, 0), (12, 0), (12, 6), (6, 6), (6, 12), (0, 12)], np.float64)
+        s = bld.plan(L, {"class": "house"}, 0, 39.29, -76.61)
+        self.assertEqual(s.roof, "flat")
+        # Wide footprint (hw > 8.5 m) also stays flat for non-churches
+        wide = bld.plan(rect(0, 0, 24, 18), {"class": "house", "roof_shape": "gabled"}, 0, 39.29, -76.61)
+        self.assertEqual(wide.roof, "flat")
+        # Churches with hw > 8.5 m keep their gabled roof
+        church = bld.plan(rect(0, 0, 30, 20), {"class": "church"}, 0, 39.29, -76.61)
+        self.assertEqual(church.roof, "gabled")
+
+    def test_suburban_houses_and_retail_storeys(self):
+        houses = [bld.plan(rect(x * 30, 0, 10, 12), {"class": "house"}, 0, 39.29, -76.61) for x in range(100)]
+        one_share = sum(1 for h in houses if h.floors == 1) / len(houses)
+        self.assertGreater(one_share, 0.45, "more single-storey detached houses")
+        supermarket = bld.plan(rect(0, 0, 50, 40), {"class": "supermarket"}, 0, 39.29, -76.61)
+        self.assertEqual(supermarket.floors, 1)
+        strip_mall = [bld.plan(rect(x * 80, 0, 45, 20), {"class": "retail"}, 0, 39.29, -76.61) for x in range(20)]
+        self.assertTrue(all(m.floors == 1 for m in strip_mall))
+
     def test_deterministic(self):
         a = bld.plan(rect(3, 7, 12, 9), {"class": ""})
         b = bld.plan(rect(3, 7, 12, 9), {"class": ""})
@@ -352,6 +373,15 @@ class MeshTest(unittest.TestCase):
             spec, P = self.check_outward(rect(0, 0, 12, 8), {"class": "house", "roof_shape": shape})
             self.assertEqual(spec.roof, shape)
             self.assertGreater(P[:, 2].max(), spec.height + 1.5, "a ridge above the eaves")
+
+    def test_roof_rise_capped_and_hillside_base_anchored(self):
+        # Steep European roof on a 16 m wide house (hw = 8.0 m, pitch 42 deg -> raw rise ~7.5 m, capped to 4.2 m)
+        spec = bld.plan(rect(0, 0, 20, 16), {"class": "house", "roof_shape": "gabled"}, 0, 52.37, 4.90)
+        self.assertEqual(spec.roof, "gabled")
+        P, *_ = bld.build([(spec, 10.0, 15.0)])     # hillside: gmin=10, gmax=15 -> g_base=11.5
+        z_eave = 11.5 + spec.height
+        self.assertLessEqual(P[:, 2].max(), z_eave + 4.2 + 0.01)
+        self.assertGreater(P[:, 2].max(), z_eave + 3.5)
 
 
 class DoorTest(unittest.TestCase):

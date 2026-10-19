@@ -343,7 +343,7 @@ function M.onTile(msg, currentAnchor)
     colliders = type(data.colliders) == 'table' and data.colliders or {}, slots = slots }
   sinceChange = stopwatch.new()
   if road then                -- the tile's road mesh replaces its DecalRoads (server/roadmesh.py)
-    walkQ[#walkQ + 1] = { key = key, walk = road, what = 'road' }
+    table.insert(walkQ, 1, { key = key, walk = road, what = 'road' })
   else
     for _, c in ipairs(data.chunks) do createQ[#createQ + 1] = { key = key, chunk = c } end
   end
@@ -586,8 +586,13 @@ function M.update(gov, currentAnchor, player)
   end
   releaseHeld()
   updateCollideRange()
-  while #walkQ > 0 and gov:try('roadWalk') do
-    local q = table.remove(walkQ, 1)
+  while #walkQ > 0 do
+    local q = walkQ[1]
+    local isUrgentRoad = q.what == 'road' or q.what == 'deck' or q.what == 'tunnel'
+    local urgentAllow = isUrgentRoad and gov.frameUnits == 0 and not gov.blocked and not gov.heavyPending
+      and gov.heavyFrame ~= gov.frame and (gov.b or 0) > 0
+    if not (gov:try('roadWalk') or urgentAllow) then break end
+    table.remove(walkQ, 1)
     local t = tiles[q.key]
     -- (only a colliding mesh waits: a render-only one (q.renderOnly: the drawn sidewalks and buildings beside their lean
     -- collision meshes) cannot catch the car, and holding it hid a whole tile's sidewalks while the car stood in their
@@ -618,7 +623,7 @@ function M.update(gov, currentAnchor, player)
     noteNewColliders()
     be:reloadCollision()
     collisionDirty, deletesDirty, sinceReload = false, false, stopwatch.new()
-    gov:charge('roadWalk', now() - t0)
+    if gov.chargeEngine then gov:chargeEngine(now() - t0) end
   end
 end
 

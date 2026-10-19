@@ -333,6 +333,22 @@ end
 function M.onRows(anchorId, tileKey, rows, groups)
   local key = anchorId .. ':' .. tostring(tileKey)
   local old = tiles[key]
+  if old and old.rows ~= rows then
+    local hadSolid = next(old.solid) ~= nil
+    if next(old.made) then
+      local f = old.forestId and scenetree.findObjectById(old.forestId)
+      local fd = f and f:getData()
+      for i, it in pairs(old.made) do
+        if fd then removeItem(fd, it, old.madeShape[i]) end
+      end
+      old.made, old.solid, old.madeShape, old.shown, old.band, old.near = {}, {}, {}, 0, nil, nil
+    end
+    releaseForest(old)
+    if hadSolid then
+      local ok, roads = pcall(require, 'beamngEarth/roads')
+      if ok and roads.requestCollision then roads.requestCollision() end
+    end
+  end
   local tx, ty = tostring(tileKey):match('(%-?%d+)_(%-?%d+)$')
   local t = { anchor = anchorId, rows = rows, groups = type(groups) == 'table' and groups or nil,
     made = old and old.made or {}, solid = old and old.solid or {}, near = old and old.near,
@@ -365,7 +381,7 @@ end
 -- after it changes.
 M.suppress = nil
 function M.refresh()
-  for _, t in pairs(tiles) do t.pending = true end
+  for _, t in pairs(tiles) do t.pending, t.nextRow = true, nil end
 end
 
 -- Which of the capped groups a tile at distance d still shows (changes re-run its rows).
@@ -403,7 +419,7 @@ function M.transform(xf, geodesy)
       if f then f:setPosRot(ox, oy, oz, x, y, z, w) end
       t.cx, t.cy = xf:apply(t.cx, t.cy, 0)
       t.ghost = true
-      t.pending = false
+      t.pending, t.nextRow = false, nil
       any = true
     end
   end
@@ -461,101 +477,185 @@ function M.update(anchorId, player)
   M.lastShapeItems = touchedItems        -- the previous frame's (diagnostics)
   touched, touchedItems = {}, 0
   releaseGhosts(anchorId, player)
-  for key, t in pairs(tiles) do
-    if (t.anchor ~= anchorId and not t.ghost) or t.drop then
-      local f = t.forestId and scenetree.findObjectById(t.forestId)
-      local fd = f and f:getData()
-      local left = false
-      for i, it in pairs(t.made) do
-        if budget <= 0 then return end
-        local sh = t.madeShape[i]
-        if not sh or allow(sh) then
-          if fd then removeItem(fd, it, sh) end
-          t.made[i], t.solid[i], t.madeShape[i] = nil, nil, nil
-          budget = budget - 1
-        else left = true end
-      end
-      if not left then
-        releaseForest(t)
-        tiles[key] = nil
-      end
-    end
-  end
-  if not player then return end
-  -- nearest tiles first
-  local order = {}
-  for key, t in pairs(tiles) do
-    if t.anchor ~= anchorId or t.drop then goto continue end     -- still being emptied
-    local dx = math.max(math.abs(player.x - t.cx) - 128, 0)
-    local dy = math.max(math.abs(player.y - t.cy) - 128, 0)
-    order[#order + 1] = { key, math.sqrt(dx * dx + dy * dy) }
-    ::continue::
-  end
-  table.sort(order, function(a, b) return a[2] < b[2] end)
   local nearMade = false
-  local rowsScanned = 0
   local function finish()
     if nearMade then
       local ok, roads = pcall(require, 'beamngEarth/roads')
       if ok and roads.requestCollision then roads.requestCollision() end
     end
   end
+  local function drainDrops(limit)
+    while limit > 0 and budget > 0 do
+      local drops = {}
+      for key, t in pairs(tiles) do
+        if (t.anchor ~= anchorId and not t.ghost) or t.drop then
+          if next(t.made) == nil then
+            releaseForest(t)
+            tiles[key] = nil
+          else
+            drops[#drops + 1] = { key = key, t = t, solid = next(t.solid) ~= nil }
+          end
+        end
+      end
+      if #drops == 0 then return end
+      table.sort(drops, function(a, b)
+        if a.solid ~= b.solid then return a.solid end
+        return tostring(a.key) < tostring(b.key)
+      end)
+      local perTile = math.max(math.ceil(limit / #drops), 64)
+      local progressed = false
+      for _, d in ipairs(drops) do
+        local key, t = d.key, d.t
+        local f = t.forestId and scenetree.findObjectById(t.forestId)
+        local fd = f and f:getData()
+        local tileLimit = perTile
+        for i, it in pairs(t.made) do
+          if tileLimit <= 0 or limit <= 0 or budget <= 0 then break end
+          local sh = t.madeShape[i]
+          if not sh or allow(sh) then
+            if fd then removeItem(fd, it, sh) end
+            if t.solid[i] then nearMade = true end
+            t.made[i], t.solid[i], t.madeShape[i] = nil, nil, nil
+            tileLimit = tileLimit - 1
+            limit = limit - 1
+            budget = budget - 1
+            progressed = true
+          end
+        end
+        if next(t.made) == nil then
+          releaseForest(t)
+          tiles[key] = nil
+        end
+        if limit <= 0 or budget <= 0 then break end
+      end
+      if not progressed then break end
+    end
+  end
+  -- Reserve half the budget when player tiles may need updates; any unused budget drains drops after.
+  drainDrops(player and math.ceil(budget * 0.5) or budget)
+  if not player then finish(); return end
+  -- Tiles needing work: solid demotions (> SOLID_M + SOLID_HYST_M) first so colliding trees never accumulate behind
+  -- the car, then near tiles (<= RINGS[1]), then receding tiles being thinned (shedding bushes/trees keeps pop[sh]
+  -- low), then distant fills; nearest first within each tier.
+  local order = {}
+  local nearRing = M.RINGS[1] and M.RINGS[1][1] or 300
+  for key, t in pairs(tiles) do
+    if t.anchor ~= anchorId or t.drop then goto continue end     -- still being emptied
+    local dx = math.max(math.abs(player.x - t.cx) - 128, 0)
+    local dy = math.max(math.abs(player.y - t.cy) - 128, 0)
+    local dist = math.sqrt(dx * dx + dy * dy)
+    local want = threshold(dist)
+    local band = groupBand(t, dist)
+    local near = dist <= M.SOLID_M or (t.near and dist <= M.SOLID_M + M.SOLID_HYST_M) or false
+    local demote = (t.near or next(t.solid) ~= nil) and not near
+    if want ~= t.shown or band ~= t.band or near ~= t.near or demote or t.pending then
+      local prio = 3
+      if demote then
+        prio = 0
+      elseif dist <= nearRing then
+        prio = 1
+      elseif want < (t.shown or 0) or (t.band and band < t.band) or t.thinning then
+        prio = 2
+      end
+      order[#order + 1] = { key, dist, prio, want, band, near, demote }
+    end
+    ::continue::
+  end
+  table.sort(order, function(a, b)
+    if a[3] ~= b[3] then return a[3] < b[3] end
+    return a[2] < b[2]
+  end)
+  local rowsScanned = 0
   for _, o in ipairs(order) do
     local t = tiles[o[1]]
-    local fd = nil                          -- the tile's Forest data, made when it first needs an item
-    local function data() fd = fd or forest(t):getData(); return fd end
-    local want = threshold(o[2])
-    local band = groupBand(t, o[2])
-    local near = o[2] <= M.SOLID_M or (t.near and o[2] <= M.SOLID_M + M.SOLID_HYST_M) or false
-    if want ~= t.shown or band ~= t.band or near ~= t.near or t.pending then
+    local dist, want, band, near, demote = o[2], o[4], o[5], o[6], o[7]
+    if want ~= t.shown or band ~= t.band or near ~= t.near or demote or t.pending then
+      if (not demote and rowsScanned > M.ROWS_PER_FRAME) or budget <= 0 then break end
+      local sameTarget = (want == t.shown and band == t.band and near == t.near)
+      local wasThinning = want < (t.shown or 0) or (t.band and band < t.band) or (sameTarget and t.thinning)
+      local startRow = (sameTarget and t.pending and t.nextRow) or 1
+      local nextPending = nil
       t.pending = false
-      if rowsScanned > M.ROWS_PER_FRAME then finish(); return end
-      rowsScanned = rowsScanned + #t.rows
-      for i, row in ipairs(t.rows) do
+      local fd = nil                          -- the tile's Forest data, made when it first needs an item
+      local function data() fd = fd or forest(t):getData(); return fd end
+      for i = startRow, #t.rows do
+        rowsScanned = rowsScanned + 1
+        local row = t.rows[i]
         local r = row[8] or 0
         local g = (t.groups or GROUPS)[(row[1] or 0) + 1]
         local cap = g and M.GROUP_MAX_M[g]
-        if cap and o[2] > cap then r = 2 end     -- this group is not shown this far out
+        if cap and dist > cap then r = 2 end     -- this group is not shown this far out
         -- an item something else stands in for (navgraph.lua's switchable signal heads)
         if g and M.suppress and M.suppress(g, row[2], row[3]) then r = 2 end
         local solid = near and not M.NO_COLLIDE[g or '']
         if r < want and (not t.made[i] or (t.solid[i] == true) ~= solid) then
           local sh, sc = shapeOf(t, i, row)
-          if budget <= 0 then t.pending = true; finish(); return end
-          if allow(sh) then
-            if t.made[i] then removeItem(data(), t.made[i], t.madeShape[i]); budget = budget - 1 end  -- solid <-> not
+          if budget <= 0 then
+            if not nextPending then nextPending = i end
+            t.pending = true
+            break
+          end
+          if (t.solid[i] and not solid) or allow(sh) then
+            local wasSolid = t.solid[i]
+            if t.made[i] then removeItem(data(), t.made[i], t.madeShape[i]) end  -- solid <-> not
             t.made[i] = makeItem(data(), row, sh, sc, solid)
             t.solid[i] = (t.made[i] and solid) or nil      -- true or nil
             t.madeShape[i] = t.made[i] and sh or nil
-            if solid then nearMade = true end
+            if solid or wasSolid then nearMade = true end
             budget = budget - 1
-          else t.pending = true end                -- another frame (this one's shapes are full)
+          else
+            if not nextPending then nextPending = i end
+            t.pending = true                               -- another frame (this one's shapes are full)
+          end
         elseif r >= want and t.made[i] then
-          if budget <= 0 then t.pending = true; finish(); return end
-          if allow(t.madeShape[i] or '') then
+          if budget <= 0 then
+            if not nextPending then nextPending = i end
+            t.pending = true
+            break
+          end
+          if t.solid[i] or allow(t.madeShape[i] or '') then
             removeItem(data(), t.made[i], t.madeShape[i])
+            if t.solid[i] then nearMade = true end
             t.made[i], t.solid[i], t.madeShape[i] = nil, nil, nil
             budget = budget - 1
-          else t.pending = true end
+          else
+            if not nextPending then nextPending = i end
+            t.pending = true
+          end
         end
       end
+      if not near and next(t.solid) ~= nil and not t.pending then
+        t.pending = true
+        nextPending = 1
+      end
+      if next(t.made) == nil then releaseForest(t) end
+      t.nextRow = t.pending and nextPending or nil
+      t.thinning = (t.pending and wasThinning) or nil
       t.shown = want
       t.band = band
       t.near = near
     end
   end
+  if budget > 0 then drainDrops(budget) end
   finish()
 end
 
 -- Disconnect, a new server session, mod unload: every item removed.
 function M.clear()
+  local hadSolid = false
   for _, t in pairs(tiles) do
+    if next(t.solid) ~= nil then hadSolid = true end
     local f = t.forestId and scenetree.findObjectById(t.forestId)
     local fd = f and f:getData()
     for i, it in pairs(t.made) do if fd then removeItem(fd, it, t.madeShape[i]) end end
     releaseForest(t)
   end
   tiles = {}
+  pop = {}
+  if hadSolid then
+    local ok, roads = pcall(require, 'beamngEarth/roads')
+    if ok and roads.requestCollision then roads.requestCollision() end
+  end
 end
 
 -- Level end: the level deletes its objects itself.

@@ -1,0 +1,101 @@
+{
+ "label": null,
+ "visual": false,
+ "polls": 29,
+ "frames": 1715,
+ "harnessFrames": 29,
+ "droppedFrames": 0,
+ "km": 1.0,
+ "wallS": 28.7,
+ "nominalSpeed": 35.8,
+ "nominalKm": 1.0,
+ "nominalS": 27.9,
+ "effectiveSpeed": 34.84,
+ "effectiveRatio": 0.973,
+ "meanPoseSpeed": 35.48,
+ "physicsSpeedRatio": 1.0012,
+ "physicsSpeedMean": 35.84,
+ "reason": "end",
+ "error": null,
+ "falls": 0,
+ "resets": 0,
+ "rebases": 0,
+ "headingResyncs": 17,
+ "fpsMean": 61.3,
+ "p50": 12.94,
+ "p95": 37.72,
+ "p99": 48.06,
+ "maxMs": 105.75,
+ "over50": 12,
+ "over50Steady": 12,
+ "maxSteadyMs": 105.75,
+ "commitFrames": 3,
+ "commitFrameMs": [
+  45.9,
+  23.3,
+  21.3
+ ],
+ "commitFrameMaxMs": 45.9,
+ "rebaseFrameMs": [],
+ "rebaseFrameMaxMs": null,
+ "followCommitMs": [
+  8.6,
+  8.8,
+  7.1
+ ],
+ "exactMissFrames": 0,
+ "exactMissPct": 0.0,
+ "exactMissFramesOutsideRebase": 0,
+ "underLevels": {
+  "-1": 1715
+ },
+ "queuedMax": 579,
+ "waitingGroupsMax": 518,
+ "liveMax": 84,
+ "objectsMax": 558,
+ "backlogMax": 0,
+ "backlogSamples": 29,
+ "backlogSlopePerMin": 0.0,
+ "cells": 64,
+ "estCdaeTexKind": "estCdaeTex256",
+ "estCdaeTexFirstQ": 7.72,
+ "estCdaeTexLastQ": 8.39,
+ "estCdaeTexRatio": 1.086,
+ "estTexByKind": {
+  "estCdaeTex": {
+   "firstQ": 3,
+   "lastQ": 3,
+   "ratio": 1.0
+  },
+  "estCdaeTex128": {
+   "firstQ": 5.49,
+   "lastQ": 5.49,
+   "ratio": 1.0
+  },
+  "estCdaeTex256": {
+   "firstQ": 7.72,
+   "lastQ": 8.39,
+   "ratio": 1.086
+  },
+  "estCdaeTex512": {
+   "firstQ": 7.18,
+   "lastQ": 7.18,
+   "ratio": 1.0
+  }
+ },
+ "govCapLast": null,
+ "govTargetMax": 2,
+ "govBaseELast": 10.921399999876,
+ "reloads": [],
+ "pops": 0,
+ "failed": 0,
+ "materials": 974,
+ "liveEnd": 84,
+ "fails": [],
+ "pass": true,
+ "hitch_causes": "unavailable: module 'os' has no attribute 'sysconf'",
+ "p0": {
+  "speedWithin2pct": true,
+  "noResets": true
+ }
+}

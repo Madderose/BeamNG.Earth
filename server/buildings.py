@@ -450,17 +450,19 @@ def plan(ring, attrs, neighbours=0, lat=None, lon=None, look=None, town=False, d
             # Bishop's and Moab's photos (2026-10-14): one-storey shops with false fronts, ranch houses
             nf = 1 if seed < WEST_TOWN_ONE_STOREY else 2
         elif cls in HOUSE_CLASSES or (area < 220 and not shop):
-            nf = 1 if seed < 0.3 else 2
+            nf = 1 if (cls == "bungalow" or seed < 0.55) else 2
         elif industrial:
             nf = 2 if area > 6000 else 1
         elif cls == "apartments":
             nf = 3 + int(seed * 3)
+        elif cls in ("retail", "supermarket") or (shop and not dense and area >= 350):
+            nf = 1 if (area >= 600 or seed < 0.8) else 2
         elif town:
             nf = 1 if seed < 0.6 else 2                 # small towns: mostly single-storey shops and offices
         elif area < 900:
-            nf = 2 + int(seed * 2)
+            nf = 1 if (not dense and seed < 0.5) else (2 + int(seed * 2))
         else:
-            nf = 2 + int(seed * 3)
+            nf = 1 if (not dense and seed < 0.65) else (2 + int(seed * 3))
     roof_given = (attrs.get("roof_shape") or "").lower()
     if roof_given in ("gabled", "hipped", "flat"):
         roof = roof_given
@@ -490,8 +492,8 @@ def plan(ring, attrs, neighbours=0, lat=None, lon=None, look=None, town=False, d
         else:
             roof = "flat"
     # pitched roofs only on near-rectangular footprints (a church's nave keeps its gable beside a tower or an apse)
-    if roof != "flat" and (box_fill < (0.6 if church else 0.8) or hw < 2.0
-                           or hw > (18.0 if barn else 20.0 if church else 14.0)):
+    if roof != "flat" and (box_fill < (0.6 if church else 0.90) or hw < 2.0
+                           or hw > (12.0 if barn else 20.0 if church else 8.5)):
         roof = "flat"
     # a city tower's ground floor is shops or a lobby (Midtown, 2026-10-14: most towers have no class, and their
     # curtain wall came down to the pavement)
@@ -508,7 +510,7 @@ def plan(ring, attrs, neighbours=0, lat=None, lon=None, look=None, town=False, d
         if attrs.get("roof_height") and np.isfinite(attrs["roof_height"]) and roof != "flat":
             h = max(2.5, h - float(attrs["roof_height"]))
         elif roof != "flat":
-            h = max(2.5, h - hw * math.tan(math.radians(style.pitch or PITCH[roof])))
+            h = max(2.5, h - min(hw * math.tan(math.radians(style.pitch or PITCH[roof])), 6.5 if church else 4.2))
         if nf is None:
             # a church: one tall storey (Cluj's St. Michael's, 25 m, came out as three 8 m floors)
             nf = 1 if church else max(1, int(round(h / floor_h)))
@@ -979,8 +981,10 @@ def _roof(m, spec, ring, z_eave, mat_idx):
     c, u, hl, hw = oriented_box(ring)
     v = np.array([-u[1], u[0]])
     hl2, hw2 = hl + EAVE_M, hw + EAVE_M
-    rise = hw2 * math.tan(math.radians(roof_pitch(spec)))
-    ze = z_eave - EAVE_M * math.tan(math.radians(roof_pitch(spec)))
+    raw_rise = hw2 * math.tan(math.radians(roof_pitch(spec)))
+    max_rise = 6.5 if spec.cls in CHURCH_CLASSES else 4.2
+    rise = min(raw_rise, max_rise)
+    ze = z_eave - EAVE_M * (rise / hw2)
     zr = ze + rise
 
     def at(s, t, z):
@@ -1024,21 +1028,30 @@ MAX_MESH_VERTS = 60000
 
 def build_parts(specs_and_ground, lite=False, max_verts=MAX_MESH_VERTS):
     """build() split into meshes of at most max_verts vertices each (whole buildings per mesh): a list, [] if empty."""
-    parts, cur, n = [], [], 0
+    parts = []
+    m = Mesh()
     for item in specs_and_ground:
-        one = build([item], lite)
-        k = 0 if one is None else len(one[0])
-        if cur and n + k > max_verts:
-            mesh = build(cur, lite)
-            if mesh is not None:
-                parts.append(mesh)
-            cur, n = [], 0
-        cur.append(item)
-        n += k
-    if cur:
-        mesh = build(cur, lite)
-        if mesh is not None:
-            parts.append(mesh)
+        b = Mesh()
+        _build_one(b, *item, lite)
+        if b.n == 0:
+            continue
+        if m.n > 0 and m.n + b.n > max_verts:
+            P, UV, T, M, C = m.arrays()
+            parts.append((P, UV, T, M, MATERIALS, C))
+            m = b
+        elif m.n == 0:
+            m = b
+        else:
+            i = m.n
+            m.P += b.P
+            m.UV += b.UV
+            m.C += b.C
+            m.T += [(i + a, i + b_, i + c) for a, b_, c in b.T]
+            m.M += b.M
+            m.n += b.n
+    if m.n > 0:
+        P, UV, T, M, C = m.arrays()
+        parts.append((P, UV, T, M, MATERIALS, C))
     return parts
 
 
@@ -1187,43 +1200,48 @@ def _parking_deck(m, spec, gmin, gmax, mat_idx):
     return True
 
 
+def _build_one(m, spec, gmin, gmax, lite=False):
+    mat_idx = _Looks(spec.seed)
+    ring = spec.ring
+    if spec.roof != "flat":
+        c, u, hl, hw = oriented_box(ring)
+        v = np.array([-u[1], u[0]])
+        ring = np.array([c - u * hl - v * hw, c + u * hl - v * hw, c + u * hl + v * hw, c - u * hl + v * hw])
+    mh = spec.min_h or 0.0
+    if spec.deck and not lite and _parking_deck(m, spec, gmin, gmax, mat_idx):
+        return
+    g_base = min(gmax, gmin + 1.5)
+    z0 = gmin - FOUNDATION_M if mh <= 0.5 else gmax + mh
+    z_eave = (g_base if mh <= 0.5 else gmax) + mh + spec.height
+    _walls(m, spec, ring, z0, z_eave, mat_idx, lite)
+    if mh > 0.5:                                  # a part standing on another / over a street: its underside
+        m.poly([(p[0], p[1], z0) for p in ring[::-1]], [(0.002, 0.995)] * len(ring), mat_idx[spec.facade])
+    _roof(m, spec, ring, z_eave, mat_idx)
+    if spec.roof == "flat" and not spec.plain and spec.floors <= 6 and not lite:
+        _cornice(m, spec, ring, z_eave, mat_idx)
+    if not lite:
+        _clutter(m, spec, ring, z_eave, mat_idx)
+    if spec.steeple:
+        _steeple(m, spec, z_eave, mat_idx)
+    if spec.stoop and not lite:
+        _stoop(m, spec, ring, g_base, mat_idx)
+    if spec.porch and spec.door and not lite:
+        _porch(m, spec, g_base, mat_idx)
+    if spec.sign is not None and spec.roof == "flat" and not lite:
+        if spec.windows is False:           # a big box: over its storefront band (_plain_wall_with_windows)
+            z_top = min(g_base + GROUND_FLOOR_SHOP_M + 1.15, z_eave)
+        else:
+            z_top = z_eave - (spec.floors - 1) * spec.floor_h if spec.floors > 1 else z_eave
+        _signs(m, spec, ring, z_top, mat_idx)
+
+
 def build(specs_and_ground, lite=False):
     """The tile's mesh from [(Spec, ground z min, ground z max)] with rings in the tile's local frame:
     (positions, uvs, tris, tri material indices, MATERIALS) or None if empty. lite (far tiles): no
     cornices, whole walls instead of one quad per bay."""
     m = Mesh()
     for spec, gmin, gmax in specs_and_ground:
-        mat_idx = _Looks(spec.seed)
-        ring = spec.ring
-        if spec.roof != "flat":
-            c, u, hl, hw = oriented_box(ring)
-            v = np.array([-u[1], u[0]])
-            ring = np.array([c - u * hl - v * hw, c + u * hl - v * hw, c + u * hl + v * hw, c - u * hl + v * hw])
-        mh = spec.min_h or 0.0
-        if spec.deck and not lite and _parking_deck(m, spec, gmin, gmax, mat_idx):
-            continue
-        z0 = gmin - FOUNDATION_M if mh <= 0.5 else gmax + mh
-        z_eave = gmax + mh + spec.height
-        _walls(m, spec, ring, z0, z_eave, mat_idx, lite)
-        if mh > 0.5:                                  # a part standing on another / over a street: its underside
-            m.poly([(p[0], p[1], z0) for p in ring[::-1]], [(0.002, 0.995)] * len(ring), mat_idx[spec.facade])
-        _roof(m, spec, ring, z_eave, mat_idx)
-        if spec.roof == "flat" and not spec.plain and spec.floors <= 6 and not lite:
-            _cornice(m, spec, ring, z_eave, mat_idx)
-        if not lite:
-            _clutter(m, spec, ring, z_eave, mat_idx)
-        if spec.steeple:
-            _steeple(m, spec, z_eave, mat_idx)
-        if spec.stoop and not lite:
-            _stoop(m, spec, ring, gmax, mat_idx)
-        if spec.porch and spec.door and not lite:
-            _porch(m, spec, gmax, mat_idx)
-        if spec.sign is not None and spec.roof == "flat" and not lite:
-            if spec.windows is False:           # a big box: over its storefront band (_plain_wall_with_windows)
-                z_top = min(gmax + GROUND_FLOOR_SHOP_M + 1.15, z_eave)
-            else:
-                z_top = z_eave - (spec.floors - 1) * spec.floor_h if spec.floors > 1 else z_eave
-            _signs(m, spec, ring, z_top, mat_idx)
+        _build_one(m, spec, gmin, gmax, lite)
     if m.n == 0:
         return None
     P, UV, T, M, C = m.arrays()
@@ -1250,8 +1268,9 @@ def collision_mesh(specs_and_ground):
         if _area2(ring) < 0:
             ring = ring[::-1]
         mh = spec.min_h or 0.0
+        g_base = min(gmax, gmin + 1.5)
         z0 = gmin - FOUNDATION_M if mh <= 0.5 else gmax + mh
-        z1 = gmax + mh + spec.height
+        z1 = (g_base if mh <= 0.5 else gmax) + mh + spec.height
         for i in range(len(ring)):
             a, b = ring[i], ring[(i + 1) % len(ring)]
             m.quad((a[0], a[1], z0), (b[0], b[1], z0), (b[0], b[1], z1), (a[0], a[1], z1), zero, zero, zero, zero, tok)
@@ -1693,14 +1712,15 @@ def doors(items, lines, x0, y0, drives=None):
         if best is None:
             continue
         _, a, d, Le, out, edge, on_main, kseg = best
+        g_base = min(gmax, gmin + 1.5)
         if spec.windows is False:
             spec.front = edge                   # a big box: its storefront faces the road
             if storefront:
                 spec.sign = edge
-            rows.extend(_wall_sign(spec, a, d, Le, out, gmax))
+            rows.extend(_wall_sign(spec, a, d, Le, out, g_base))
             continue
         if spec.cls in RESTAURANT_CLASSES and spec.floors == 1:
-            rows.extend(_wall_sign(spec, a, d, Le, out, gmax))
+            rows.extend(_wall_sign(spec, a, d, Le, out, g_base))
         if spec.shop:
             if storefront and not spec.wall:
                 spec.sign = edge                # the sign band over the street wall's shopfront
@@ -1737,7 +1757,7 @@ def doors(items, lines, x0, y0, drives=None):
             rows.extend(_front_fence(spec, a, d, Le, f, A[kseg], D[kseg], L2[kseg], SHALF[kseg], gmin,
                                      drives is not None and spec.wall and Le >= 7.0))
         p = a + d * (Le * f) + out * 0.03
-        base = gmax + (STOOP_H if spec.stoop else 0.0) + (PORCH_DECK_M if spec.porch else 0.0)   # (the deck / stoop)
+        base = g_base + (STOOP_H if spec.stoop else 0.0) + (PORCH_DECK_M if spec.porch else 0.0)   # (the deck / stoop)
         rows.append([G_DOOR, round(float(p[0]), 2), round(float(p[1]), 2), round(base, 2),
                      round(math.degrees(math.atan2(d[1], d[0])) % 360.0, 1), 1.0, 2.2,
                      round(_hash01(spec.seed, "dv"), 3)])

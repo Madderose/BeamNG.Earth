@@ -43,7 +43,7 @@ OVERLAP = 2.0           # m a road reaches past its tile's edge (no gap at tile 
 SIMPLIFY_M = 0.25       # RDP tolerance (Road Spline's layerMgr)
 MAX_NODES = 100         # nodes per DecalRoad (Road Spline's chunk size)
 MAX_SPACING = 12.0      # m between nodes at most (official maps: median 11-12 m)
-BUILD_PER_POSE = 4      # tiles started per pose at most
+BUILD_PER_POSE = 8      # tiles started per pose at most
 
 # class -> (width m, paved by default). Classes not here (footway, path, steps, cycleway, ...) are
 # left out for now.
@@ -1760,12 +1760,16 @@ def build_tile(frame, tx, ty, cells, elev, urban_fn=None, walks=None, bridges=No
             if specs[i] is None or str(feats.ids[i]) in seen:
                 continue
             seen[str(feats.ids[i])] = (feats, i, specs[i])
+    cbox = (near[0] - 16.0, near[1] - 16.0, near[2] + 16.0, near[3] + 16.0)
     rings = []                                  # (fid, spec, lon/lat ring) near the tile (xy at h = 0)
     for fid in sorted(seen):
         feats, i, spec = seen[fid]
         for ring in ground_parts(feats, i):
             e, n = mapgeom.enu_xy(feats, frame, ring)
             if (e.max() < near[0] or e.min() > near[2] or n.max() < near[1] or n.min() > near[3]):
+                continue
+            if (e.min() < cbox[0] or e.max() > cbox[2] or n.min() < cbox[1] or n.max() > cbox[3]) \
+                    and not clip_polyline(np.column_stack([e, n]), *cbox):
                 continue
             rings.append((fid, spec, ring))
     roads = []                                  # (fid, spec, centreline (k, 3), lon) near the tile
@@ -1932,7 +1936,7 @@ class Tracker:
         if self.pool is not None:
             self.pool.shutdown(wait=False, cancel_futures=True)
 
-    def on_pose(self, conn, aid, x, y, loop, build):
+    def on_pose(self, conn, aid, x, y, loop, build, vx=0.0, vy=0.0):
         """Called with the player's position in the active anchor's frame. build(aid, tx, ty) runs in a
         worker and returns the tile's (path, n) or None; its result is announced with conn.send."""
         if aid != self.aid:
@@ -1942,13 +1946,32 @@ class Tracker:
         if self.pool is None:
             from concurrent.futures import ThreadPoolExecutor
             self.pool = ThreadPoolExecutor(BUILD_PER_POSE, thread_name_prefix="roads-tile")
-        want = [k for k in tiles_near(x, y, SEND_M) if k not in self.sent and k not in self.building]
-        want.sort(key=lambda k: tile_distance(k[0], k[1], x, y))
+        speed = math.hypot(vx, vy)
+        want_set = set(tiles_near(x, y, SEND_M))
+        if speed > 5.0:
+            ux, uy = vx / speed, vy / speed
+            lead = min(384.0, speed * 8.0)
+            want_set.update(tiles_near(x + ux * lead, y + uy * lead, SEND_M))
+        else:
+            ux, uy = 0.0, 0.0
+        want = [k for k in sorted(want_set) if k not in self.sent and k not in self.building]
+
+        def _prio(k):
+            d = tile_distance(k[0], k[1], x, y)
+            if speed <= 5.0 or d <= 0.0:
+                return d
+            dx = (k[0] + 0.5) * TILE - x
+            dy = (k[1] + 0.5) * TILE - y
+            cd = math.hypot(dx, dy)
+            cos_a = (dx * ux + dy * uy) / cd if cd > 1e-6 else 0.0
+            return d * (1.0 - 0.5 * cos_a)
+
+        want.sort(key=_prio)
         for tx, ty in want[:max(0, BUILD_PER_POSE - len(self.building))]:   # in flight at most (vegetation.Tracker)
             self.building.add((tx, ty))
             fut = self.futs[(tx, ty)] = loop.run_in_executor(self.pool, build, aid, tx, ty)
             fut.add_done_callback(lambda f, k=(tx, ty), a=aid: self._built(conn, a, k, f))
-        drop = [k for k in self.sent if tile_distance(k[0], k[1], x, y) > DROP_M]
+        drop = [k for k in self.sent if k not in want_set and tile_distance(k[0], k[1], x, y) > DROP_M]
         for k in drop:
             self.sent.discard(k)
             conn.send({"type": "roads_drop", "anchorId": aid, "key": f"{k[0]}_{k[1]}"})

@@ -1296,6 +1296,9 @@ local function onLevelStart()
 end
 
 local function onClientStartMission()
+  if rawget(_G, 'core_levels') and core_levels.getLevelByName and not core_levels.getLevelByName(LEVEL_ID) then
+    pcall(extensions.reload, 'core_levels')
+  end
   onLevelStart()
 end
 
@@ -1341,6 +1344,9 @@ end
 
 local function onExtensionLoaded()
   log('I', 'beamngEarth', 'beamngEarth_core loaded')
+  if rawget(_G, 'core_levels') and core_levels.getLevelByName and not core_levels.getLevelByName(LEVEL_ID) then
+    pcall(extensions.reload, 'core_levels')
+  end
   -- loaded while a level is already running (e.g. extensions.reload from the console)
   if scenetree.MissionGroup and getCurrentLevelIdentifier() then onLevelStart() end
 end

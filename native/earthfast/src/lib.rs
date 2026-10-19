@@ -81,10 +81,12 @@ fn island_ring_rays<'py>(py: Python<'py>, poly: PyReadonlyArray2<'py, f64>, segs
 fn points_inside<'py>(py: Python<'py>, poly: PyReadonlyArray2<'py, f64>, pts: PyReadonlyArray2<'py, f64>)
                       -> Bound<'py, PyArray1<bool>> {
     let p = poly.as_array();
-    let px: Vec<f64> = p.column(0).to_vec();
-    let pys: Vec<f64> = p.column(1).to_vec();
     let q = pts.as_array();
-    let v: Vec<bool> = q.rows().into_iter().map(|r| inside(&px, &pys, r[0], r[1])).collect();
+    let v: Vec<bool> = py.allow_threads(|| {
+        let px: Vec<f64> = p.column(0).to_vec();
+        let pys: Vec<f64> = p.column(1).to_vec();
+        q.rows().into_iter().map(|r| inside(&px, &pys, r[0], r[1])).collect()
+    });
     v.into_pyarray(py)
 }
 
@@ -94,188 +96,197 @@ fn polyline_dist<'py>(py: Python<'py>, line: PyReadonlyArray2<'py, f64>, pts: Py
                       -> Bound<'py, PyArray1<f64>> {
     let l = line.as_array();
     let q = pts.as_array();
-    let k = l.nrows();
-    let v: Vec<f64> = q.rows().into_iter().map(|r| {
-        let mut best = f64::INFINITY;
-        for i in 0..k.saturating_sub(1) {
-            let d = seg_dist(l[[i, 0]], l[[i, 1]], l[[i + 1, 0]], l[[i + 1, 1]], r[0], r[1]);
-            if d < best { best = d; }
-        }
-        best
-    }).collect();
+    let v: Vec<f64> = py.allow_threads(|| {
+        let k = l.nrows();
+        q.rows().into_iter().map(|r| {
+            let mut best = f64::INFINITY;
+            for i in 0..k.saturating_sub(1) {
+                let d = seg_dist(l[[i, 0]], l[[i, 1]], l[[i + 1, 0]], l[[i + 1, 1]], r[0], r[1]);
+                if d < best { best = d; }
+            }
+            best
+        }).collect()
+    });
     v.into_pyarray(py)
 }
 
 /// furniture._clear: is (px, py) farther than its segment's half width + margin from every segment not owned by
 /// `own` (segs (m, 4), half (m,), owner (m,) as i64)?
 #[pyfunction]
-fn clear_of(segs: PyReadonlyArray2<f64>, half: PyReadonlyArray1<f64>, owner: PyReadonlyArray1<i64>, px: f64, py: f64,
-            own: i64, margin: f64) -> bool {
+fn clear_of(py: Python<'_>, segs: PyReadonlyArray2<'_, f64>, half: PyReadonlyArray1<'_, f64>,
+            owner: PyReadonlyArray1<'_, i64>, px: f64, py_: f64, own: i64, margin: f64) -> bool {
     let s = segs.as_array();
     let h = half.as_slice().unwrap();
     let o = owner.as_slice().unwrap();
-    for i in 0..s.nrows() {
-        if o[i] == own {
-            continue;
+    py.allow_threads(|| {
+        for i in 0..s.nrows() {
+            if o[i] == own {
+                continue;
+            }
+            if seg_dist(s[[i, 0]], s[[i, 1]], s[[i, 2]], s[[i, 3]], px, py_) < h[i] + margin {
+                return false;
+            }
         }
-        if seg_dist(s[[i, 0]], s[[i, 1]], s[[i, 2]], s[[i, 3]], px, py) < h[i] + margin {
-            return false;
-        }
-    }
-    true
+        true
+    })
 }
 
 /// roads._dual_side: (share of a's ~10 m samples with b beside it gap_min..gap_max apart and parallel within
 /// cos_par, mean side of b over those: +1 left of a's direction, -1 right). a (k, 2), b (m, 2).
 #[pyfunction]
-fn dual_side(a: PyReadonlyArray2<f64>, b: PyReadonlyArray2<f64>, gap_min: f64, gap_max: f64, cos_par: f64)
-             -> (f64, f64) {
+fn dual_side(py: Python<'_>, a: PyReadonlyArray2<'_, f64>, b: PyReadonlyArray2<'_, f64>,
+             gap_min: f64, gap_max: f64, cos_par: f64) -> (f64, f64) {
     let a = a.as_array();
     let b = b.as_array();
-    let ka = a.nrows();
-    let kb = b.nrows();
-    if ka < 2 || kb < 2 {
-        return (0.0, 0.0);
-    }
-    let nseg = ka - 1;
-    let mut s = vec![0.0f64; ka];
-    let mut seg = vec![[0.0f64; 2]; nseg];
-    let mut len = vec![0.0f64; nseg];
-    for i in 0..nseg {
-        let dx = a[[i + 1, 0]] - a[[i, 0]];
-        let dy = a[[i + 1, 1]] - a[[i, 1]];
-        seg[i] = [dx, dy];
-        len[i] = (dx * dx + dy * dy).sqrt();
-        s[i + 1] = s[i] + len[i];
-    }
-    let total = s[ka - 1];
-    if total < 1.0 {
-        return (0.0, 0.0);
-    }
-    let n = std::cmp::max(2, (total / 10.0).floor() as usize + 1);
-    let mb = kb - 1;
-    let mut bs = vec![[0.0f64; 2]; mb];
-    let mut bl2 = vec![0.0f64; mb];
-    for i in 0..mb {
-        let dx = b[[i + 1, 0]] - b[[i, 0]];
-        let dy = b[[i + 1, 1]] - b[[i, 1]];
-        bs[i] = [dx, dy];
-        bl2[i] = (dx * dx + dy * dy).max(1e-12);
-    }
-    let (mut ok_n, mut side_sum) = (0usize, 0.0f64);
-    let step = total / ((n - 1) as f64);
-    for si in 0..n {
-        // np.linspace: i * step, the last exactly the end
-        let t = if si == n - 1 { total } else { (si as f64) * step };
-        // np.searchsorted(s, t, side="right") - 1, clipped to a segment
-        let mut k = s.partition_point(|&v| v <= t) as isize - 1;
-        k = k.clamp(0, nseg as isize - 1);
-        let k = k as usize;
-        // np.interp(t, s, a): linear within the segment holding t (the last point at the end)
-        let (qx, qy) = if t >= total {
-            (a[[ka - 1, 0]], a[[ka - 1, 1]])
-        } else {
-            let f = if len[k] > 0.0 { (t - s[k]) / len[k] } else { 0.0 };
-            (a[[k, 0]] + seg[k][0] * f, a[[k, 1]] + seg[k][1] * f)
-        };
-        let lk = len[k].max(1e-9);
-        let (tax, tay) = (seg[k][0] / lk, seg[k][1] / lk);
-        let (mut best, mut bj, mut nx, mut ny) = (f64::INFINITY, 0usize, 0.0, 0.0);
-        for j in 0..mb {
-            let f = (((qx - b[[j, 0]]) * bs[j][0] + (qy - b[[j, 1]]) * bs[j][1]) / bl2[j]).clamp(0.0, 1.0);
-            let (px, py) = (b[[j, 0]] + bs[j][0] * f, b[[j, 1]] + bs[j][1] * f);
-            let d = (px - qx).hypot(py - qy);    // (as np.hypot: ties at a shared vertex pick the same segment)
-            if d < best {
-                best = d;
-                bj = j;
-                nx = px;
-                ny = py;
+    py.allow_threads(|| {
+        let ka = a.nrows();
+        let kb = b.nrows();
+        if ka < 2 || kb < 2 {
+            return (0.0, 0.0);
+        }
+        let nseg = ka - 1;
+        let mut s = vec![0.0f64; ka];
+        let mut seg = vec![[0.0f64; 2]; nseg];
+        let mut len = vec![0.0f64; nseg];
+        for i in 0..nseg {
+            let dx = a[[i + 1, 0]] - a[[i, 0]];
+            let dy = a[[i + 1, 1]] - a[[i, 1]];
+            seg[i] = [dx, dy];
+            len[i] = (dx * dx + dy * dy).sqrt();
+            s[i + 1] = s[i] + len[i];
+        }
+        let total = s[ka - 1];
+        if total < 1.0 {
+            return (0.0, 0.0);
+        }
+        let n = std::cmp::max(2, (total / 10.0).floor() as usize + 1);
+        let mb = kb - 1;
+        let mut bs = vec![[0.0f64; 2]; mb];
+        let mut bl2 = vec![0.0f64; mb];
+        for i in 0..mb {
+            let dx = b[[i + 1, 0]] - b[[i, 0]];
+            let dy = b[[i + 1, 1]] - b[[i, 1]];
+            bs[i] = [dx, dy];
+            bl2[i] = (dx * dx + dy * dy).max(1e-12);
+        }
+        let (mut ok_n, mut side_sum) = (0usize, 0.0f64);
+        let step = total / ((n - 1) as f64);
+        for si in 0..n {
+            // np.linspace: i * step, the last exactly the end
+            let t = if si == n - 1 { total } else { (si as f64) * step };
+            // np.searchsorted(s, t, side="right") - 1, clipped to a segment
+            let mut k = s.partition_point(|&v| v <= t) as isize - 1;
+            k = k.clamp(0, nseg as isize - 1);
+            let k = k as usize;
+            // np.interp(t, s, a): linear within the segment holding t (the last point at the end)
+            let (qx, qy) = if t >= total {
+                (a[[ka - 1, 0]], a[[ka - 1, 1]])
+            } else {
+                let f = if len[k] > 0.0 { (t - s[k]) / len[k] } else { 0.0 };
+                (a[[k, 0]] + seg[k][0] * f, a[[k, 1]] + seg[k][1] * f)
+            };
+            let lk = len[k].max(1e-9);
+            let (tax, tay) = (seg[k][0] / lk, seg[k][1] / lk);
+            let (mut best, mut bj, mut nx, mut ny) = (f64::INFINITY, 0usize, 0.0, 0.0);
+            for j in 0..mb {
+                let f = (((qx - b[[j, 0]]) * bs[j][0] + (qy - b[[j, 1]]) * bs[j][1]) / bl2[j]).clamp(0.0, 1.0);
+                let (px, py) = (b[[j, 0]] + bs[j][0] * f, b[[j, 1]] + bs[j][1] * f);
+                let d = (px - qx).hypot(py - qy);    // (as np.hypot: ties at a shared vertex pick the same segment)
+                if d < best {
+                    best = d;
+                    bj = j;
+                    nx = px;
+                    ny = py;
+                }
+            }
+            let bn = bl2[bj].sqrt();
+            let (tbx, tby) = (bs[bj][0] / bn, bs[bj][1] / bn);
+            let par = (tax * tbx + tay * tby).abs() >= cos_par;
+            if best >= gap_min && best <= gap_max && par {
+                ok_n += 1;
+                let (vx, vy) = (nx - qx, ny - qy);
+                let c = tax * vy - tay * vx;
+                side_sum += if c > 0.0 { 1.0 } else if c < 0.0 { -1.0 } else { 0.0 };
             }
         }
-        let bn = bl2[bj].sqrt();
-        let (tbx, tby) = (bs[bj][0] / bn, bs[bj][1] / bn);
-        let par = (tax * tbx + tay * tby).abs() >= cos_par;
-        if best >= gap_min && best <= gap_max && par {
-            ok_n += 1;
-            let (vx, vy) = (nx - qx, ny - qy);
-            let c = tax * vy - tay * vx;
-            side_sum += if c > 0.0 { 1.0 } else if c < 0.0 { -1.0 } else { 0.0 };
+        if ok_n == 0 {
+            return (0.0, 0.0);
         }
-    }
-    if ok_n == 0 {
-        return (0.0, 0.0);
-    }
-    (ok_n as f64 / n as f64, side_sum / ok_n as f64)
+        (ok_n as f64 / n as f64, side_sum / ok_n as f64)
+    })
 }
 
 /// roads._deck_crossings: (i, j, arc on i, arc on j) where polylines i < j cross away from their end points.
 /// pts (n, 2) all lines one after another, starts (L + 1,) where each begins (the last: n).
 #[pyfunction]
-fn deck_crossings(pts: PyReadonlyArray2<f64>, starts: PyReadonlyArray1<i64>) -> Vec<(usize, usize, f64, f64)> {
+fn deck_crossings(py: Python<'_>, pts: PyReadonlyArray2<'_, f64>, starts: PyReadonlyArray1<'_, i64>)
+                  -> Vec<(usize, usize, f64, f64)> {
     let p = pts.as_array();
     let st = starts.as_array();
-    let nl = st.len().saturating_sub(1);
-    let rng: Vec<(usize, usize)> = (0..nl).map(|i| (st[i] as usize, st[i + 1] as usize)).collect();
-    let mut boxes = Vec::with_capacity(nl);
-    let mut arcs: Vec<Vec<f64>> = Vec::with_capacity(nl);
-    for &(a, b) in &rng {
-        let (mut lo, mut hi) = ([f64::INFINITY; 2], [f64::NEG_INFINITY; 2]);
-        let mut arc = Vec::with_capacity(b - a);
-        let mut acc = 0.0;
-        for k in a..b {
-            for c in 0..2 {
-                lo[c] = lo[c].min(p[[k, c]]);
-                hi[c] = hi[c].max(p[[k, c]]);
+    py.allow_threads(|| {
+        let nl = st.len().saturating_sub(1);
+        let rng: Vec<(usize, usize)> = (0..nl).map(|i| (st[i] as usize, st[i + 1] as usize)).collect();
+        let mut boxes = Vec::with_capacity(nl);
+        let mut arcs: Vec<Vec<f64>> = Vec::with_capacity(nl);
+        for &(a, b) in &rng {
+            let (mut lo, mut hi) = ([f64::INFINITY; 2], [f64::NEG_INFINITY; 2]);
+            let mut arc = Vec::with_capacity(b - a);
+            let mut acc = 0.0;
+            for k in a..b {
+                for c in 0..2 {
+                    lo[c] = lo[c].min(p[[k, c]]);
+                    hi[c] = hi[c].max(p[[k, c]]);
+                }
+                if k > a {
+                    acc += (p[[k, 0]] - p[[k - 1, 0]]).hypot(p[[k, 1]] - p[[k - 1, 1]]);
+                }
+                arc.push(acc);
             }
-            if k > a {
-                acc += (p[[k, 0]] - p[[k - 1, 0]]).hypot(p[[k, 1]] - p[[k - 1, 1]]);
-            }
-            arc.push(acc);
+            boxes.push((lo, hi));
+            arcs.push(arc);
         }
-        boxes.push((lo, hi));
-        arcs.push(arc);
-    }
-    let mut out = Vec::new();
-    for i in 0..nl {
-        let (ai, bi) = rng[i];
-        if bi - ai < 2 {
-            continue;
-        }
-        for j in (i + 1)..nl {
-            let (aj, bj) = rng[j];
-            if bj - aj < 2 {
+        let mut out = Vec::new();
+        for i in 0..nl {
+            let (ai, bi) = rng[i];
+            if bi - ai < 2 {
                 continue;
             }
-            let ((alo, ahi), (blo, bhi)) = (boxes[i], boxes[j]);
-            if ahi[0] < blo[0] || bhi[0] < alo[0] || ahi[1] < blo[1] || bhi[1] < alo[1] {
-                continue;
-            }
-            let (si_end, sj_end) = (arcs[i][bi - ai - 1], arcs[j][bj - aj - 1]);
-            for q in 0..(bj - aj - 1) {
-                let (ax, ay) = (p[[aj + q, 0]], p[[aj + q, 1]]);
-                let (d0, d1) = (p[[aj + q + 1, 0]] - ax, p[[aj + q + 1, 1]] - ay);
-                for k in 0..(bi - ai - 1) {
-                    let (px, py) = (p[[ai + k, 0]], p[[ai + k, 1]]);
-                    let (r0, r1) = (p[[ai + k + 1, 0]] - px, p[[ai + k + 1, 1]] - py);
-                    let den = r0 * d1 - r1 * d0;
-                    if den.abs() <= 1e-12 {
-                        continue;
-                    }
-                    let (ap0, ap1) = (ax - px, ay - py);
-                    let t = (ap0 * d1 - ap1 * d0) / den;
-                    let u = (ap0 * r1 - ap1 * r0) / den;
-                    if t > 1e-6 && t < 1.0 - 1e-6 && u > 1e-6 && u < 1.0 - 1e-6 {
-                        let si = arcs[i][k] + t * (arcs[i][k + 1] - arcs[i][k]);
-                        let sj = arcs[j][q] + u * (arcs[j][q + 1] - arcs[j][q]);
-                        if si.min(si_end - si).min(sj).min(sj_end - sj) > 1.0 {
-                            out.push((i, j, si, sj));
+            for j in (i + 1)..nl {
+                let (aj, bj) = rng[j];
+                if bj - aj < 2 {
+                    continue;
+                }
+                let ((alo, ahi), (blo, bhi)) = (boxes[i], boxes[j]);
+                if ahi[0] < blo[0] || bhi[0] < alo[0] || ahi[1] < blo[1] || bhi[1] < alo[1] {
+                    continue;
+                }
+                let (si_end, sj_end) = (arcs[i][bi - ai - 1], arcs[j][bj - aj - 1]);
+                for q in 0..(bj - aj - 1) {
+                    let (ax, ay) = (p[[aj + q, 0]], p[[aj + q, 1]]);
+                    let (d0, d1) = (p[[aj + q + 1, 0]] - ax, p[[aj + q + 1, 1]] - ay);
+                    for k in 0..(bi - ai - 1) {
+                        let (px, py) = (p[[ai + k, 0]], p[[ai + k, 1]]);
+                        let (r0, r1) = (p[[ai + k + 1, 0]] - px, p[[ai + k + 1, 1]] - py);
+                        let den = r0 * d1 - r1 * d0;
+                        if den.abs() <= 1e-12 {
+                            continue;
+                        }
+                        let (ap0, ap1) = (ax - px, ay - py);
+                        let t = (ap0 * d1 - ap1 * d0) / den;
+                        let u = (ap0 * r1 - ap1 * r0) / den;
+                        if t > 1e-6 && t < 1.0 - 1e-6 && u > 1e-6 && u < 1.0 - 1e-6 {
+                            let si = arcs[i][k] + t * (arcs[i][k + 1] - arcs[i][k]);
+                            let sj = arcs[j][q] + u * (arcs[j][q + 1] - arcs[j][q]);
+                            if si.min(si_end - si).min(sj).min(sj_end - sj) > 1.0 {
+                                out.push((i, j, si, sj));
+                            }
                         }
                     }
                 }
             }
         }
-    }
-    out
+        out
+    })
 }
 
 /// One point in a polygon (n, >=2), even-odd, as islands._inside / buildings._inside.
@@ -577,40 +588,43 @@ fn inside_blockers<'py>(py: Python<'py>, pts: PyReadonlyArray2<'py, f64>, segs: 
     let sg = segs.as_array();
     let st = starts.as_array();
     let h = hw.as_array();
-    let n = p.nrows();
-    let nb = h.len();
-    let mut boxes = Vec::with_capacity(nb);
-    for b in 0..nb {
-        let (s0, s1) = (st[b] as usize, st[b + 1] as usize);
-        let (mut x0, mut y0, mut x1, mut y1) = (f64::INFINITY, f64::INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY);
-        for k in s0..s1 {
-            x0 = x0.min(sg[[k, 0]]).min(sg[[k, 2]]);
-            x1 = x1.max(sg[[k, 0]]).max(sg[[k, 2]]);
-            y0 = y0.min(sg[[k, 1]]).min(sg[[k, 3]]);
-            y1 = y1.max(sg[[k, 1]]).max(sg[[k, 3]]);
-        }
-        boxes.push((x0 - h[b], y0 - h[b], x1 + h[b], y1 + h[b]));
-    }
-    let mut out = vec![false; n];
-    for i in 0..n {
-        let (x, y) = (p[[i, 0]], p[[i, 1]]);
-        'blk: for b in 0..nb {
-            let (bx0, by0, bx1, by1) = boxes[b];
-            if x < bx0 || x > bx1 || y < by0 || y > by1 {
-                continue;
+    let out = py.allow_threads(|| {
+        let n = p.nrows();
+        let nb = h.len();
+        let mut boxes = Vec::with_capacity(nb);
+        for b in 0..nb {
+            let (s0, s1) = (st[b] as usize, st[b + 1] as usize);
+            let (mut x0, mut y0, mut x1, mut y1) = (f64::INFINITY, f64::INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY);
+            for k in s0..s1 {
+                x0 = x0.min(sg[[k, 0]]).min(sg[[k, 2]]);
+                x1 = x1.max(sg[[k, 0]]).max(sg[[k, 2]]);
+                y0 = y0.min(sg[[k, 1]]).min(sg[[k, 3]]);
+                y1 = y1.max(sg[[k, 1]]).max(sg[[k, 3]]);
             }
-            for k in (st[b] as usize)..(st[b + 1] as usize) {
-                let (ax, ay) = (sg[[k, 0]], sg[[k, 1]]);
-                let (dx, dy) = (sg[[k, 2]] - ax, sg[[k, 3]] - ay);
-                let l2 = (dx * dx + dy * dy).max(1e-12);
-                let t = (((x - ax) * dx + (y - ay) * dy) / l2).clamp(0.0, 1.0);
-                if (x - (ax + t * dx)).hypot(y - (ay + t * dy)) < h[b] {
-                    out[i] = true;
-                    break 'blk;
+            boxes.push((x0 - h[b], y0 - h[b], x1 + h[b], y1 + h[b]));
+        }
+        let mut out = vec![false; n];
+        for i in 0..n {
+            let (x, y) = (p[[i, 0]], p[[i, 1]]);
+            'blk: for b in 0..nb {
+                let (bx0, by0, bx1, by1) = boxes[b];
+                if x < bx0 || x > bx1 || y < by0 || y > by1 {
+                    continue;
+                }
+                for k in (st[b] as usize)..(st[b + 1] as usize) {
+                    let (ax, ay) = (sg[[k, 0]], sg[[k, 1]]);
+                    let (dx, dy) = (sg[[k, 2]] - ax, sg[[k, 3]] - ay);
+                    let l2 = (dx * dx + dy * dy).max(1e-12);
+                    let t = (((x - ax) * dx + (y - ay) * dy) / l2).clamp(0.0, 1.0);
+                    if (x - (ax + t * dx)).hypot(y - (ay + t * dy)) < h[b] {
+                        out[i] = true;
+                        break 'blk;
+                    }
                 }
             }
         }
-    }
+        out
+    });
     out.into_pyarray(py)
 }
 
@@ -618,23 +632,26 @@ fn inside_blockers<'py>(py: Python<'py>, pts: PyReadonlyArray2<'py, f64>, segs: 
 #[pyfunction]
 fn densify<'py>(py: Python<'py>, pts: PyReadonlyArray2<'py, f64>, spacing: f64) -> Bound<'py, PyArray2<f64>> {
     let p = pts.as_array();
-    let (k, c) = (p.nrows(), p.ncols());
-    let mut out: Vec<f64> = Vec::with_capacity(k * c * 2);
-    if k > 0 {
-        out.extend(p.row(0).iter());
-    }
-    for i in 0..k.saturating_sub(1) {
-        let (a, b) = (p.row(i), p.row(i + 1));
-        let n = ((b[0] - a[0]).hypot(b[1] - a[1]) / spacing).ceil() as i64;
-        for s in 1..n {
-            let f = s as f64 / n as f64;
-            for j in 0..c {
-                out.push(a[j] + (b[j] - a[j]) * f);
-            }
+    let (rows, c, out) = py.allow_threads(|| {
+        let (k, c) = (p.nrows(), p.ncols());
+        let mut out: Vec<f64> = Vec::with_capacity(k * c * 2);
+        if k > 0 {
+            out.extend(p.row(0).iter());
         }
-        out.extend(b.iter());
-    }
-    let rows = out.len() / c.max(1);
+        for i in 0..k.saturating_sub(1) {
+            let (a, b) = (p.row(i), p.row(i + 1));
+            let n = ((b[0] - a[0]).hypot(b[1] - a[1]) / spacing).ceil() as i64;
+            for s in 1..n {
+                let f = s as f64 / n as f64;
+                for j in 0..c {
+                    out.push(a[j] + (b[j] - a[j]) * f);
+                }
+            }
+            out.extend(b.iter());
+        }
+        let rows = out.len() / c.max(1);
+        (rows, c, out)
+    });
     numpy::ndarray::Array2::from_shape_vec((rows, c), out).unwrap().into_pyarray(py)
 }
 
@@ -721,64 +738,67 @@ fn np_percentile(v: &[f64], q: f64) -> f64 {
 /// roadwidth.measure_row: the right-of-way between the building walls of a street (centreline (k, >=2)), or None.
 #[pyfunction]
 #[allow(clippy::too_many_arguments)]
-fn measure_row(line: PyReadonlyArray2<f64>, keys: PyReadonlyArray1<i64>, first: PyReadonlyArray1<i64>,
-               counts: PyReadonlyArray1<i64>, seg_of: PyReadonlyArray1<i64>, segs: PyReadonlyArray2<f64>,
+fn measure_row(py: Python<'_>, line: PyReadonlyArray2<'_, f64>, keys: PyReadonlyArray1<'_, i64>,
+               first: PyReadonlyArray1<'_, i64>, counts: PyReadonlyArray1<'_, i64>,
+               seg_of: PyReadonlyArray1<'_, i64>, segs: PyReadonlyArray2<'_, f64>,
                bucket: f64, step: f64, end_skip: f64, reach: f64, min_samples: usize, walled: f64, agree: f64)
                -> Option<f64> {
     let l = line.as_array();
-    let k = l.nrows();
-    if k < 2 {
-        return None;
-    }
-    let xs: Vec<f64> = (0..k).map(|i| l[[i, 0]]).collect();
-    let ys: Vec<f64> = (0..k).map(|i| l[[i, 1]]).collect();
-    let mut s = vec![0.0f64; k];
-    for i in 1..k {
-        s[i] = s[i - 1] + (xs[i] - xs[i - 1]).hypot(ys[i] - ys[i - 1]);
-    }
-    let total = s[k - 1];
-    if total < 2.0 * end_skip + step {
-        return None;
-    }
-    // numpy.arange(end_skip, total - end_skip + 1e-9, step)
-    let stop = total - end_skip + 1e-9;
-    let count = ((stop - end_skip) / step).ceil().max(0.0) as usize;
     let (keys, first, counts, seg_of) = (keys.as_slice().unwrap(), first.as_slice().unwrap(),
                                          counts.as_slice().unwrap(), seg_of.as_slice().unwrap());
     let sg = segs.as_array();
-    let mut w = Vec::with_capacity(count);
-    let mut n = 0usize;
-    for i in 0..count {
-        let dd = end_skip + i as f64 * step;
-        // searchsorted(s, dd) (left), clipped to 1..k-1
-        let mut j = s.partition_point(|&v| v < dd);
-        j = j.clamp(1, k - 1);
-        let (tx, ty) = (xs[j] - xs[j - 1], ys[j] - ys[j - 1]);
-        let len = tx.hypot(ty);
-        if !(len >= 1e-6) {
-            continue;
+    py.allow_threads(|| {
+        let k = l.nrows();
+        if k < 2 {
+            return None;
         }
-        n += 1;
-        let (nx, ny) = (-ty / len, tx / len);
-        let (cx, cy) = (np_interp(dd, &s, &xs), np_interp(dd, &s, &ys));
-        let a = wall_ray(keys, first, counts, seg_of, &sg, bucket, cx, cy, nx, ny, reach);
-        let b = wall_ray(keys, first, counts, seg_of, &sg, bucket, cx, cy, -nx, -ny, reach);
-        let v = a + b;
-        if !v.is_nan() {
-            w.push(v);
+        let xs: Vec<f64> = (0..k).map(|i| l[[i, 0]]).collect();
+        let ys: Vec<f64> = (0..k).map(|i| l[[i, 1]]).collect();
+        let mut s = vec![0.0f64; k];
+        for i in 1..k {
+            s[i] = s[i - 1] + (xs[i] - xs[i - 1]).hypot(ys[i] - ys[i - 1]);
         }
-    }
-    if n == 0 || w.len() < min_samples || (w.len() as f64) / (n as f64) < walled {
-        return None;
-    }
-    w.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    let m = w.len();
-    let med = if m % 2 == 1 { w[m / 2] } else { (w[m / 2 - 1] + w[m / 2]) / 2.0 };
-    let (q1, q3) = (np_percentile(&w, 25.0), np_percentile(&w, 75.0));
-    if (q3 - q1) / med > agree {
-        return None;
-    }
-    Some(med)
+        let total = s[k - 1];
+        if total < 2.0 * end_skip + step {
+            return None;
+        }
+        // numpy.arange(end_skip, total - end_skip + 1e-9, step)
+        let stop = total - end_skip + 1e-9;
+        let count = ((stop - end_skip) / step).ceil().max(0.0) as usize;
+        let mut w = Vec::with_capacity(count);
+        let mut n = 0usize;
+        for i in 0..count {
+            let dd = end_skip + i as f64 * step;
+            // searchsorted(s, dd) (left), clipped to 1..k-1
+            let mut j = s.partition_point(|&v| v < dd);
+            j = j.clamp(1, k - 1);
+            let (tx, ty) = (xs[j] - xs[j - 1], ys[j] - ys[j - 1]);
+            let len = tx.hypot(ty);
+            if !(len >= 1e-6) {
+                continue;
+            }
+            n += 1;
+            let (nx, ny) = (-ty / len, tx / len);
+            let (cx, cy) = (np_interp(dd, &s, &xs), np_interp(dd, &s, &ys));
+            let a = wall_ray(keys, first, counts, seg_of, &sg, bucket, cx, cy, nx, ny, reach);
+            let b = wall_ray(keys, first, counts, seg_of, &sg, bucket, cx, cy, -nx, -ny, reach);
+            let v = a + b;
+            if !v.is_nan() {
+                w.push(v);
+            }
+        }
+        if n == 0 || w.len() < min_samples || (w.len() as f64) / (n as f64) < walled {
+            return None;
+        }
+        w.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let m = w.len();
+        let med = if m % 2 == 1 { w[m / 2] } else { (w[m / 2 - 1] + w[m / 2]) / 2.0 };
+        let (q1, q3) = (np_percentile(&w, 25.0), np_percentile(&w, 75.0));
+        if (q3 - q1) / med > agree {
+            return None;
+        }
+        Some(med)
+    })
 }
 
 /// grading.grade_points: base heights at the points (px, py) graded under the plans' segments a-b (heights za-zb,
@@ -793,69 +813,72 @@ fn grade_points<'py>(py: Python<'py>, px: PyReadonlyArray1<'py, f64>, pyy: PyRea
                      -> Bound<'py, PyArray1<f64>> {
     let (px, pyy, base) = (px.as_array(), pyy.as_array(), base.as_array());
     let (a, b, za, zb, h) = (a.as_array(), b.as_array(), za.as_array(), zb.as_array(), h.as_array());
-    let n = px.len();
-    let mut out: Vec<f64> = base.iter().copied().collect();
-    if n == 0 {
-        return out.into_pyarray(py);
-    }
-    let (mut x0, mut y0, mut x1, mut y1) = (f64::INFINITY, f64::INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY);
-    for i in 0..n {
-        x0 = x0.min(px[i]); x1 = x1.max(px[i]);
-        y0 = y0.min(pyy[i]); y1 = y1.max(pyy[i]);
-    }
-    let bxs: Vec<i64> = (0..n).map(|i| ((px[i] - x0) / bucket).floor() as i64).collect();
-    let bys: Vec<i64> = (0..n).map(|i| ((pyy[i] - y0) / bucket).floor() as i64).collect();
-    let nbx = bxs.iter().copied().max().unwrap() + 1;
-    let keys: Vec<i64> = (0..n).map(|i| bys[i] * nbx + bxs[i]).collect();
-    let mut order: Vec<usize> = (0..n).collect();
-    order.sort_by_key(|&i| keys[i]);                    // stable, as argsort(kind="stable")
-    let sk: Vec<i64> = order.iter().map(|&i| keys[i]).collect();
-    let mut num = vec![0.0f64; n];
-    let mut den = vec![0.0f64; n];
-    let mut wmax = vec![0.0f64; n];
-    for s in 0..h.len() {
-        let reach = h[s] + t_max;
-        let (ax, ay, bx, by) = (a[[s, 0]], a[[s, 1]], b[[s, 0]], b[[s, 1]]);
-        let (lo_x, hi_x) = (ax.min(bx) - reach, ax.max(bx) + reach);
-        let (lo_y, hi_y) = (ay.min(by) - reach, ay.max(by) + reach);
-        if hi_x < x0 || lo_x > x1 || hi_y < y0 || lo_y > y1 {
-            continue;
+    let out = py.allow_threads(|| {
+        let n = px.len();
+        let mut out: Vec<f64> = base.iter().copied().collect();
+        if n == 0 {
+            return out;
         }
-        let cx0 = 0i64.max(((lo_x - x0) / bucket).floor() as i64);
-        let cx1 = (nbx - 1).min(((hi_x - x0) / bucket).floor() as i64);
-        let cy0 = 0i64.max(((lo_y - y0) / bucket).floor() as i64);
-        let cy1 = ((hi_y - y0) / bucket).floor() as i64;
-        let (abx, aby) = (bx - ax, by - ay);
-        let l2 = abx * abx + aby * aby;
-        for row in cy0..=cy1 {
-            let i0 = sk.partition_point(|&k| k < row * nbx + cx0);
-            let i1 = sk.partition_point(|&k| k <= row * nbx + cx1);
-            for j in i0..i1.max(i0) {
-                let idx = order[j];
-                let (qx, qy) = (px[idx] - ax, pyy[idx] - ay);
-                let t = if l2 > 1e-12 { ((qx * abx + qy * aby) / l2).clamp(0.0, 1.0) } else { 0.0 };
-                let d = (qx - t * abx).hypot(qy - t * aby);
-                let target = za[s] + (zb[s] - za[s]) * t;
-                let tt = (slope_run * (target - base[idx]).abs()).clamp(t_min, t_max);
-                let u = ((d - h[s]) / tt).clamp(0.0, 1.0);
-                let w = 1.0 - u * u * (3.0 - 2.0 * u);
-                if w > 0.0 {
-                    let r = d / blend_r;
-                    let wb = w / (1.0 + r * r);
-                    num[idx] += wb * target;
-                    den[idx] += wb;
-                    if w > wmax[idx] {
-                        wmax[idx] = w;
+        let (mut x0, mut y0, mut x1, mut y1) = (f64::INFINITY, f64::INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY);
+        for i in 0..n {
+            x0 = x0.min(px[i]); x1 = x1.max(px[i]);
+            y0 = y0.min(pyy[i]); y1 = y1.max(pyy[i]);
+        }
+        let bxs: Vec<i64> = (0..n).map(|i| ((px[i] - x0) / bucket).floor() as i64).collect();
+        let bys: Vec<i64> = (0..n).map(|i| ((pyy[i] - y0) / bucket).floor() as i64).collect();
+        let nbx = bxs.iter().copied().max().unwrap() + 1;
+        let keys: Vec<i64> = (0..n).map(|i| bys[i] * nbx + bxs[i]).collect();
+        let mut order: Vec<usize> = (0..n).collect();
+        order.sort_by_key(|&i| keys[i]);                    // stable, as argsort(kind="stable")
+        let sk: Vec<i64> = order.iter().map(|&i| keys[i]).collect();
+        let mut num = vec![0.0f64; n];
+        let mut den = vec![0.0f64; n];
+        let mut wmax = vec![0.0f64; n];
+        for s in 0..h.len() {
+            let reach = h[s] + t_max;
+            let (ax, ay, bx, by) = (a[[s, 0]], a[[s, 1]], b[[s, 0]], b[[s, 1]]);
+            let (lo_x, hi_x) = (ax.min(bx) - reach, ax.max(bx) + reach);
+            let (lo_y, hi_y) = (ay.min(by) - reach, ay.max(by) + reach);
+            if hi_x < x0 || lo_x > x1 || hi_y < y0 || lo_y > y1 {
+                continue;
+            }
+            let cx0 = 0i64.max(((lo_x - x0) / bucket).floor() as i64);
+            let cx1 = (nbx - 1).min(((hi_x - x0) / bucket).floor() as i64);
+            let cy0 = 0i64.max(((lo_y - y0) / bucket).floor() as i64);
+            let cy1 = ((hi_y - y0) / bucket).floor() as i64;
+            let (abx, aby) = (bx - ax, by - ay);
+            let l2 = abx * abx + aby * aby;
+            for row in cy0..=cy1 {
+                let i0 = sk.partition_point(|&k| k < row * nbx + cx0);
+                let i1 = sk.partition_point(|&k| k <= row * nbx + cx1);
+                for j in i0..i1.max(i0) {
+                    let idx = order[j];
+                    let (qx, qy) = (px[idx] - ax, pyy[idx] - ay);
+                    let t = if l2 > 1e-12 { ((qx * abx + qy * aby) / l2).clamp(0.0, 1.0) } else { 0.0 };
+                    let d = (qx - t * abx).hypot(qy - t * aby);
+                    let target = za[s] + (zb[s] - za[s]) * t;
+                    let tt = (slope_run * (target - base[idx]).abs()).clamp(t_min, t_max);
+                    let u = ((d - h[s]) / tt).clamp(0.0, 1.0);
+                    let w = 1.0 - u * u * (3.0 - 2.0 * u);
+                    if w > 0.0 {
+                        let r = d / blend_r;
+                        let wb = w / (1.0 + r * r);
+                        num[idx] += wb * target;
+                        den[idx] += wb;
+                        if w > wmax[idx] {
+                            wmax[idx] = w;
+                        }
                     }
                 }
             }
         }
-    }
-    for i in 0..n {
-        if den[i] > 0.0 {
-            out[i] = base[i] + wmax[i] * (num[i] / den[i] - base[i] + lift);
+        for i in 0..n {
+            if den[i] > 0.0 {
+                out[i] = base[i] + wmax[i] * (num[i] / den[i] - base[i] + lift);
+            }
         }
-    }
+        out
+    });
     out.into_pyarray(py)
 }
 
@@ -864,27 +887,30 @@ fn grade_points<'py>(py: Python<'py>, px: PyReadonlyArray1<'py, f64>, pyy: PyRea
 fn resample<'py>(py: Python<'py>, xy: PyReadonlyArray2<'py, f64>, step: f64)
                  -> (Bound<'py, PyArray2<f64>>, Bound<'py, PyArray1<f64>>) {
     let p = xy.as_array();
-    let k = p.nrows();
-    let xs: Vec<f64> = (0..k).map(|i| p[[i, 0]]).collect();
-    let ys: Vec<f64> = (0..k).map(|i| p[[i, 1]]).collect();
-    let mut s = vec![0.0f64; k];
-    for i in 1..k {
-        s[i] = s[i - 1] + (xs[i] - xs[i - 1]).hypot(ys[i] - ys[i - 1]);
-    }
-    let total = s[k - 1];
-    if !(total > 0.0) {
-        let a = numpy::ndarray::Array2::from_shape_vec((1, 2), vec![xs[0], ys[0]]).unwrap();
-        return (a.into_pyarray(py), vec![0.0f64].into_pyarray(py));
-    }
-    let count = (total / step).ceil() as usize;          // numpy.arange(0, total, step)
-    let mut t: Vec<f64> = (0..count).map(|i| i as f64 * step).collect();
-    t.push(total);
-    let mut out = Vec::with_capacity(t.len() * 2);
-    for &v in &t {
-        out.push(np_interp(v, &s, &xs));
-        out.push(np_interp(v, &s, &ys));
-    }
-    let a = numpy::ndarray::Array2::from_shape_vec((t.len(), 2), out).unwrap();
+    let (a, t) = py.allow_threads(|| {
+        let k = p.nrows();
+        let xs: Vec<f64> = (0..k).map(|i| p[[i, 0]]).collect();
+        let ys: Vec<f64> = (0..k).map(|i| p[[i, 1]]).collect();
+        let mut s = vec![0.0f64; k];
+        for i in 1..k {
+            s[i] = s[i - 1] + (xs[i] - xs[i - 1]).hypot(ys[i] - ys[i - 1]);
+        }
+        let total = s[k - 1];
+        if !(total > 0.0) {
+            let a = numpy::ndarray::Array2::from_shape_vec((1, 2), vec![xs[0], ys[0]]).unwrap();
+            return (a, vec![0.0f64]);
+        }
+        let count = (total / step).ceil() as usize;          // numpy.arange(0, total, step)
+        let mut t: Vec<f64> = (0..count).map(|i| i as f64 * step).collect();
+        t.push(total);
+        let mut out = Vec::with_capacity(t.len() * 2);
+        for &v in &t {
+            out.push(np_interp(v, &s, &xs));
+            out.push(np_interp(v, &s, &ys));
+        }
+        let a = numpy::ndarray::Array2::from_shape_vec((t.len(), 2), out).unwrap();
+        (a, t)
+    });
     (a.into_pyarray(py), t.into_pyarray(py))
 }
 
@@ -894,58 +920,62 @@ fn resample<'py>(py: Python<'py>, xy: PyReadonlyArray2<'py, f64>, step: f64)
 fn smooth_profile<'py>(py: Python<'py>, z: PyReadonlyArray1<'py, f64>, step: f64, sigma: f64)
                        -> Bound<'py, PyArray1<f64>> {
     let z = z.as_array();
-    let n = z.len();
-    if n < 3 || sigma <= 0.0 {
-        return z.to_vec().into_pyarray(py);
-    }
-    let r = (3.0 * sigma / step).ceil() as usize;
-    let mut k: Vec<f64> = (0..=2 * r).map(|i| {
-        let x = (i as f64 - r as f64) * step / sigma;
-        (-0.5 * (x * x)).exp()
-    }).collect();
-    let sum: f64 = k.iter().sum();
-    for v in k.iter_mut() {
-        *v /= sum;
-    }
-    let reflect = n > r;
-    let at = |i: isize| -> f64 {
-        let m = n as isize;
-        if i < 0 {
-            if reflect { z[(-i) as usize] } else { z[0] }
-        } else if i >= m {
-            if reflect { z[(2 * (m - 1) - i) as usize] } else { z[n - 1] }
-        } else {
-            z[i as usize]
+    let out: Vec<f64> = py.allow_threads(|| {
+        let n = z.len();
+        if n < 3 || sigma <= 0.0 {
+            return z.to_vec();
         }
-    };
-    let w = 2 * r + 1;
-    let out: Vec<f64> = (0..n).map(|j| {
-        // numpy.convolve(pad, k, "valid"): out[j] = sum_i pad[j + i] * k[w - 1 - i]
-        let mut acc = 0.0;
-        for i in 0..w {
-            acc += at(j as isize + i as isize - r as isize) * k[w - 1 - i];
+        let r = (3.0 * sigma / step).ceil() as usize;
+        let mut k: Vec<f64> = (0..=2 * r).map(|i| {
+            let x = (i as f64 - r as f64) * step / sigma;
+            (-0.5 * (x * x)).exp()
+        }).collect();
+        let sum: f64 = k.iter().sum();
+        for v in k.iter_mut() {
+            *v /= sum;
         }
-        acc
-    }).collect();
+        let reflect = n > r;
+        let at = |i: isize| -> f64 {
+            let m = n as isize;
+            if i < 0 {
+                if reflect { z[(-i) as usize] } else { z[0] }
+            } else if i >= m {
+                if reflect { z[(2 * (m - 1) - i) as usize] } else { z[n - 1] }
+            } else {
+                z[i as usize]
+            }
+        };
+        let w = 2 * r + 1;
+        (0..n).map(|j| {
+            // numpy.convolve(pad, k, "valid"): out[j] = sum_i pad[j + i] * k[w - 1 - i]
+            let mut acc = 0.0;
+            for i in 0..w {
+                acc += at(j as isize + i as isize - r as isize) * k[w - 1 - i];
+            }
+            acc
+        }).collect()
+    });
     out.into_pyarray(py)
 }
 
 /// roads._seg_dist_min: the distance from (px, py) to the polyline line (k, >= 2).
 #[pyfunction]
-fn seg_dist_min(line: PyReadonlyArray2<f64>, px: f64, py: f64) -> f64 {
+fn seg_dist_min(py: Python<'_>, line: PyReadonlyArray2<'_, f64>, px: f64, py_: f64) -> f64 {
     let l = line.as_array();
-    let mut best = f64::INFINITY;
-    for i in 0..l.nrows().saturating_sub(1) {
-        let (ax, ay) = (l[[i, 0]], l[[i, 1]]);
-        let (dx, dy) = (l[[i + 1, 0]] - ax, l[[i + 1, 1]] - ay);
-        let l2 = (dx * dx + dy * dy).max(1e-12);
-        let t = (((px - ax) * dx + (py - ay) * dy) / l2).clamp(0.0, 1.0);
-        let d = (ax + dx * t - px).hypot(ay + dy * t - py);
-        if d < best {
-            best = d;
+    py.allow_threads(|| {
+        let mut best = f64::INFINITY;
+        for i in 0..l.nrows().saturating_sub(1) {
+            let (ax, ay) = (l[[i, 0]], l[[i, 1]]);
+            let (dx, dy) = (l[[i + 1, 0]] - ax, l[[i + 1, 1]] - ay);
+            let l2 = (dx * dx + dy * dy).max(1e-12);
+            let t = (((px - ax) * dx + (py_ - ay) * dy) / l2).clamp(0.0, 1.0);
+            let d = (ax + dx * t - px).hypot(ay + dy * t - py_);
+            if d < best {
+                best = d;
+            }
         }
-    }
-    best
+        best
+    })
 }
 
 /// polygon.contains_points: which points (m, 2) lie inside the ring (n, 2) (even-odd crossings of a ray toward +x:
@@ -955,60 +985,63 @@ fn contains_points<'py>(py: Python<'py>, ring: PyReadonlyArray2<'py, f64>, pts: 
                         -> Bound<'py, PyArray1<bool>> {
     let r = ring.as_array();
     let p = pts.as_array();
-    let (n, m) = (r.nrows(), p.nrows());
-    let mut out = vec![false; m];
-    if n < 3 || m == 0 {
-        return out.into_pyarray(py);
-    }
-    let (mut ex0, mut ey0, mut elo, mut ehi, mut esl) = (vec![], vec![], vec![], vec![], vec![]);
-    for i in 0..n {
-        let (x0, y0) = (r[[i, 0]], r[[i, 1]]);
-        let (x1, y1) = (r[[(i + 1) % n, 0]], r[[(i + 1) % n, 1]]);
-        if y0 == y1 {
-            continue;
+    let out = py.allow_threads(|| {
+        let (n, m) = (r.nrows(), p.nrows());
+        let mut out = vec![false; m];
+        if n < 3 || m == 0 {
+            return out;
         }
-        ex0.push(x0);
-        ey0.push(y0);
-        elo.push(y0.min(y1));
-        ehi.push(y0.max(y1));
-        esl.push((x1 - x0) / (y1 - y0));
-    }
-    let ne = ex0.len();
-    if ne == 0 {
-        return out.into_pyarray(py);
-    }
-    let (mut bx0, mut bx1, mut by0, mut by1) = (f64::INFINITY, f64::NEG_INFINITY, f64::INFINITY, f64::NEG_INFINITY);
-    for i in 0..n {
-        bx0 = bx0.min(r[[i, 0]]); bx1 = bx1.max(r[[i, 0]]);
-        by0 = by0.min(r[[i, 1]]); by1 = by1.max(r[[i, 1]]);
-    }
-    let nb = 512usize.min(1usize.max(ne / 4));
-    let mut h = (by1 - by0) / nb as f64;
-    if h == 0.0 {
-        h = 1.0;
-    }
-    let clip = |v: f64| -> usize { (v as i64).clamp(0, nb as i64 - 1) as usize };
-    let mut bands: Vec<Vec<usize>> = vec![Vec::new(); nb];
-    for e in 0..ne {
-        let (b0, b1) = (clip((elo[e] - by0) / h), clip((ehi[e] - by0) / h));
-        for b in b0..=b1 {
-            bands[b].push(e);
+        let (mut ex0, mut ey0, mut elo, mut ehi, mut esl) = (vec![], vec![], vec![], vec![], vec![]);
+        for i in 0..n {
+            let (x0, y0) = (r[[i, 0]], r[[i, 1]]);
+            let (x1, y1) = (r[[(i + 1) % n, 0]], r[[(i + 1) % n, 1]]);
+            if y0 == y1 {
+                continue;
+            }
+            ex0.push(x0);
+            ey0.push(y0);
+            elo.push(y0.min(y1));
+            ehi.push(y0.max(y1));
+            esl.push((x1 - x0) / (y1 - y0));
         }
-    }
-    for j in 0..m {
-        let (x, y) = (p[[j, 0]], p[[j, 1]]);
-        if !(x >= bx0 && x <= bx1 && y >= by0 && y <= by1) {
-            continue;
+        let ne = ex0.len();
+        if ne == 0 {
+            return out;
         }
-        let b = (((y - by0) / h) as i64).min(nb as i64 - 1) as usize;
-        let mut c = 0u32;
-        for &e in &bands[b] {
-            if y >= elo[e] && y < ehi[e] && ex0[e] + (y - ey0[e]) * esl[e] > x {
-                c += 1;
+        let (mut bx0, mut bx1, mut by0, mut by1) = (f64::INFINITY, f64::NEG_INFINITY, f64::INFINITY, f64::NEG_INFINITY);
+        for i in 0..n {
+            bx0 = bx0.min(r[[i, 0]]); bx1 = bx1.max(r[[i, 0]]);
+            by0 = by0.min(r[[i, 1]]); by1 = by1.max(r[[i, 1]]);
+        }
+        let nb = 512usize.min(1usize.max(ne / 4));
+        let mut h = (by1 - by0) / nb as f64;
+        if h == 0.0 {
+            h = 1.0;
+        }
+        let clip = |v: f64| -> usize { (v as i64).clamp(0, nb as i64 - 1) as usize };
+        let mut bands: Vec<Vec<usize>> = vec![Vec::new(); nb];
+        for e in 0..ne {
+            let (b0, b1) = (clip((elo[e] - by0) / h), clip((ehi[e] - by0) / h));
+            for b in b0..=b1 {
+                bands[b].push(e);
             }
         }
-        out[j] = c & 1 == 1;
-    }
+        for j in 0..m {
+            let (x, y) = (p[[j, 0]], p[[j, 1]]);
+            if !(x >= bx0 && x <= bx1 && y >= by0 && y <= by1) {
+                continue;
+            }
+            let b = (((y - by0) / h) as i64).min(nb as i64 - 1) as usize;
+            let mut c = 0u32;
+            for &e in &bands[b] {
+                if y >= elo[e] && y < ehi[e] && ex0[e] + (y - ey0[e]) * esl[e] > x {
+                    c += 1;
+                }
+            }
+            out[j] = c & 1 == 1;
+        }
+        out
+    });
     out.into_pyarray(py)
 }
 
@@ -1303,112 +1336,117 @@ fn polyline_min_dist(l: &numpy::ndarray::ArrayView2<f64>, px: f64, py: f64) -> f
 /// islands._crosses: whether road pts (k, >= 2) runs through the inside of the loop poly (n, 2): its samples every
 /// ~2 m inside the loop (even-odd) and farther than margin from the loop's closed line.
 #[pyfunction]
-fn loop_crossed(poly: PyReadonlyArray2<f64>, pts: PyReadonlyArray2<f64>, margin: f64) -> bool {
+fn loop_crossed(py: Python<'_>, poly: PyReadonlyArray2<'_, f64>, pts: PyReadonlyArray2<'_, f64>, margin: f64) -> bool {
     let pl = poly.as_array();
     let p = pts.as_array();
-    let n = pl.nrows();
-    if n == 0 || p.nrows() == 0 {
-        return false;
-    }
-    let (mut lx, mut ly, mut hx, mut hy) = (f64::INFINITY, f64::INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY);
-    for i in 0..n {
-        lx = lx.min(pl[[i, 0]]); hx = hx.max(pl[[i, 0]]);
-        ly = ly.min(pl[[i, 1]]); hy = hy.max(pl[[i, 1]]);
-    }
-    let (lx, ly, hx, hy) = (lx - 1.0, ly - 1.0, hx + 1.0, hy + 1.0);
-    let (mut mx, mut my, mut nx, mut ny) = (f64::NEG_INFINITY, f64::NEG_INFINITY, f64::INFINITY, f64::INFINITY);
-    for i in 0..p.nrows() {
-        mx = mx.max(p[[i, 0]]); nx = nx.min(p[[i, 0]]);
-        my = my.max(p[[i, 1]]); ny = ny.min(p[[i, 1]]);
-    }
-    if mx < lx || my < ly || nx > hx || ny > hy {
-        return false;
-    }
-    let px: Vec<f64> = (0..n).map(|i| pl[[i, 0]]).collect();
-    let pys: Vec<f64> = (0..n).map(|i| pl[[i, 1]]).collect();
-    let mut ring = numpy::ndarray::Array2::<f64>::zeros((n + 1, 2));
-    for i in 0..=n {
-        ring[[i, 0]] = pl[[i % n, 0]];
-        ring[[i, 1]] = pl[[i % n, 1]];
-    }
-    let rv = ring.view();
-    for i in 0..p.nrows() - 1 {
-        let (ax, ay, bx, by) = (p[[i, 0]], p[[i, 1]], p[[i + 1, 0]], p[[i + 1, 1]]);
-        let k = 1usize.max(((bx - ax).hypot(by - ay) / 2.0) as usize);
-        for s in 0..k {
-            let t = (s as f64 + 0.5) / k as f64;
-            let (qx, qy) = (ax + (bx - ax) * t, ay + (by - ay) * t);
-            if inside(&px, &pys, qx, qy) && polyline_min_dist(&rv, qx, qy) > margin {
-                return true;
+    py.allow_threads(|| {
+        let n = pl.nrows();
+        if n == 0 || p.nrows() == 0 {
+            return false;
+        }
+        let (mut lx, mut ly, mut hx, mut hy) = (f64::INFINITY, f64::INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY);
+        for i in 0..n {
+            lx = lx.min(pl[[i, 0]]); hx = hx.max(pl[[i, 0]]);
+            ly = ly.min(pl[[i, 1]]); hy = hy.max(pl[[i, 1]]);
+        }
+        let (lx, ly, hx, hy) = (lx - 1.0, ly - 1.0, hx + 1.0, hy + 1.0);
+        let (mut mx, mut my, mut nx, mut ny) = (f64::NEG_INFINITY, f64::NEG_INFINITY, f64::INFINITY, f64::INFINITY);
+        for i in 0..p.nrows() {
+            mx = mx.max(p[[i, 0]]); nx = nx.min(p[[i, 0]]);
+            my = my.max(p[[i, 1]]); ny = ny.min(p[[i, 1]]);
+        }
+        if mx < lx || my < ly || nx > hx || ny > hy {
+            return false;
+        }
+        let px: Vec<f64> = (0..n).map(|i| pl[[i, 0]]).collect();
+        let pys: Vec<f64> = (0..n).map(|i| pl[[i, 1]]).collect();
+        let mut ring = numpy::ndarray::Array2::<f64>::zeros((n + 1, 2));
+        for i in 0..=n {
+            ring[[i, 0]] = pl[[i % n, 0]];
+            ring[[i, 1]] = pl[[i % n, 1]];
+        }
+        let rv = ring.view();
+        for i in 0..p.nrows() - 1 {
+            let (ax, ay, bx, by) = (p[[i, 0]], p[[i, 1]], p[[i + 1, 0]], p[[i + 1, 1]]);
+            let k = 1usize.max(((bx - ax).hypot(by - ay) / 2.0) as usize);
+            for s in 0..k {
+                let t = (s as f64 + 0.5) / k as f64;
+                let (qx, qy) = (ax + (bx - ax) * t, ay + (by - ay) * t);
+                if inside(&px, &pys, qx, qy) && polyline_min_dist(&rv, qx, qy) > margin {
+                    return true;
+                }
             }
         }
-    }
-    false
+        false
+    })
 }
 
 /// junctions._on_carriageway's test: whether any point (m, 2) lies closer than h to the polyline (k, >= 2).
 #[pyfunction]
-fn any_within(pts: PyReadonlyArray2<f64>, line: PyReadonlyArray2<f64>, h: f64) -> bool {
+fn any_within(py: Python<'_>, pts: PyReadonlyArray2<'_, f64>, line: PyReadonlyArray2<'_, f64>, h: f64) -> bool {
     let p = pts.as_array();
     let l = line.as_array();
-    (0..p.nrows()).any(|i| polyline_min_dist(&l, p[[i, 0]], p[[i, 1]]) < h)
+    py.allow_threads(|| (0..p.nrows()).any(|i| polyline_min_dist(&l, p[[i, 0]], p[[i, 1]]) < h))
 }
 
 /// buildings._shared_walls: per ring, the number of other rings with at least two vertices within tol of one of its
 /// edges. Rings concatenated in coords (N, 2) with offsets offs (n + 1); cents / rads / order as the Python computes
 /// them (numpy's means, so the same prefilter); the same arithmetic in the same order as the numpy expressions.
 #[pyfunction]
-fn shared_walls(coords: PyReadonlyArray2<f64>, offs: PyReadonlyArray1<i64>, cents: PyReadonlyArray2<f64>,
-                rads: PyReadonlyArray1<f64>, order: PyReadonlyArray1<i64>, tol: f64) -> Vec<i64> {
+fn shared_walls(py: Python<'_>, coords: PyReadonlyArray2<'_, f64>, offs: PyReadonlyArray1<'_, i64>,
+                cents: PyReadonlyArray2<'_, f64>, rads: PyReadonlyArray1<'_, f64>,
+                order: PyReadonlyArray1<'_, i64>, tol: f64) -> Vec<i64> {
     let c = coords.as_array();
     let o = offs.as_array();
     let ce = cents.as_array();
     let r = rads.as_array();
     let ord = order.as_array();
-    let n = r.len();
-    let mut cnt = vec![0i64; n];
-    if n < 2 {
-        return cnt;
-    }
-    let xs: Vec<f64> = ord.iter().map(|&i| ce[[i as usize, 0]]).collect();
-    // np.searchsorted(side="left"): the first index whose value is >= v
-    let left = |v: f64| -> usize { xs.partition_point(|&x| x < v) };
-    for &iu in ord.iter() {
-        let i = iu as usize;
-        let lo = left(ce[[i, 0]] - r[i] - 30.0);
-        let hi = left(ce[[i, 0]] + r[i] + 30.0);
-        let (ia, ib) = (o[i] as usize, o[i + 1] as usize);
-        let ni = ib - ia;
-        for k in lo..hi.max(lo) {
-            let j = ord[k] as usize;
-            if j == i || (ce[[j, 0]] - ce[[i, 0]]).hypot(ce[[j, 1]] - ce[[i, 1]]) > r[i] + r[j] + tol {
-                continue;
-            }
-            let (ja, jb) = (o[j] as usize, o[j + 1] as usize);
-            let mut close = 0usize;
-            'pts: for pj in ja..jb {
-                let (px, py) = (c[[pj, 0]], c[[pj, 1]]);
-                for e in 0..ni {
-                    let (ax, ay) = (c[[ia + e, 0]], c[[ia + e, 1]]);
-                    let bi = ia + (e + 1) % ni;
-                    let (dx, dy) = (c[[bi, 0]] - ax, c[[bi, 1]] - ay);
-                    let l2 = (dx * dx + dy * dy).max(1e-9);
-                    let t = (((px - ax) * dx + (py - ay) * dy) / l2).clamp(0.0, 1.0);
-                    let (qx, qy) = (ax + t * dx, ay + t * dy);
-                    if (px - qx).hypot(py - qy) < tol {
-                        close += 1;
-                        if close >= 2 {
-                            break 'pts;
+    py.allow_threads(|| {
+        let n = r.len();
+        let mut cnt = vec![0i64; n];
+        if n < 2 {
+            return cnt;
+        }
+        let xs: Vec<f64> = ord.iter().map(|&i| ce[[i as usize, 0]]).collect();
+        // np.searchsorted(side="left"): the first index whose value is >= v
+        let left = |v: f64| -> usize { xs.partition_point(|&x| x < v) };
+        for &iu in ord.iter() {
+            let i = iu as usize;
+            let lo = left(ce[[i, 0]] - r[i] - 30.0);
+            let hi = left(ce[[i, 0]] + r[i] + 30.0);
+            let (ia, ib) = (o[i] as usize, o[i + 1] as usize);
+            let ni = ib - ia;
+            for k in lo..hi.max(lo) {
+                let j = ord[k] as usize;
+                if j == i || (ce[[j, 0]] - ce[[i, 0]]).hypot(ce[[j, 1]] - ce[[i, 1]]) > r[i] + r[j] + tol {
+                    continue;
+                }
+                let (ja, jb) = (o[j] as usize, o[j + 1] as usize);
+                let mut close = 0usize;
+                'pts: for pj in ja..jb {
+                    let (px, py) = (c[[pj, 0]], c[[pj, 1]]);
+                    for e in 0..ni {
+                        let (ax, ay) = (c[[ia + e, 0]], c[[ia + e, 1]]);
+                        let bi = ia + (e + 1) % ni;
+                        let (dx, dy) = (c[[bi, 0]] - ax, c[[bi, 1]] - ay);
+                        let l2 = (dx * dx + dy * dy).max(1e-9);
+                        let t = (((px - ax) * dx + (py - ay) * dy) / l2).clamp(0.0, 1.0);
+                        let (qx, qy) = (ax + t * dx, ay + t * dy);
+                        if (px - qx).hypot(py - qy) < tol {
+                            close += 1;
+                            if close >= 2 {
+                                break 'pts;
+                            }
                         }
                     }
                 }
-            }
-            if close >= 2 {
-                cnt[i] += 1;
+                if close >= 2 {
+                    cnt[i] += 1;
+                }
             }
         }
-    }
-    cnt
+        cnt
+    })
 }
 
 /// numpy's float remainder (np.remainder / %) for a positive divisor: fmod, moved into [0, b), -0 as +0.

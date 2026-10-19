@@ -94,7 +94,7 @@ def build(frame, chunks, elev, origin, lift=0.0):
     draped = [r for r in rb if r[5] is None]
     pv = [np.asarray(c["poly"], np.float64)[:, :2] for c in polys]
     if draped or pv:
-        edges = np.concatenate([np.concatenate([l, r]) for l, r, _, _, _, _ in draped] + pv)
+        edges = np.concatenate([np.concatenate([l, r, 0.5 * (l + r)]) for l, r, _, _, _, _ in draped] + pv)
         la, lo, _ = frame.enu_to_geodetic(edges[:, 0], edges[:, 1], 0.0)
         h = np.asarray(elev(la, lo), np.float64)
         _, _, u = frame.geodetic_to_enu(la, lo, h)
@@ -104,8 +104,11 @@ def build(frame, chunks, elev, origin, lift=0.0):
     for left, right, v, m, layer, fz in rb:
         k = len(left)
         if fz is None:
-            z = u[k0:k0 + 2 * k] + LIFT[layer] + lift
-            k0 += 2 * k
+            zl, zr, zc = u[k0:k0 + k], u[k0 + k:k0 + 2 * k], u[k0 + 2 * k:k0 + 3 * k]
+            cross_dz = np.maximum(np.abs(zl - zc), np.abs(zr - zc))
+            slope_lift = np.clip(0.12 * cross_dz, 0.0, 0.18)
+            z = np.r_[zl + slope_lift, zr + slope_lift] + LIFT[layer] + lift
+            k0 += 3 * k
         else:                                   # on a deck: over its opaque concrete top
             z = np.r_[fz, fz] + LIFT[layer] + DECK_SKIN
         if m not in mats:
