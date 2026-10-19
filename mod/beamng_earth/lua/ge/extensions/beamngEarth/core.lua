@@ -1343,7 +1343,7 @@ local function onUpdate(dtReal, dtSim)
   st.clock = st.clock + dtReal
   -- the governor's frame opens first: its clock is the wall time since the last onUpdate (hptimer)
   gov:setLoading(st.placeFrames ~= nil or st.clock < st.loadingUntil or st.slowFor > SLOW_S)
-  gov:beginFrame(farfield.hasWork() or roads.hasWork())
+  gov:beginFrame(farfield.hasWork() or roads.hasWork() or (trees.hasWork and trees.hasWork(st.anchorId, st.player) or false))
   gov:chargeEngine(engineTickMs())     -- what the engine spent on last frame's new tiles (governor.lua)
   for _, msg in ipairs(net.update(dtReal)) do
     local ok, err = pcall(onMessage, msg)
@@ -1383,6 +1383,7 @@ local function onUpdate(dtReal, dtSim)
     updateWorld(dtReal)
     t = mark('world', t)
     local heavyFrame = gov:isHeavyFrame()
+    local quietOrHeavy = heavyFrame or gov.blocked or gov.heavyPending
     -- the roads before the far tiles: they share the governor's budget and the first to ask gets it; after a
     -- teleport the far field's hundreds of tiles took it frame after frame and the road meshes under the car
     -- came after it had passed (Brasov, Sinaia 2026-10-15: the car drove bare ground)
@@ -1393,8 +1394,8 @@ local function onUpdate(dtReal, dtSim)
     farfield.update(gov, (gov.w1 or dtReal * 1000) / 1000, st.cam, st.player)
     t = mark('far', t)
     sea.update(st.anchorId, st.player)
-    if not heavyFrame then
-      trees.update(st.anchorId, st.player)
+    if not quietOrHeavy then
+      trees.update(st.anchorId, st.player, gov)
     end
     t = mark('sea+trees', t)
     if not heavyFrame then
@@ -1414,7 +1415,11 @@ local function onUpdate(dtReal, dtSim)
     t = mark('sky', t)
   end
   drawUi(dtReal)
-  mark('draw', t)
+  t = mark('draw', t)
+  if not gov:isHeavyFrame() and not gov.blocked then
+    collectgarbage('step', 100)
+    mark('gc', t)
+  end
 end
 
 -- After physics, before rendering (main.lua:819-824): measure when a rebase's vehicle move became
