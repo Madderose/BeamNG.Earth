@@ -61,3 +61,13 @@ def tmp_for(path):
     if d is None:
         return path + ".tmp"
     return os.path.join(d, f"{os.getpid()}_{threading.get_ident()}_{next(_serial)}_{os.path.basename(path)}.tmp")
+
+
+def replace(tmp, path):
+    """Atomic replace that guarantees the destination folder exists (resilient against game update / temp wipe)."""
+    try:
+        os.replace(tmp, path)
+    except FileNotFoundError:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        os.replace(tmp, path)
+
