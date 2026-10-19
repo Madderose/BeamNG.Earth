@@ -5,8 +5,9 @@ __pycache__/
 # local backups and logs
 backups/
 *.log
+runs/optimization_logs/*.log
 
-# in-game test runs and screenshots (hundreds of MB): keep the written reports (*.md, *.json),
+# in-game test runs and screenshots (hundreds of MB): keep the written reports (*.md),
 # not the per-run folders
 docs/research/*/
 docs/research/*.jsonl
@@ -17,8 +18,9 @@ docs/research/*.jsonl
 *.swp
 .DS_Store
 
-# agent worktrees
+# agent worktrees & skills
 .claude/
+.agents/
 tools/gcpatch/build/
 docs/research/streetview/
 docs/research/ortho/
@@ -29,9 +31,25 @@ docs/research/ortho/
 dist/
 native/earthfast/target/
 build/
+cache/
 
 # temporary and local benchmark artifacts
 scratch/
 prof_*.txt
-runs/*/*.jsonl
 tools/monitor.ps1
+
+# benchmark runs, test drives, and per-run telemetry (runs shouldn't be sent)
+runs/*/
+!runs/optimization_logs/
+!runs/optimization_logs/**
+runs/optimization_logs/*.log
+runs/*/*.json
+runs/*/*.jsonl
+runs/*/*.png
+
+# intermediate / internal investigation reports
+runs/optimization_logs/phase4_merge_verification_report.md
+runs/optimization_logs/phase6_verification_report.md
+runs/optimization_logs/phase7_hiccup_investigation_report.md
+runs/optimization_logs/rubberband_investigation_report.md
+runs/optimization_logs/upstream_1.5.2_diff_exploration.md
