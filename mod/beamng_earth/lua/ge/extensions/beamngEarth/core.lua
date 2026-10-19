@@ -1420,7 +1420,7 @@ local function onUpdate(dtReal, dtSim)
   drawUi(dtReal)
   t = mark('draw', t)
   if not gov:isHeavyFrame() and not gov.blocked then
-    collectgarbage('step', 1000)
+    collectgarbage('step', 30)
     mark('gc', t)
   end
 end
