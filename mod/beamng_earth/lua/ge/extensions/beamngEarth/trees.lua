@@ -22,9 +22,9 @@ M.GOV_PRIOR_MS = 0.5      -- initial cost estimate (ms) in governor token bucket
 M.COLLISION_DEBOUNCE_S = 2.0      -- quiet window (s) after solid tree additions before requesting collision rebuild
 M.COLLISION_MAX_WAIT_S = 4.0      -- max delay (s) before flushing pending solid tree collision request
 M.COLLISION_MIN_INTERVAL_S = 8.0  -- minimum interval (s) between tree-triggered collision rebuild requests
--- 2026-10-14: was { 300, 1 }, { 550, 0.5 }, { 900, 0.25 }, { 1e9, 0.12 }; the engine already draws far trees as
--- billboards (their LODs), so our extra thinning made far forest sparse. Columbia: 48k -> 78k items, no frame cost seen.
-M.RINGS = { { 300, 1.0 }, { 700, 0.6 }, { 1500, 0.35 }, { 1e9, 0.2 } }   -- tile distance (m): the rank shown below
+-- Tree rings: clamped at 1600m to prevent infinite accumulation of far-horizon billboard instances
+-- in Torque3D's CPU shadow culling quadtree (RenderShadows), keeping active instances under 35k.
+M.RINGS = { { 300, 1.0 }, { 650, 0.5 }, { 1100, 0.25 }, { 1600, 0.1 } }   -- tile distance (m): the rank shown below
 -- small props only near the player (2026-10-14, Fells Point at street level: ~10 ms a frame for the Forest
 -- with a door on every house out to 300 m): the tile distance (m) beyond which a group is not shown
 -- rocks only over the fine ground (farfield.NEAR_RADII: L0 within 400 m): beyond it the coarser tiles round off the
