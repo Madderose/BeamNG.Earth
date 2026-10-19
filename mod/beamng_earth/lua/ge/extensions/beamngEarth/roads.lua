@@ -39,6 +39,7 @@ M.enabled = true
 -- while driving, most of the hitches of a 34 mph drive: new colliders now wait up to 6 s (still 11 s of margin
 -- at 130 mph), and colliders deleted far behind the car (their stale collision harms nobody) up to 30 s.
 M.RELOAD_EVERY_S = 6
+M.RELOAD_DRIVE_MAX_S = 60   -- maximum deferral window before forcing a collision reload during continuous driving
 -- Collision only near the car (2026-10-15: the rebuild cost scales with every colliding triangle loaded, ~40 ms in
 -- Fells Point with all 36 tiles' buildings and sidewalks): a tile's colliders (sidewalks, decks, the buildings'
 -- lean collision mesh "bldcol") are made once its centre is within COLLIDE_LEAD_S of driving (COLLIDE_M min / max)
@@ -633,8 +634,16 @@ function M.update(gov, currentAnchor, player)
     end
   end
   updateFar(gov)                -- far buildings: only with the near meshes all made (they share the budget)
-  if (collisionDirty and sinceReload() > M.RELOAD_EVERY_S * 1000)
-      or (deletesDirty and sinceReload() > M.RELOAD_DELETES_S * 1000) then
+  local veh = getPlayerVehicle and getPlayerVehicle(0)
+  local v = veh and veh.getVelocity and veh:getVelocity()
+  local speed = v and v:length() or 0
+  local isMoving = speed > 3.0
+  -- Avoid rebuilding static collision mid-drive: be:reloadCollision() drops contact pairs
+  -- and stalls the physics dt filter, causing severe vehicle rubber-banding.
+  -- Defer until vehicle slows below 3 m/s (or stopped), with an emergency safety ceiling of 60s.
+  local reloadDue = (collisionDirty and sinceReload() > M.RELOAD_EVERY_S * 1000)
+      or (deletesDirty and sinceReload() > M.RELOAD_DELETES_S * 1000)
+  if reloadDue and (not isMoving or sinceReload() > (M.RELOAD_DRIVE_MAX_S or 60) * 1000) then
     local t0 = now()
     noteNewColliders()
     be:reloadCollision()

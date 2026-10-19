@@ -114,10 +114,10 @@
     "persistentId": "cdc4bc3d-ba8e-50a6-9ce6-cc002edbc3f5",
     "Stages": [
       {
-        "baseColorMap": "/assets/materials/tileable/roofing/m_roof_slates_square/t_roof_slates_square_b.color.png",
-        "normalMap": "/assets/materials/tileable/roofing/m_roof_slates_square/t_roof_slates_square_nm.normal.png",
-        "roughnessMap": "/assets/materials/tileable/roofing/m_roof_slates_square/t_roof_slates_square_r.data.png",
-        "ambientOcclusionMap": "/assets/materials/tileable/roofing/m_roof_slates_square/t_roof_slates_square_ao.data.png",
+        "baseColorMap": "/assets/materials/tileable/roofing/m_roof_slates_square/t_roof_slates_square_b.color.dds",
+        "normalMap": "/assets/materials/tileable/roofing/m_roof_slates_square/t_roof_slates_square_nm.normal.dds",
+        "roughnessMap": "/assets/materials/tileable/roofing/m_roof_slates_square/t_roof_slates_square_r.data.dds",
+        "ambientOcclusionMap": "/assets/materials/tileable/roofing/m_roof_slates_square/t_roof_slates_square_ao.data.dds",
         "metallicFactor": 0,
         "baseColorFactor": [
           1,
@@ -141,8 +141,8 @@
     "persistentId": "f6cbbd2a-2d9f-5901-b24b-ed5b7306c7cb",
     "Stages": [
       {
-        "baseColorMap": "/levels/Utah/art/shapes/buildings/utah_roof_shingles_d.dds",
-        "normalMap": "/levels/Utah/art/shapes/buildings/utah_roof_shingles_n.dds",
+        "baseColorMap": "/assets/materials/tileable/roofing/m_roof_slates_square/t_roof_slates_square_b.color.dds",
+        "normalMap": "/assets/materials/tileable/roofing/m_roof_slates_square/t_roof_slates_square_nm.normal.dds",
         "roughnessFactor": 0.85,
         "metallicFactor": 0,
         "baseColorFactor": [
