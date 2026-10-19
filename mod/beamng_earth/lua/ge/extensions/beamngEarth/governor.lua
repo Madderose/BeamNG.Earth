@@ -30,8 +30,9 @@ local M = {}
 
 local max, min, huge = math.max, math.min, math.huge
 
-M.DEFAULT_TARGET_MS = 2.0
+M.DEFAULT_TARGET_MS = 2.5
 M.MIN_TARGET_MS, M.MAX_TARGET_MS = 1.0, 4.0
+M.URGENT_TARGET_MS = 6.0
 M.LOADING_TARGET_MS = 8.0
 M.RAMP_UP = 0.05           -- ms per frame while there is work
 M.RAMP_UP_LOADING = 0.25   -- ms per frame in loading mode
@@ -48,7 +49,7 @@ M.EST_ALPHA = 0.2          -- cost EMA gain
 -- kept importing at full rate and every frame ran 100+ ms): each frame's engine tick beyond ENGINE_FREE_MS is a debt on
 -- the bucket (chargeEngine), at most ENGINE_MAX_DEBT_MS, so imports wait until the budget has paid for it.
 M.ENGINE_FREE_MS = 2.0
-M.ENGINE_MAX_DEBT_MS = 25.0
+M.ENGINE_MAX_DEBT_MS = 8.0
 -- Prior cost estimates (ms) per unit kind: in-game P5/P6 (2026-10-10): a 2k-tri .cdae first load
 -- 3.4 ms (8k-tri 1.5 ms; v1.2 drive EMA 1.93), a 2k-tri .dae 7.5-25 ms; unhide is free; setPosition
 -- ~0.006 ms (p6). v1.3 satellite imagery (lead probe p_sat.lua): a Lua-created per-tile Material
@@ -92,6 +93,7 @@ function M.new(opts)
     clock = opts.clock or stopwatch.clock(),
     target = M.DEFAULT_TARGET_MS,
     loading = false,
+    urgent = false,
     b = 0,              -- current streaming budget, ms per frame
     bPrev = 0,          -- b of the previous frame
     tokens = 0,         -- token bucket, ms
@@ -99,6 +101,7 @@ function M.new(opts)
     used = {},          -- kinds asked for at least once (they define maxUnit)
     hist = {}, histN = 0, -- ring of recent non-heavy frame times
     base = nil,
+    tickBase = nil,     -- EMA of idle C++ engine Ticking (ms) when prevFrameUnits == 0
     frame = 0,
     lastStart = nil,
     w1 = nil, w2 = nil, -- wall durations of the previous two frames
@@ -107,6 +110,7 @@ function M.new(opts)
     delSpent = 0,       -- ms charged this frame for delete units
     engineDebt = 0,     -- unpaid engine tick debt (ms) from chargeEngine
     frameUnits = 0,     -- units run this frame
+    prevFrameUnits = 0, -- units run in the previous frame
     units = 0,          -- alias for units run this frame
     lastStreamFrame = -huge, -- last frame a unit ran in
     heavyPending = false, heavySince = nil, heavyReqFrame = nil,
@@ -127,7 +131,13 @@ end
 
 function Gov:setLoading(on) self.loading = on and true or false end
 
-function Gov:targetNow() return self.loading and M.LOADING_TARGET_MS or self.target end
+function Gov:setUrgent(urgent) self.urgent = urgent and true or false end
+
+function Gov:targetNow()
+  if self.loading then return M.LOADING_TARGET_MS end
+  if self.urgent then return max(self.target, M.URGENT_TARGET_MS) end
+  return self.target
+end
 
 -- Largest estimated unit cost among the kinds in use.
 function Gov:maxUnit()
@@ -160,6 +170,7 @@ function Gov:beginFrame(hasWork, wallMs)
     self.w1, self.w2 = wallMs, self.w1
   end
   self.prevHeavy = false
+  self.prevFrameUnits = self.frameUnits or 0
   self.frameSpent, self.delSpent, self.frameUnits, self.units = 0, 0, 0, 0
   -- a heavy request lives as long as the caller repeats it every frame
   if self.heavyPending and self.heavyReqFrame < self.frame - 1 then self.heavyPending = false end
@@ -176,7 +187,7 @@ function Gov:beginFrame(hasWork, wallMs)
     self.b = max(0, self.b - M.RAMP_DOWN_HEAVY)
   elseif hasWork then
     if self.b < target then
-      self.b = min(target, self.b + (self.loading and M.RAMP_UP_LOADING or M.RAMP_UP))
+      self.b = min(target, self.b + ((self.loading or self.urgent) and M.RAMP_UP_LOADING or M.RAMP_UP))
     else
       self.b = max(target, self.b - M.RAMP_DOWN_IDLE)
     end
@@ -226,7 +237,15 @@ end
 
 -- The previous frame's engine tick (ms, Engine.Debug metrics "Ticking"): its excess is a debt on the bucket.
 function Gov:chargeEngine(tickMs)
-  local debt = max(0, (tickMs or 0) - M.ENGINE_FREE_MS)
+  local tick = tickMs or 0
+  if (self.prevFrameUnits or 0) == 0 then
+    if tick > 0 and tick < 15 then
+      self.tickBase = self.tickBase and (self.tickBase * 0.95 + tick * 0.05) or tick
+    end
+    return 0
+  end
+  local freeMs = max(M.ENGINE_FREE_MS, (self.tickBase or 2.0) + 1.5)
+  local debt = max(0, tick - freeMs)
   if debt <= 0 then return 0 end
   self.tokens = max(-M.ENGINE_MAX_DEBT_MS, self.tokens - debt)
   self.engineDebt = min(M.ENGINE_MAX_DEBT_MS, (self.engineDebt or 0) + debt)
@@ -278,7 +297,8 @@ function Gov:heavyNow() return self:requestHeavy(true) end
 function Gov:isHeavyFrame() return self.heavyFrame == self.frame end
 
 function Gov:snapshot()
-  return { b = self.b, tokens = self.tokens, target = self:targetNow(), loading = self.loading, base = self.base,
+  return { b = self.b, tokens = self.tokens, target = self:targetNow(), loading = self.loading, urgent = self.urgent,
+    base = self.base, tickBase = self.tickBase,
     heavyPending = self.heavyPending, estCdae = self.est.cdae, estDae = self.est.dae, estCdaeTex = self.est.cdaeTex,
     estCdaeTex128 = self.est.cdaeTex128, estCdaeTex256 = self.est.cdaeTex256, estCdaeTex512 = self.est.cdaeTex512,
     estMaterial = self.est.material, estMatDelete = self.est.matDelete, heavy = self.stats.heavy,

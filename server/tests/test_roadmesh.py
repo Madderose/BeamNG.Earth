@@ -8,6 +8,7 @@ import unittest
 import numpy as np
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import cdae  # noqa: E402
 import roadmesh  # noqa: E402
 from test_roads import FRAME  # noqa: E402

@@ -31,16 +31,16 @@ M.FOREST_NAME = 'bngEarthForest'      -- a prefix: small Forests from a pool ('b
 -- be:reloadCollision, and where no road tile arrives (the Sahara's rocks, 2026-10-14) none came at all.
 -- 2026-10-15 probes: with ~150k trees all colliding, a frame changing 10 items cost the engine's tick ~124 ms, ~68 ms
 -- when the changed items' type did not collide: much of a Forest change's cost grew with the colliding items.
-M.SOLID_M = 200       -- (was 300 + 100: up to ~20k solid trees in a forest, and every terrain block move rebuilt all their
+M.SOLID_M = 90        -- (was 300 + 100: up to ~20k solid trees in a forest, and every terrain block move rebuilt all their
                       -- collision, a ~30 ms physics frame; 200 + 50 is still 5 s ahead at 100 mph, 2026-10-15)
-M.SOLID_HYST_M = 50
+M.SOLID_HYST_M = 35
 M.NO_COLLIDE = { shrub = true, desert_shrub = true, door = true, wallsign_logistics = true, wallsign_rentabox = true,
   wallsign_lemon = true, wallsign_turboburger = true }
 -- The 100 mph stutter (2026-10-15 probes): a frame that adds or removes Forest items costs the engine's tick ~0.5 us
 -- for every item in the level of each SHAPE touched (whatever its item type or Forest), so a frame making 300 items of
 -- ~20 shapes among ~130k items cost ~100 ms. A frame touches shapes whose items add up to SHAPE_ITEMS_PER_FRAME at most
 -- (at least one shape), and bushes (half of all items, one shape alone 34k) show near the player only.
-M.SHAPE_ITEMS_PER_FRAME = 4000
+M.SHAPE_ITEMS_PER_FRAME = 2000
 -- The engine tells shapes apart by their path, so a tile's items use one of SHAPE_VARIANTS spellings of each shape's
 -- path ('dir/./name', 'dir/././name', ...: the same file, a shape of its own), which splits the big populations (one
 -- beech ~7.7k items: a frame touching it cost ~4-9 ms). A variant's first items cost one ~12 ms frame (its load).
@@ -290,16 +290,28 @@ local function shapeOf(t, i, row)
   return s, sc
 end
 
+local scratchMat = nil
+local scratchEuler = nil
+local scratchPos = nil
+
 local function makeItem(fd, row, shape, sc, solid)
   local d = itemType(shape, solid)
   if not d then M.errors = M.errors + 1; return nil end
-  local m = MatrixF(true)
+  scratchMat = scratchMat or MatrixF(true)
+  scratchEuler = scratchEuler or vec3(0, 0, 0)
+  scratchPos = scratchPos or vec3(0, 0, 0)
+  if not scratchEuler.set and type(scratchEuler) == 'table' then
+    local mt = getmetatable(scratchEuler)
+    if mt then mt.set = function(v, x, y, z) v.x, v.y, v.z = x, y, z end end
+  end
   -- setFromEuler turns clockwise (the engine's headings): a row's yaw (counter-clockwise from +x, the server's) is
   -- given negated. Positive, every prop was mirrored about the x axis: doors on north-south walls backwards, on
   -- diagonal walls askew, benches and lamps turned (read back in-game 2026-10-17: rows at 141.6 rendered at -141.6)
-  m:setFromEuler(vec3(0, 0, -math.rad(row[5] or 0)))
-  m:setPosition(vec3(row[2], row[3], row[4]))
-  local ok, it = pcall(function() return fd:createNewItem(d, m, sc) end)
+  scratchEuler:set(0, 0, -math.rad(row[5] or 0))
+  scratchMat:setFromEuler(scratchEuler)
+  scratchPos:set(row[2], row[3], row[4])
+  scratchMat:setPosition(scratchPos)
+  local ok, it = pcall(fd.createNewItem, fd, d, scratchMat, sc)
   if not ok then M.errors = M.errors + 1; return nil end
   M.made = M.made + 1
   pop[shape] = (pop[shape] or 0) + 1
@@ -307,7 +319,7 @@ local function makeItem(fd, row, shape, sc, solid)
 end
 
 local function removeItem(fd, it, shape)
-  pcall(function() fd:removeItem(it) end)
+  pcall(fd.removeItem, fd, it)
   M.removed = M.removed + 1
   if shape then pop[shape] = math.max((pop[shape] or 1) - 1, 0) end
 end
@@ -600,7 +612,7 @@ function M.update(anchorId, player)
             t.pending = true
             break
           end
-          if (t.solid[i] and not solid) or allow(sh) then
+          if allow(sh) and (not t.solid[i] or allow(t.madeShape[i] or sh)) then
             local wasSolid = t.solid[i]
             if t.made[i] then removeItem(data(), t.made[i], t.madeShape[i]) end  -- solid <-> not
             t.made[i] = makeItem(data(), row, sh, sc, solid)
@@ -618,7 +630,7 @@ function M.update(anchorId, player)
             t.pending = true
             break
           end
-          if t.solid[i] or allow(t.madeShape[i] or '') then
+          if allow(t.madeShape[i] or '') then
             removeItem(data(), t.made[i], t.madeShape[i])
             if t.solid[i] then nearMade = true end
             t.made[i], t.solid[i], t.madeShape[i] = nil, nil, nil

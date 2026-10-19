@@ -707,13 +707,17 @@ local function startGroup(g, cam)
       mode = 'instant' -- nothing visible to cross over with (first fill)
     elseif not vis then
       mode = 'instant' -- C1: off-screen
+    elseif nearest <= 350 then
+      -- Within 350m of player: road driveability is critical. Instant swap eliminates coarse LOD overhang over road.
+      mode = 'instant'
     elseif activeGroups >= crossover.MAX_GROUPS then
       if nearest <= crossover.NEAR_POP_M then
         counters.capWaits = counters.capWaits + 1
         return false -- wait for a free slot (a crossover ends within 0.5 s)
+      else
+        mode = 'instant' -- over the cap and far: C1, a visible pop (stats; v1.3 D: every in-view swap should cross over)
+        counters.pops = counters.pops + 1
       end
-      mode = 'instant' -- over the cap and far: C1, a visible pop (stats; v1.3 D: every in-view swap should cross over)
-      counters.pops = counters.pops + 1
     else
       mode = (#visRems == 0) and 'rise' or 'cross' -- rise: over a previous anchor's tiles
     end
@@ -815,6 +819,14 @@ function M.onTile(msg)
   end
 end
 
+local function filterKeys(list, drop)
+  local out = {}
+  for _, k in ipairs(list) do
+    if not drop[k] then out[#out + 1] = k end
+  end
+  return out
+end
+
 function M.onSwap(msg)
   if msg.anchorId ~= anchorId then return end
   local g = { id = msg.id, add = {}, remove = {}, insts = {}, needs = {}, seq = seqN, state = 'wait',
@@ -835,7 +847,90 @@ function M.onSwap(msg)
     end
   end
   for _, k in ipairs(type(msg.remove) == 'table' and msg.remove or {}) do g.remove[#g.remove + 1] = tostring(k) end
-  groups[#groups + 1] = g
+
+  -- Algebraic swap cancellation against waiting groups (gOld.state == 'wait')
+  for i = #groups, 1, -1 do
+    local gOld = groups[i]
+    if gOld.state == 'wait' and #g.remove > 0 then
+      local newRem = {}
+      for _, k in ipairs(g.remove) do newRem[k] = true end
+      local cancelAdd = {}
+      local anyCancel = false
+      for _, k in ipairs(gOld.add) do
+        if newRem[k] and live[k] == nil then
+          cancelAdd[k] = true
+          anyCancel = true
+        end
+      end
+      if anyCancel then
+        for k in pairs(cancelAdd) do
+          local inst = gOld.insts and gOld.insts[k]
+          if inst then
+            gOld.insts[k] = nil
+            doom(inst, true)
+          end
+          if gOld.needs then gOld.needs[k] = nil end
+        end
+        gOld.add = filterKeys(gOld.add, cancelAdd)
+        g.remove = filterKeys(g.remove, cancelAdd)
+
+        local newAdd = {}
+        for _, k in ipairs(g.add) do newAdd[k] = true end
+        local cancelRem = {}
+        for _, p in ipairs(gOld.remove) do
+          if newAdd[p] then cancelRem[p] = true end
+        end
+        if next(cancelRem) then
+          for p in pairs(cancelRem) do
+            local instP = g.insts[p]
+            if instP then
+              g.insts[p] = nil
+              local lv = live[p]
+              if lv and lv.id and instP.slotSerial and objSlot[lv.id] and objSlot[lv.id].n == slotOf(instP.shape) then
+                objSlot[lv.id].serial = instP.slotSerial
+                instP.slotSerial = nil
+              end
+              doom(instP, true)
+            end
+            if g.needs then g.needs[p] = nil end
+          end
+          gOld.remove = filterKeys(gOld.remove, cancelRem)
+          g.add = filterKeys(g.add, cancelRem)
+        end
+
+        -- Merge any remaining keys of gOld into g so no partial group runs with a missing quadrant
+        local seenAdd = {}
+        for _, k in ipairs(g.add) do seenAdd[k] = true end
+        for _, k in ipairs(gOld.add) do
+          if not seenAdd[k] then
+            g.add[#g.add + 1] = k
+            seenAdd[k] = true
+          end
+          if gOld.insts and gOld.insts[k] then
+            g.insts[k] = gOld.insts[k]
+            gOld.insts[k] = nil
+          elseif gOld.needs and gOld.needs[k] then
+            g.needs[k] = true
+            gOld.needs[k] = nil
+          end
+        end
+        local seenRem = {}
+        for _, k in ipairs(g.remove) do seenRem[k] = true end
+        for _, k in ipairs(gOld.remove) do
+          if not seenRem[k] then
+            g.remove[#g.remove + 1] = k
+            seenRem[k] = true
+          end
+        end
+        if gOld.seq and gOld.seq < g.seq then g.seq = gOld.seq end
+        table.remove(groups, i)
+      end
+    end
+  end
+
+  if #g.add > 0 or #g.remove > 0 then
+    groups[#groups + 1] = g
+  end
 end
 
 function M.onRemove(msg)
@@ -1124,7 +1219,7 @@ end
 -- imports them (~0.7 textured tiles per frame): in server order the ground the car drives onto
 -- would wait behind distant tiles for seconds (the old anchor's or a coarser tile showing
 -- meanwhile). Terrain mode keeps the server's order (v1.2).
-local function peekImport(cam)
+local function peekImport(cam, player)
   while mH <= mT do
     local inst = mainQ[mH]
     if waitingInsts[inst] and not inst.doomed and inst.queued then break end
@@ -1132,29 +1227,96 @@ local function peekImport(cam)
     mH = mH + 1
   end
   if mH <= mT then
-    if not meshLayout() or not cam then return mainQ[mH], true end
-    -- nearest the camera first; outside its view cone a tile counts VIEW_PENALTY times as far (squared here), so
-    -- what is on screen fills first (server/farfield.py view_distance, the same cone)
-    local fx, fy = cam.fx or 0, cam.fy or 0
-    local fn = sqrt(fx * fx + fy * fy)
-    local cosmax
-    if fn > 0.2 then
-      fx, fy = fx / fn, fy / fn
-      local half = deg(atan(tan(rad(cam.fovDeg or 60) / 2) * 16 / 9)) + M.VIEW_MARGIN_DEG
-      cosmax = math.cos(rad(min(half, M.VIEW_MAX_DEG)))
+    local px, py, lx, ly
+    if player then
+      px, py = tonumber(player.x), tonumber(player.y)
+      local vx, vy = tonumber(player.vx) or 0, tonumber(player.vy) or 0
+      local spd = tonumber(player.speed) or sqrt(vx * vx + vy * vy)
+      if px and py and spd > 15 then
+        lx, ly = px + vx * 3.0, py + vy * 3.0
+      end
+    end
+    if not meshLayout() or (not cam and not (px and py)) then return mainQ[mH], true end
+    -- Sibling completion boost: if a tile belongs to a waiting group that covers the player or lookahead
+    -- point, or already has >= 1 sibling loaded, boost its priority so all siblings import back-to-back.
+    local boostInst = {}
+    for _, g in ipairs(groups) do
+      if g.state == 'wait' and g.insts then
+        local boost = false
+        local gx0, gy0, gx1, gy1 = huge, huge, -huge, -huge
+        for _, sib in pairs(g.insts) do
+          if sib.loaded then boost = true end
+          if sib.x0 < gx0 then gx0 = sib.x0 end
+          if sib.y0 < gy0 then gy0 = sib.y0 end
+          if sib.x1 > gx1 then gx1 = sib.x1 end
+          if sib.y1 > gy1 then gy1 = sib.y1 end
+        end
+        if not boost and px and py and px >= gx0 and px <= gx1 and py >= gy0 and py <= gy1 then
+          boost = true
+        end
+        if not boost and lx and ly and lx >= gx0 and lx <= gx1 and ly >= gy0 and ly <= gy1 then
+          boost = true
+        end
+        if boost then
+          for _, sib in pairs(g.insts) do
+            if sib.queued and not sib.doomed then boostInst[sib] = true end
+          end
+        end
+      end
+    end
+    -- nearest the camera / player / velocity-lookahead first; outside its view cone a tile counts
+    -- VIEW_PENALTY times as far (squared here), except L-1 / L0 tiles within 450m.
+    local cosmax, fx, fy
+    if cam then
+      fx, fy = cam.fx or 0, cam.fy or 0
+      local fn = sqrt(fx * fx + fy * fy)
+      if fn > 0.2 then
+        fx, fy = fx / fn, fy / fn
+        local half = deg(atan(tan(rad(cam.fovDeg or 60) / 2) * 16 / 9)) + M.VIEW_MARGIN_DEG
+        cosmax = math.cos(rad(min(half, M.VIEW_MAX_DEG)))
+      end
     end
     local pen2 = M.VIEW_PENALTY * M.VIEW_PENALTY
     local best, bd = nil, huge
     for i = mH, mT do
       local inst = mainQ[i]
       if waitingInsts[inst] and not inst.doomed and inst.queued then
-        local dx = max(inst.x0 - cam.x, 0, cam.x - inst.x1)
-        local dy = max(inst.y0 - cam.y, 0, cam.y - inst.y1)
-        local d = dx * dx + dy * dy
+        local d = huge
+        if cam and cam.x and cam.y then
+          local dx = max(inst.x0 - cam.x, 0, cam.x - inst.x1)
+          local dy = max(inst.y0 - cam.y, 0, cam.y - inst.y1)
+          d = dx * dx + dy * dy
+        end
+        if px and py then
+          local pdx = max(inst.x0 - px, 0, px - inst.x1)
+          local pdy = max(inst.y0 - py, 0, py - inst.y1)
+          local pd = pdx * pdx + pdy * pdy
+          if pd < d then d = pd end
+        end
+        if lx and ly then
+          local ldx = max(inst.x0 - lx, 0, lx - inst.x1)
+          local ldy = max(inst.y0 - ly, 0, ly - inst.y1)
+          local ld = ldx * ldx + ldy * ldy
+          if ld < d then d = ld end
+        end
+        local rawD = d
+        if inst.level and inst.level <= -1 and rawD <= 160000 then -- L-1 within 400m
+          d = d * 0.04
+        elseif inst.level and inst.level <= 0 and rawD <= 250000 then -- L0 within 500m
+          d = d * 0.25
+        end
+        if boostInst[inst] then
+          d = d * 0.05
+        end
         if cosmax and d > 0 then
           local cx, cy = (inst.x0 + inst.x1) / 2 - cam.x, (inst.y0 + inst.y1) / 2 - cam.y
-          local r = sqrt(cx * cx + cy * cy)
-          if r > inst.x1 - inst.x0 and (cx * fx + cy * fy) / r < cosmax then d = d * pen2 end
+          local r2 = cx * cx + cy * cy
+          -- NEVER apply the 9x view-cone penalty to L-1 or L0 tiles within 450m (r <= 450)
+          local nearFine = inst.level and inst.level <= 0 and (r2 <= 202500 or rawD <= 202500)
+          if not nearFine then
+            local r = sqrt(r2)
+            if r > 350.0 and r > inst.x1 - inst.x0 and (cx * fx + cy * fy) / r < cosmax then d = d * pen2 end
+          end
         end
         if d < bd then best, bd = inst, d end
       end
@@ -1316,7 +1478,7 @@ function M.update(gov, dt, cam, player)
   --    or a sibling sharing the name re-uses it for free.
   local imported = false
   while true do
-    local inst = peekImport(cam)
+    local inst = peekImport(cam, player)
     if not inst then break end
     if inst.material and not inst.mat and not inst.matFailed then
       if not satmat.exists(inst.material) then

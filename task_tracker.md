@@ -180,7 +180,7 @@ All Phase 3 sub-agents completed. Launching AGY Argon 4 High verification audit.
 **Execution Sub-Agents**: AGY Gemini Medium (`gemini-4-argon-medium`)  
 **Upstream Target**: `TecnaGamer/BeamNG.Earth` (Tags `1.5.0`, `1.5.1-beta` @ `1f60d19`)  
 **Local Baseline**: `main` (Commit `de8d1c0`)  
-**Status**: **IN PROGRESS**
+**Status**: **ALL TASKS COMPLETED & VALIDATED (M01 - M07)**
 
 ### Delegated Tasks & Objectives Matrix
 
@@ -192,6 +192,7 @@ All Phase 3 sub-agents completed. Launching AGY Argon 4 High verification audit.
 | **TASK-M04** | **In-Game Lua Extensions & Physics Pauses** | `mod/.../core.lua`<br>`mod/.../roads.lua`<br>`mod/.../farfield.lua`<br>`mod/.../trees.lua`<br>`mod/.../drophold.lua`<br>`mod/.../edgeguard.lua` | `gemini-4-argon-medium` | **Goal**: Adopt upstream's in-engine physics pause drop-hold and edge-guard banners, while keeping our front-of-queue `walkQ` road priority, doomed-tile deletion starvation fix, tree collision cache eviction, and dev mini-map sync. | **COMPLETED (Exit Code 0)** |
 | **TASK-M05** | **Sidewalk True Ground-Level Conformance** | `server/sidewalks.py`<br>`server/roads.py`<br>`server/grading.py` | `gemini-4-argon-medium` | **Goal**: Resolve user issue ("The sidewalk is less floaty but still way too high in the air, it should be near the actual ground level, if any"). Adapt sidewalk curb elevation to conform to graded road edge / natural ground instead of flat road centerline Z, clamp back slope to terrain, and verify urban-only sidewalk gating. | **COMPLETED (Exit Code 0)** |
 | **TASK-M06** | **Full Verification Suite & In-Engine Benchmark** | `tools/parallel_tests.py`<br>`tools/road_bench.py` | `gemini-4-argon-high` | **Goal**: Execute all 225+ tests in parallel across 13 CPU workers. Verify zero regressions, compile native Rust extension (`earthfast.pyd`), install mod to BeamNG, and execute live in-engine Mont Ventoux benchmark comparison. | **COMPLETED & APPROVED (Argon 4 High)** |
+| **TASK-M07** | **Dynamic LOD Lookahead & Road Occlusion Elimination** | `server/earthd.py`<br>`mod/.../farfield.lua` | `gemini-4-argon-high` | **Goal**: Eliminate mountain raw DEM mesh protruding above the graded road at high speeds (90 mph / 40.2 m/s). Implement dynamic velocity-scaled near radii, directional lookahead projection, queue class 0 priority for road-adjacent fine tiles, near-group transition cap bypass (`nearest <= 300` -> instant), and client fine-tile import scaling (`d * 0.25`). | **COMPLETED & VALIDATED (Argon 4 High)** |
 
 > `[2026-10-19 15:16:35]` **TASK-M01**: Status updated to **RUNNING (gemini-4-argon-medium)**
 > `[2026-10-19 15:35:32]` **TASK-M01**: Status updated to **COMPLETED (Exit Code 0)**
@@ -206,4 +207,477 @@ All Phase 3 sub-agents completed. Launching AGY Argon 4 High verification audit.
 > `[2026-10-19 16:11:45]` **TASK-M06**: Status updated to **RUNNING (gemini-4-argon-high)**
 > `[2026-10-19 16:22:46]` **TASK-M06**: Protocol agreement schema fix verified and audit complete.
 > `[2026-10-19 16:23:00]` **TASK-M06**: Status updated to **COMPLETED & APPROVED (Argon 4 High)**
+> `[2026-10-19 16:45:00]` **TASK-M07**: Status updated to **RUNNING (gemini-4-argon-high)** - Diagnosed 90 mph mountain DEM occlusion (61% frames stuck in L3/L4).
+> `[2026-10-19 16:55:00]` **TASK-M07**: Implemented dynamic lookahead radii, directional velocity cosine priority in server, near group transition cap bypass, and fine tile import scaling in Lua.
+> `[2026-10-19 17:03:00]` **TASK-M07**: Validated via 3km 90 mph live benchmark (0 frames in L2/L3/L4, 100% fine geometry) and full 262-test parallel Python suite (13/13 suites passed). Status updated to **COMPLETED & VALIDATED (Argon 4 High)**.
 
+---
+
+## Phase 5: Spawn Visual Glitch Remediation & 120 mph High-Speed Autonomous Test
+
+**Orchestrator**: AGY Argon 4 High (`gemini-4-argon-high`, effort=high)  
+**Verification & Analysis Agent**: AGY Argon 4 High (`gemini-4-argon-high`, effort=high)  
+**Execution Sub-Agents**: AGY Gemini Medium (`gemini-4-argon-medium`)  
+**Target Scenarios**:
+1. Fix spawn texture clipping / floating orthophoto plane at Malaucène / Bédoin origin.
+2. In-engine live environment testing & visual confirmation.
+3. Autonomous 120 mph (53.6 m/s) test drive across Mont Ventoux ascent via `road-test-driver`.
+
+### Delegated Tasks & Objectives Matrix
+
+| Task ID | Component / Area | Files Allocated | Sub-Agent Model | Goal & Technical Scope | Execution Status |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| **TASK-P5-01** | **Spawn Glitch Root Cause Analysis & Fix Formulation** | `server/earthd.py`<br>`server/grading.py`<br>`mod/.../farfield.lua`<br>`mod/.../core.lua` | `gemini-4-argon-high` | **Goal**: Isolate why the 20cm IGN BD ORTHO aerial texture floats above Z=358.96m road surface slicing wheels. Determine mechanism (`--near-visual detail` vs `mesh`, `TerrainBlock` render enabled vs Farfield LOD -1). | **COMPLETED & SIGNED OFF** |
+| **TASK-P5-02** | **Live Server Deployment & Visual Conformance Test** | `server/earthd.py` | `orchestrator` | **Goal**: Restart `earthd.py` in production-standard `--near-visual mesh` with expanded `--near-radii 250,600` and `--workers 4`. Verify in BeamNG live instance via MCP, check wheel contact, unburied wheels, and capture proof screenshot. | **COMPLETED & VERIFIED (Live Game)** |
+| **TASK-P5-03** | **120 mph (53.6 m/s) Autonomous High-Speed Test Run** | `tools/road_bench.py` | `orchestrator` / `road-test-driver` | **Goal**: Execute road-following test drive from Chalet Reynard up Mont Ventoux summit at 120 mph (53.6 m/s) in warm mode with step=3.0m. | **COMPLETED (Pass, 99.0% nominal speed)** |
+| **TASK-P5-04** | **Telemetry, Hitch & Ground Conformance Analysis** | `runs/bench_warm_120mph_*` | `gemini-4-argon-high` | **Goal**: Verify 0 resets, 0 physics falls, underLevel ratio, p50/p95/p99 frame times, and streaming backlog peak during 120 mph run. | **COMPLETED & APPROVED** |
+
+> `[2026-10-19 18:12:00]` **TASK-P5-01**: Investigation agent launched (`gemini-4-argon-high`).
+> `[2026-10-19 18:27:07]` **TASK-P5-01**: Analysis completed. Root cause isolated: `--near-visual detail` rendered uncarved raw DEM TerrainBlock at Z=359.16m while hiding conformed Farfield tiles. Fix: Run `--near-visual mesh` (Farfield LOD -1 matches road mesh within 2cm).
+> `[2026-10-19 18:28:45]` **TASK-P5-02**: Companion server `earthd.py` deployed with `--near-visual mesh --near-radii 250,600 --workers 4` (PID 1228).
+> `[2026-10-19 18:29:21]` **TASK-P5-02**: Live BeamNG game verified via MCP (`shot_live_remedy_mesh.png`). Wheels 100% flush on road, zero slicing, blue parking bay correctly on ground, exactLevel=-1, waitingGroups=0. Status updated to **COMPLETED & VERIFIED**.
+> `[2026-10-19 18:32:10]` **TASK-P5-03**: Launched autonomous 120 mph test drive (Chalet Reynard to Mont Ventoux Summit, 6.23 km @ 53.6 m/s, step=3.0m, mode=warm). Background task ID: `task-321`.
+> `[2026-10-19 18:35:32]` **TASK-P5-03**: Completed successfully with exit code 0 (`OVERALL RESULT: PASS`). Effective speed: 53.08 m/s (99.0% nominal). Full 6.23 km ascent finished without interruption.
+> `[2026-10-19 18:36:00]` **TASK-P5-04**: Telemetry validated from `runs/bench_warm_120mph_ventoux_summit/summary.json`: 0 falls, 0 vehicle resets, 0 dropped frames, median frame time 21.83 ms (~46 FPS), follow commit 7.6-9.3 ms, 0 frames in coarse L3/L4 LODs. Status updated to **COMPLETED & APPROVED**.
+
+---
+
+## Phase 6: High-Speed (120 mph) Performance & Architecture Optimization
+
+**Orchestrator**: AGY Argon 4 High (`gemini-4-argon-high`, effort=high)  
+**Investigation & Architecture Agent**: AGY Argon 4 High (`gemini-4-argon-high`, effort=high)  
+**Execution Sub-Agents**: AGY Gemini Medium (`gemini-4-argon-medium`)  
+**Target Scenarios**:
+1. Resolve 120 mph LOD lag (eliminating the 78.9% exact miss rate; keeping ground at LOD -1 / 0).
+2. Eliminate 142.6 ms engine hitches and cap governor engine debt (which reached 17.3s).
+3. Mitigate client queue bloat (1559 queued tiles in Lua, 635 waiting swap groups).
+4. Smooth out peak terrain block commit frames (56.2 ms).
+
+### Delegated Tasks & Objectives Matrix
+
+| Task ID | Component / Area | Files Allocated | Sub-Agent Model | Goal & Technical Scope | Execution Status |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| **TASK-P6-01** | **High-Speed Bottleneck & Architecture Investigation** | `server/earthd.py`<br>`server/roads.py`<br>`mod/.../farfield.lua`<br>`mod/.../governor.lua`<br>`mod/.../trees.lua`<br>`native/earthfast` | `gemini-4-argon-high` (effort=high) | **Goal**: Investigate root cause of 142.6 ms engine hitches, 17.3s governor engine debt, 1559-tile queue bloat, and 78.9% exact miss rate at 120 mph. Provide concrete code and architecture remedies. | **COMPLETED & AUDITED** |
+| **TASK-P6-A** | **Governor Token Starvation & Heavy Frame Commit Isolation** | `mod/.../governor.lua`<br>`mod/.../core.lua`<br>`mod/.../terrain.lua` | `gemini-4-argon-medium` | **Goal**: Only charge engine tick when governor ran units; cap `ENGINE_MAX_DEBT_MS = 8.0 ms`; boost budget to 6.0 ms when `underLevel > -1`; skip trees/navgraph on heavy commit frame; pre-hide standby TerrainBlock. | **COMPLETED (Exit Code 0)** |
+| **TASK-P6-B** | **Forest Mutation Capping & Zero-Allocation Trees GC** | `mod/.../trees.lua` | `gemini-4-argon-medium` | **Goal**: Enforce `allow(sh)` on solid demotions/removals; lower `SHAPE_ITEMS_PER_FRAME` to 2000; shrink `SOLID_M` to 90m; reuse `MatrixF`/`vec3` in `makeItem` to eliminate 142ms `Ticking` & 57ms `LuaGC` spikes. | **COMPLETED (Exit Code 0)** |
+| **TASK-P6-C** | **Farfield Algebraic Swap Cancellation & Velocity Capsule** | `mod/.../farfield.lua`<br>`server/farfield.py`<br>`server/earthd.py` | `gemini-4-argon-medium` | **Goal**: Collapse incoming `far_swap` groups against waiting groups when `gNew.remove` overlaps `gOld.add`, dooming un-imported intermediate tiles from `mainQ` (cutting queued from 1559 to <120); group-aware sibling boost in `peekImport`; forward velocity capsule selection. | **COMPLETED (Exit Code 0)** |
+| **TASK-P6-VERIFY** | **Verification Audit & Mod Deployment** | All modified files | `gemini-4-argon-high` (effort=high) | **Goal**: Review diffs, run all Python/Lua test suites, fix any edge regressions, compile/sync mod to BeamNG, and issue sign-off report. | **COMPLETED & APPROVED (Exit Code 0)** |
+
+> `[2026-10-19 19:16:30]` **TASK-P6-01**: Investigation agent launched (`gemini-4-argon-high`, effort=high). Output log: `scratch/argon_perf_report.md`.
+> `[2026-10-19 19:25:58]` **TASK-P6-01**: Investigation completed successfully. Key findings:
+>   1. **Deadlock in governor**: Unconditional charging of idle C++ `Ticking` drove tokens to `-25ms` permanently, halting all tile imports between $t=27\text{s}$ and $t=118\text{s}$ (91s frozen at 0 imports!).
+>   2. **142.6 ms and 110.0 ms hitches**: Caused by `trees.lua` short-circuiting `allow(sh)` on solid demotions, mutating thousands of `ForestItem`s in one frame.
+>   3. **57.8 ms LuaGC spike**: Caused by 880k+ `MatrixF` and 550k+ closure allocations in `makeItem`.
+>   4. **1,559 queued tiles**: Caused by lack of swap-group cancellation in Lua when coarsening swaps arrive for un-executed refinement groups.
+>   5. **Isotropic radius inflation**: A 600m radius circle swept 4.0 L-1 tiles/sec, compared to 1.05 L-1 tiles/sec for a forward velocity capsule.
+
+
+
+
+
+
+
+
+> `[2026-10-19 20:18:28]` **TASK-P6-A**: Status updated to **RUNNING (PID 15888)**
+> `[2026-10-19 20:18:28]` **TASK-P6-B**: Status updated to **RUNNING (PID 32024)**
+> `[2026-10-19 20:18:28]` **TASK-P6-C**: Status updated to **RUNNING (PID 55380)**
+
+> `[20:18:58]` **Heartbeat Progress Report**:
+>   * **TASK-P6-A**: Running (PID 15888): STATUS_UPDATE: Reading target files governor.lua, core.lua, and terrain.lua (10%)
+>   * **TASK-P6-C**: Running (PID 55380): STATUS_UPDATE: Reading target files farfield.lua, farfield.py, and earthd.py (10%)
+>   * **TASK-P6-B**: Running (PID 32024): STATUS_UPDATE: Checking test_vegetation.py for Lua trees test expectations (25%)`
+
+> `[20:19:28]` **Heartbeat Progress Report**:
+>   * **TASK-P6-A**: Running (PID 15888): STATUS_UPDATE: Checking test suite in server/tests/ for governor, core, and terrain contracts (20%)
+>   * **TASK-P6-C**: Running (PID 55380): STATUS_UPDATE: Inspecting unit tests in test_server.py and test_protocol_agreement.py (20%)
+>   * **TASK-P6-B**: Running (PID 32024): STATUS_UPDATE: Searching server/tests/*.py for trees.lua test harnesses (50%)`
+
+> `[20:19:58]` **Heartbeat Progress Report**:
+>   * **TASK-P6-A**: Running (PID 15888): STATUS_UPDATE: Checking test suite in server/tests/ for governor, core, and terrain contracts (20%)
+>   * **TASK-P6-C**: Running (PID 55380): STATUS_UPDATE: Inspecting unit tests in test_server.py and test_protocol_agreement.py (20%)
+>   * **TASK-P6-B**: Running (PID 32024): STATUS_UPDATE: Checking test_modsim.py for trees.lua mock objects and tests (60%)`
+
+> `[20:20:28]` **Heartbeat Progress Report**:
+>   * **TASK-P6-A**: Running (PID 15888): STATUS_UPDATE: Checking test suite in server/tests/ for governor, core, and terrain contracts (20%)
+>   * **TASK-P6-C**: Running (PID 55380): STATUS_UPDATE: Inspecting unit tests in test_server.py and test_protocol_agreement.py (20%)
+>   * **TASK-P6-B**: Running (PID 32024): STATUS_UPDATE: Checking mod/tests/ for Lua unit tests of trees.lua (65%)`
+
+> `[20:20:58]` **Heartbeat Progress Report**:
+>   * **TASK-P6-A**: Running (PID 15888): STATUS_UPDATE: Checking test suite in server/tests/ for governor, core, and terrain contracts (20%)
+>   * **TASK-P6-C**: Running (PID 55380): STATUS_UPDATE: Inspecting unit tests in test_server.py and test_protocol_agreement.py (20%)
+>   * **TASK-P6-B**: Running (PID 32024): STATUS_UPDATE: Reading mod/tests/stubs.lua to verify vec3 stub compatibility (75%)`
+
+> `[20:21:28]` **Heartbeat Progress Report**:
+>   * **TASK-P6-A**: Running (PID 15888): STATUS_UPDATE: Checking test suite in server/tests/ for governor, core, and terrain contracts (20%)
+>   * **TASK-P6-C**: Running (PID 55380): STATUS_UPDATE: Inspecting unit tests in test_server.py and test_protocol_agreement.py (20%)
+>   * **TASK-P6-B**: Running (PID 32024): STATUS_UPDATE: Reading mod/tests/stubs.lua to verify vec3 stub compatibility (75%)`
+
+> `[20:21:58]` **Heartbeat Progress Report**:
+>   * **TASK-P6-A**: Running (PID 15888): STATUS_UPDATE: Checking test suite in server/tests/ for governor, core, and terrain contracts (20%)
+>   * **TASK-P6-C**: Running (PID 55380): STATUS_UPDATE: Inspecting unit tests in test_server.py and test_protocol_agreement.py (20%)
+>   * **TASK-P6-B**: Running (PID 32024): STATUS_UPDATE: Editing trees.lua SOLID_M, SOLID_HYST_M, and SHAPE_ITEMS_PER_FRAME constants (78%)`
+
+> `[20:22:28]` **Heartbeat Progress Report**:
+>   * **TASK-P6-A**: Running (PID 15888): STATUS_UPDATE: Checking test suite in server/tests/ for governor, core, and terrain contracts (20%)
+>   * **TASK-P6-C**: Running (PID 55380): STATUS_UPDATE: Inspecting unit tests in test_server.py and test_protocol_agreement.py (20%)
+>   * **TASK-P6-B**: Running (PID 32024): STATUS_UPDATE: Editing trees.lua solid demotion and allow(sh) bypass (88%)`
+> `[2026-10-19 20:22:58]` **TASK-P6-B**: Status updated to **COMPLETED (Exit Code 0)**
+
+> `[20:22:58]` **Heartbeat Progress Report**:
+>   * **TASK-P6-A**: Running (PID 15888): STATUS_UPDATE: Checking test suite in server/tests/ for governor, core, and terrain contracts (20%)
+>   * **TASK-P6-C**: Running (PID 55380): STATUS_UPDATE: Inspecting unit tests in test_server.py and test_protocol_agreement.py (20%)
+>   * **TASK-P6-B**: COMPLETED (Exit Code 0)
+
+> `[20:23:28]` **Heartbeat Progress Report**:
+>   * **TASK-P6-A**: Running (PID 15888): STATUS_UPDATE: Checking workspace and tools for terrain.lua context (30%)
+>   * **TASK-P6-C**: Running (PID 55380): STATUS_UPDATE: Inspecting unit tests in test_server.py and test_protocol_agreement.py (20%)
+
+> `[20:23:58]` **Heartbeat Progress Report**:
+>   * **TASK-P6-A**: Running (PID 15888): STATUS_UPDATE: Checking workspace and tools for terrain.lua context (30%)
+>   * **TASK-P6-C**: Running (PID 55380): STATUS_UPDATE: Inspecting unit tests in test_server.py and test_protocol_agreement.py (20%)
+
+> `[20:24:28]` **Heartbeat Progress Report**:
+>   * **TASK-P6-A**: Running (PID 15888): STATUS_UPDATE: Checking workspace and tools for terrain.lua context (30%)
+>   * **TASK-P6-C**: Running (PID 55380): STATUS_UPDATE: Inspecting unit tests in test_server.py and test_protocol_agreement.py (20%)
+
+> `[20:24:58]` **Heartbeat Progress Report**:
+>   * **TASK-P6-A**: Running (PID 15888): STATUS_UPDATE: Checking workspace and tools for terrain.lua context (30%)
+>   * **TASK-P6-C**: Running (PID 55380): STATUS_UPDATE: Inspecting unit tests in test_server.py and test_protocol_agreement.py (20%)
+
+> `[20:25:28]` **Heartbeat Progress Report**:
+>   * **TASK-P6-A**: Running (PID 15888): STATUS_UPDATE: Checking workspace and tools for terrain.lua context (30%)
+>   * **TASK-P6-C**: Running (PID 55380): STATUS_UPDATE: Inspecting unit tests in test_server.py and test_protocol_agreement.py (20%)
+
+> `[20:25:58]` **Heartbeat Progress Report**:
+>   * **TASK-P6-A**: Running (PID 15888): STATUS_UPDATE: Checking workspace and tools for terrain.lua context (30%)
+>   * **TASK-P6-C**: Running (PID 55380): STATUS_UPDATE: Checking test_modsim.py for any farfield.lua test assertions (30%)
+
+> `[20:26:28]` **Heartbeat Progress Report**:
+>   * **TASK-P6-A**: Running (PID 15888): STATUS_UPDATE: Checking workspace and tools for terrain.lua context (30%)
+>   * **TASK-P6-C**: Running (PID 55380): STATUS_UPDATE: Checking test_modsim.py for any farfield.lua test assertions (30%)
+
+> `[20:26:58]` **Heartbeat Progress Report**:
+>   * **TASK-P6-A**: Running (PID 15888): STATUS_UPDATE: Checking workspace and tools for terrain.lua context (30%)
+>   * **TASK-P6-C**: Running (PID 55380): STATUS_UPDATE: Editing farfield.lua for algebraic swap cancellation in onSwap and velocity-lookahead in peekImport (50%)
+
+> `[20:27:28]` **Heartbeat Progress Report**:
+>   * **TASK-P6-A**: Running (PID 15888): STATUS_UPDATE: Editing terrain.lua pre-hidden block setup before registration and terrain file assignment (75%)
+>   * **TASK-P6-C**: Running (PID 55380): STATUS_UPDATE: Editing farfield.lua for algebraic swap cancellation in onSwap and velocity-lookahead in peekImport (50%)
+
+> `[20:27:58]` **Heartbeat Progress Report**:
+>   * **TASK-P6-A**: Running (PID 15888): STATUS_UPDATE: Editing terrain.lua pre-hidden block setup before registration and terrain file assignment (75%)
+>   * **TASK-P6-C**: Running (PID 55380): STATUS_UPDATE: Editing farfield.lua for algebraic swap cancellation in onSwap and velocity-lookahead in peekImport (50%)
+
+> `[20:28:28]` **Heartbeat Progress Report**:
+>   * **TASK-P6-A**: Running (PID 15888): STATUS_UPDATE: Editing terrain.lua pre-hidden block setup before registration and terrain file assignment (75%)
+>   * **TASK-P6-C**: Running (PID 55380): STATUS_UPDATE: Editing farfield.lua for algebraic swap cancellation in onSwap and velocity-lookahead in peekImport (50%)
+
+> `[20:28:58]` **Heartbeat Progress Report**:
+>   * **TASK-P6-A**: Running (PID 15888): STATUS_UPDATE: Editing terrain.lua pre-hidden block setup before registration and terrain file assignment (75%)
+>   * **TASK-P6-C**: Running (PID 55380): STATUS_UPDATE:
+
+> `[20:29:28]` **Heartbeat Progress Report**:
+>   * **TASK-P6-A**: Running (PID 15888): STATUS_UPDATE: Editing terrain.lua pre-hidden block setup before registration and terrain file assignment (75%) [Action: root agent idle; waiting up to 30m0s for 1 background task(s)]
+>   * **TASK-P6-C**: Running (PID 55380): STATUS_UPDATE: Implementing velocity capsule in farfield.py and earthd.py (75%)
+
+> `[20:29:58]` **Heartbeat Progress Report**:
+>   * **TASK-P6-A**: Running (PID 15888): STATUS_UPDATE: Editing terrain.lua pre-hidden block setup before registration and terrain file assignment (75%) [Action: root agent idle; waiting up to 30m0s for 1 background task(s)]
+>   * **TASK-P6-C**: Running (PID 55380): STATUS_UPDATE: Implementing velocity capsule in farfield.py and earthd.py (75%)
+
+> `[20:30:28]` **Heartbeat Progress Report**:
+>   * **TASK-P6-A**: Running (PID 15888): STATUS_UPDATE: Editing terrain.lua pre-hidden block setup before registration and terrain file assignment (75%) [Action: root agent idle; waiting up to 30m0s for 1 background task(s)]
+>   * **TASK-P6-C**: Running (PID 55380): STATUS_UPDATE: Implementing velocity capsule in farfield.py and earthd.py (75%)
+
+> `[20:30:58]` **Heartbeat Progress Report**:
+>   * **TASK-P6-A**: Running (PID 15888): STATUS_UPDATE: Editing terrain.lua pre-hidden block setup before registration and terrain file assignment (75%) [Action: root agent idle; waiting up to 30m0s for 1 background task(s)]
+>   * **TASK-P6-C**: Running (PID 55380): STATUS_UPDATE: Implementing velocity capsule in farfield.py and earthd.py (75%)
+
+> `[20:31:28]` **Heartbeat Progress Report**:
+>   * **TASK-P6-A**: Running (PID 15888): STATUS_UPDATE: Editing terrain.lua pre-hidden block setup before registration and terrain file assignment (75%) [Action: root agent idle; waiting up to 30m0s for 1 background task(s)]
+>   * **TASK-P6-C**: Running (PID 55380): STATUS_UPDATE: Updating earthd.py with velocity capsule selection and priority (85%)
+
+> `[20:31:58]` **Heartbeat Progress Report**:
+>   * **TASK-P6-A**: Running (PID 15888): STATUS_UPDATE: Editing terrain.lua pre-hidden block setup before registration and terrain file assignment (75%) [Action: root agent idle; waiting up to 30m0s for 1 background task(s)]
+>   * **TASK-P6-C**: Running (PID 55380): STATUS_UPDATE: Running validation unit tests test_server.py and test_protocol_agreement.py (90%) [Action: root agent idle; waiting up to 30m0s for 1 background task(s)]
+
+> `[20:32:28]` **Heartbeat Progress Report**:
+>   * **TASK-P6-A**: Running (PID 15888): STATUS_UPDATE: Editing terrain.lua pre-hidden block setup before registration and terrain file assignment (75%) [Action: root agent idle; waiting up to 30m0s for 1 background task(s)]
+>   * **TASK-P6-C**: Running (PID 55380): STATUS_UPDATE: Running validation unit tests test_server.py and test_protocol_agreement.py (90%) [Action: root agent idle; waiting up to 30m0s for 1 background task(s)]
+
+> `[20:32:58]` **Heartbeat Progress Report**:
+>   * **TASK-P6-A**: Running (PID 15888): STATUS_UPDATE: Editing terrain.lua pre-hidden block setup before registration and terrain file assignment (75%) [Action: root agent idle; waiting up to 30m0s for 1 background task(s)]
+>   * **TASK-P6-C**: Running (PID 55380): STATUS_UPDATE: Running validation unit tests test_server.py and test_protocol_agreement.py (90%) [Action: root agent idle; waiting up to 30m0s for 1 background task(s)]
+
+> `[20:33:28]` **Heartbeat Progress Report**:
+>   * **TASK-P6-A**: Running (PID 15888): STATUS_UPDATE: Editing terrain.lua pre-hidden block setup before registration and terrain file assignment (75%) [Action: root agent idle; waiting up to 30m0s for 1 background task(s)]
+>   * **TASK-P6-C**: Running (PID 55380): STATUS_UPDATE: Running validation unit tests test_server.py and test_protocol_agreement.py (90%) [Action: root agent idle; waiting up to 30m0s for 1 background task(s)]
+
+> `[20:33:58]` **Heartbeat Progress Report**:
+>   * **TASK-P6-A**: Running (PID 15888): STATUS_UPDATE: Editing terrain.lua pre-hidden block setup before registration and terrain file assignment (75%) [Action: root agent idle; waiting up to 30m0s for 1 background task(s)]
+>   * **TASK-P6-C**: Running (PID 55380): STATUS_UPDATE: Running validation unit tests test_server.py and test_protocol_agreement.py (90%) [Action: root agent idle; waiting up to 30m0s for 1 background task(s)]
+
+> `[20:34:28]` **Heartbeat Progress Report**:
+>   * **TASK-P6-A**: Running (PID 15888): STATUS_UPDATE: Editing terrain.lua pre-hidden block setup before registration and terrain file assignment (75%) [Action: root agent idle; waiting up to 30m0s for 1 background task(s)]
+>   * **TASK-P6-C**: Running (PID 55380): STATUS_UPDATE: Running validation unit tests test_server.py and test_protocol_agreement.py (90%) [Action: root agent idle; waiting up to 30m0s for 1 background task(s)]
+
+> `[20:34:58]` **Heartbeat Progress Report**:
+>   * **TASK-P6-A**: Running (PID 15888): STATUS_UPDATE: Editing terrain.lua pre-hidden block setup before registration and terrain file assignment (75%) [Action: root agent idle; waiting up to 30m0s for 1 background task(s)]
+>   * **TASK-P6-C**: Running (PID 55380): STATUS_UPDATE: Running validation unit tests test_server.py and test_protocol_agreement.py (90%) [Action: root agent idle; waiting up to 30m0s for 1 background task(s)]
+
+> `[20:35:28]` **Heartbeat Progress Report**:
+>   * **TASK-P6-A**: Running (PID 15888): STATUS_UPDATE: Editing terrain.lua pre-hidden block setup before registration and terrain file assignment (75%) [Action: root agent idle; waiting up to 30m0s for 1 background task(s)]
+>   * **TASK-P6-C**: Running (PID 55380): STATUS_UPDATE: Running validation unit tests test_server.py and test_protocol_agreement.py (90%) [Action: root agent idle; waiting up to 30m0s for 1 background task(s)]
+
+> `[20:35:58]` **Heartbeat Progress Report**:
+>   * **TASK-P6-A**: Running (PID 15888): STATUS_UPDATE: Editing terrain.lua pre-hidden block setup before registration and terrain file assignment (75%) [Action: root agent idle; waiting up to 30m0s for 1 background task(s)]
+>   * **TASK-P6-C**: Running (PID 55380): STATUS_UPDATE: Running validation unit tests test_server.py and test_protocol_agreement.py (90%) [Action: root agent idle; waiting up to 30m0s for 1 background task(s)]
+
+> `[20:36:28]` **Heartbeat Progress Report**:
+>   * **TASK-P6-A**: Running (PID 15888): STATUS_UPDATE: Editing terrain.lua pre-hidden block setup before registration and terrain file assignment (75%) [Action: root agent idle; waiting up to 30m0s for 1 background task(s)]
+>   * **TASK-P6-C**: Running (PID 55380): STATUS_UPDATE: Running validation unit tests test_server.py and test_protocol_agreement.py (90%) [Action: root agent idle; waiting up to 30m0s for 1 background task(s)]
+
+> `[20:36:58]` **Heartbeat Progress Report**:
+>   * **TASK-P6-A**: Running (PID 15888): STATUS_UPDATE: Editing terrain.lua pre-hidden block setup before registration and terrain file assignment (75%) [Action: root agent idle; waiting up to 30m0s for 1 background task(s)]
+>   * **TASK-P6-C**: Running (PID 55380): STATUS_UPDATE: Running validation unit tests test_server.py and test_protocol_agreement.py (90%) [Action: root agent idle; waiting up to 30m0s for 1 background task(s)]
+
+> `[20:37:28]` **Heartbeat Progress Report**:
+>   * **TASK-P6-A**: Running (PID 15888): STATUS_UPDATE: Editing terrain.lua pre-hidden block setup before registration and terrain file assignment (75%) [Action: root agent idle; waiting up to 30m0s for 1 background task(s)]
+>   * **TASK-P6-C**: Running (PID 55380): STATUS_UPDATE: Running validation unit tests test_server.py and test_protocol_agreement.py (90%) [Action: root agent idle; waiting up to 30m0s for 1 background task(s)]
+
+> `[20:37:58]` **Heartbeat Progress Report**:
+>   * **TASK-P6-A**: Running (PID 15888): STATUS_UPDATE: Editing terrain.lua pre-hidden block setup before registration and terrain file assignment (75%) [Action: root agent idle; waiting up to 30m0s for 1 background task(s)]
+>   * **TASK-P6-C**: Running (PID 55380): STATUS_UPDATE: Running validation unit tests test_server.py and test_protocol_agreement.py (90%) [Action: root agent idle; waiting up to 30m0s for 1 background task(s)]
+
+> `[20:38:28]` **Heartbeat Progress Report**:
+>   * **TASK-P6-A**: Running (PID 15888): STATUS_UPDATE: Editing terrain.lua pre-hidden block setup before registration and terrain file assignment (75%) [Action: root agent idle; waiting up to 30m0s for 1 background task(s)]
+>   * **TASK-P6-C**: Running (PID 55380): STATUS_UPDATE: Running validation unit tests test_server.py and test_protocol_agreement.py (90%) [Action: root agent idle; waiting up to 30m0s for 1 background task(s)]
+
+> `[20:38:58]` **Heartbeat Progress Report**:
+>   * **TASK-P6-A**: Running (PID 15888): STATUS_UPDATE: Editing terrain.lua pre-hidden block setup before registration and terrain file assignment (75%) [Action: root agent idle; waiting up to 30m0s for 1 background task(s)]
+>   * **TASK-P6-C**: Running (PID 55380): STATUS_UPDATE: Running validation unit tests test_server.py and test_protocol_agreement.py (90%) [Action: root agent idle; waiting up to 30m0s for 1 background task(s)]
+
+> `[20:39:28]` **Heartbeat Progress Report**:
+>   * **TASK-P6-A**: Running (PID 15888): STATUS_UPDATE: Editing terrain.lua pre-hidden block setup before registration and terrain file assignment (75%) [Action: root agent idle; waiting up to 30m0s for 1 background task(s)]
+>   * **TASK-P6-C**: Running (PID 55380): STATUS_UPDATE: Running validation unit tests test_server.py and test_protocol_agreement.py (90%) [Action: root agent idle; waiting up to 30m0s for 1 background task(s)]
+
+> `[20:39:58]` **Heartbeat Progress Report**:
+>   * **TASK-P6-A**: Running (PID 15888): STATUS_UPDATE: Verifying test_protocol_agreement.py and test_server. [Action: Running unit test suites (`test_server.py`, `test_protocol_agreement.py`, `test_modsim.py`]
+>   * **TASK-P6-C**: Running (PID 55380): STATUS_UPDATE: Running validation unit tests test_server.py and test_protocol_agreement.py (90%) [Action: root agent idle; waiting up to 30m0s for 1 background task(s)]
+
+> `[20:40:28]` **Heartbeat Progress Report**:
+>   * **TASK-P6-A**: Running (PID 15888): STATUS_UPDATE: Verifying test_protocol_agreement.py and test_server.py (95%) [Action: Running unit test suites (`test_server.py`, `test_protocol_agreement.py`, `test_modsim.py`]
+>   * **TASK-P6-C**: Running (PID 55380): STATUS_UPDATE: Running validation unit tests test_server.py and test_protocol_agreement.py (90%) [Action: root agent idle; waiting up to 30m0s for 1 background task(s)]
+
+> `[20:40:58]` **Heartbeat Progress Report**:
+>   * **TASK-P6-A**: Running (PID 15888): STATUS_UPDATE: Verifying test_protocol_agreement.py and test_server.py (95%) [Action: Running unit test suites (`test_server.py`, `test_protocol_agreement.py`, `test_modsim.py`]
+>   * **TASK-P6-C**: Running (PID 55380): STATUS_UPDATE: Running validation unit tests test_server.py and test_protocol_agreement.py (90%) [Action: root agent idle; waiting up to 30m0s for 1 background task(s)]
+> `[2026-10-19 20:41:28]` **TASK-P6-A**: Status updated to **COMPLETED (Exit Code 0)**
+
+> `[20:41:28]` **Heartbeat Progress Report**:
+>   * **TASK-P6-A**: COMPLETED (Exit Code 0)
+>   * **TASK-P6-C**: Running (PID 55380): STATUS_UPDATE: Running validation unit tests test_server.py and test_protocol_agreement.py (90%) [Action: root agent idle; waiting up to 30m0s for 1 background task(s)]
+
+> `[20:41:58]` **Heartbeat Progress Report**:
+>   * **TASK-P6-C**: Running (PID 55380): STATUS_UPDATE: Running validation unit tests test_server.py and test_protocol_agreement.py (90%) [Action: root agent idle; waiting up to 30m0s for 1 background task(s)]
+
+> `[20:42:28]` **Heartbeat Progress Report**:
+>   * **TASK-P6-C**: Running (PID 55380): STATUS_UPDATE: Running validation unit tests test_server.py and test_protocol_agreement.py (90%) [Action: root agent idle; waiting up to 30m0s for 1 background task(s)]
+
+> `[20:42:58]` **Heartbeat Progress Report**:
+>   * **TASK-P6-C**: Running (PID 55380): STATUS_UPDATE: Inspecting test_server.py lines 400-430 and 1080-1120 (93%) [Action: Running the validation unit tests (`test_server.py`, `test_protocol_agreement.py`, and `te]
+
+> `[20:43:28]` **Heartbeat Progress Report**:
+>   * **TASK-P6-C**: Running (PID 55380): STATUS_UPDATE: Re-running timing-sensitive tests in test_server.py (95%) [Action: Running the validation unit tests (`test_server.py`, `test_protocol_agreement.py`, and `te]
+
+> `[20:43:58]` **Heartbeat Progress Report**:
+>   * **TASK-P6-C**: Running (PID 55380): STATUS_UPDATE: Re-running timing-sensitive tests in test_server.py (95%) [Action: Running the validation unit tests (`test_server.py`, `test_protocol_agreement.py`, and `te]
+
+> `[20:44:28]` **Heartbeat Progress Report**:
+>   * **TASK-P6-C**: Running (PID 55380): STATUS_UPDATE: Re-running timing-sensitive tests in test_server.py (95%) [Action: Running the validation unit tests (`test_server.py`, `test_protocol_agreement.py`, and `te]
+
+> `[20:44:58]` **Heartbeat Progress Report**:
+>   * **TASK-P6-C**: Running (PID 55380): STATUS_UPDATE: Waiting for timing-sensitive tests in test_server.py to finish (96%) [Action: Re-running the three timing-sensitive tests in `test_server.py` and waiting for completion]
+
+> `[20:45:28]` **Heartbeat Progress Report**:
+>   * **TASK-P6-C**: Running (PID 55380): STATUS_UPDATE: Inspecting queue_delete in earthd.py (96%) [Action: Re-running the three timing-sensitive tests in `test_server.py` and waiting for completion]
+
+> `[20:45:58]` **Heartbeat Progress Report**:
+>   * **TASK-P6-C**: Running (PID 55380): STATUS_UPDATE: Inspecting queue_delete in earthd.py (96%) [Action: Re-running the three timing-sensitive tests in `test_server.py` and waiting for completion]
+
+> `[20:46:28]` **Heartbeat Progress Report**:
+>   * **TASK-P6-C**: Running (PID 55380): STATUS_UPDATE: Inspecting queue_delete in earthd.py (96%) [Action: Re-running the three timing-sensitive tests in `test_server.py` and waiting for completion]
+
+> `[20:46:58]` **Heartbeat Progress Report**:
+>   * **TASK-P6-C**: Running (PID 55380): STATUS_UPDATE: Inspecting queue_delete in earthd.py (96%) [Action: Re-running the three timing-sensitive tests in `test_server.py` and waiting for completion]
+
+> `[20:47:28]` **Heartbeat Progress Report**:
+>   * **TASK-P6-C**: Running (PID 55380): STATUS_UPDATE: Enabling 1ms Windows timer resolution in earthd.py for rate-limited queues (97%) [Action: Re-running the three timing-sensitive tests in `test_server.py` and waiting for completion]
+
+> `[20:47:58]` **Heartbeat Progress Report**:
+>   * **TASK-P6-C**: Running (PID 55380): STATUS_UPDATE: Running ServerTest, DaeServerTest, and DeleteQueueTest (98%) [Action: Re-running the three timing-sensitive tests in `test_server.py` and waiting for completion]
+
+> `[20:48:28]` **Heartbeat Progress Report**:
+>   * **TASK-P6-C**: Running (PID 55380): STATUS_UPDATE: Running ServerTest, DaeServerTest, and DeleteQueueTest (98%) [Action: Re-running the three timing-sensitive tests in `test_server.py` and waiting for completion]
+
+> `[20:48:58]` **Heartbeat Progress Report**:
+>   * **TASK-P6-C**: Running (PID 55380): STATUS_UPDATE: Running ServerTest, DaeServerTest, and DeleteQueueTest (98%) [Action: Re-running the three timing-sensitive tests in `test_server.py` and waiting for completion]
+
+> `[20:49:28]` **Heartbeat Progress Report**:
+>   * **TASK-P6-C**: Running (PID 55380): STATUS_UPDATE: Waiting for ServerTest, DaeServerTest, and DeleteQueueTest to finish (98%) [Action: Running `ServerTest.test_session`, `DaeServerTest.test_session`, and `DeleteQueueTest.test]
+
+> `[20:49:58]` **Heartbeat Progress Report**:
+>   * **TASK-P6-C**: Running (PID 55380): STATUS_UPDATE: Waiting for ServerTest, DaeServerTest, and DeleteQueueTest to finish (98%) [Action: Running `ServerTest.test_session`, `DaeServerTest.test_session`, and `DeleteQueueTest.test]
+
+> `[20:50:28]` **Heartbeat Progress Report**:
+>   * **TASK-P6-C**: Running (PID 55380): STATUS_UPDATE: Verifying ServerTest, DaeServerTest, and DeleteQueueTest (99%) [Action: Running `ServerTest.test_session`, `DaeServerTest.test_session`, and `DeleteQueueTest.test]
+
+> `[20:50:58]` **Heartbeat Progress Report**:
+>   * **TASK-P6-C**: Running (PID 55380): STATUS_UPDATE: Verifying ServerTest, DaeServerTest, and DeleteQueueTest (99%) [Action: Running `ServerTest.test_session`, `DaeServerTest.test_session`, and `DeleteQueueTest.test]
+
+> `[20:51:28]` **Heartbeat Progress Report**:
+>   * **TASK-P6-C**: Running (PID 55380): STATUS_UPDATE: Verifying ServerTest, DaeServerTest, and DeleteQueueTest (99%) [Action: Running `ServerTest.test_session`, `DaeServerTest.test_session`, and `DeleteQueueTest.test]
+
+> `[20:51:58]` **Heartbeat Progress Report**:
+>   * **TASK-P6-C**: Running (PID 55380): STATUS_UPDATE: Verifying ServerTest, DaeServerTest, and DeleteQueueTest (99%) [Action: Running `ServerTest.test_session`, `DaeServerTest.test_session`, and `DeleteQueueTest.test]
+
+> `[20:52:28]` **Heartbeat Progress Report**:
+>   * **TASK-P6-C**: Running (PID 55380): STATUS_UPDATE: Verifying protocol agreement and Lua modsim tests (99%) [Action: Running `ServerTest.test_session`, `DaeServerTest.test_session`, and `DeleteQueueTest.test]
+
+> `[20:52:58]` **Heartbeat Progress Report**:
+>   * **TASK-P6-C**: Running (PID 55380): STATUS_UPDATE: Verifying protocol agreement and Lua modsim tests (99%) [Action: Running `ServerTest.test_session`, `DaeServerTest.test_session`, and `DeleteQueueTest.test]
+
+> `[20:53:28]` **Heartbeat Progress Report**:
+>   * **TASK-P6-C**: Running (PID 55380): STATUS_UPDATE: Verifying protocol agreement and Lua modsim tests (99%) [Action: Running `ServerTest.test_session`, `DaeServerTest.test_session`, and `DeleteQueueTest.test]
+
+> `[20:53:58]` **Heartbeat Progress Report**:
+>   * **TASK-P6-C**: Running (PID 55380): STATUS_UPDATE: Verifying protocol agreement and Lua modsim tests (99%) [Action: Running `ServerTest.test_session`, `DaeServerTest.test_session`, and `DeleteQueueTest.test]
+
+> `[20:54:28]` **Heartbeat Progress Report**:
+>   * **TASK-P6-C**: Running (PID 55380): STATUS_UPDATE: Verifying protocol agreement and Lua modsim tests (99%) [Action: Running `ServerTest.test_session`, `DaeServerTest.test_session`, and `DeleteQueueTest.test]
+
+> `[20:54:58]` **Heartbeat Progress Report**:
+>   * **TASK-P6-C**: Running (PID 55380): STATUS_UPDATE: Task complete, changes verified (100%) [Action: - `python -m unittest server/tests/test_protocol_agreement.py server/tests/test_modsim.py`]
+> `[2026-10-19 20:55:28]` **TASK-P6-C**: Status updated to **COMPLETED (Exit Code 0)**
+
+> `[20:55:28]` **Heartbeat Progress Report**:
+>   * **TASK-P6-C**: COMPLETED (Exit Code 0)
+
+---
+
+### Phase 6 Verification Sign-Off Report (Argon 4 High)
+
+**Status:** **APPROVED WITH 2 PRECISION & HARNESS FIXES APPLIED**  
+**Reviewer:** Lead Verification Agent (`Gemini 4 Argon High`)  
+**Timestamp:** `2026-10-19 21:09:00+02:00`
+
+#### 1. Git Diff Statistics (Code & Test Files)
+
+```text
+ mod/beamng_earth/lua/ge/extensions/beamngEarth/core.lua     |  44 +++--
+ mod/beamng_earth/lua/ge/extensions/beamngEarth/farfield.lua | 202 +++++++++++++++++++--
+ mod/beamng_earth/lua/ge/extensions/beamngEarth/governor.lua |  32 +++-
+ mod/beamng_earth/lua/ge/extensions/beamngEarth/terrain.lua  |  33 ++--
+ mod/beamng_earth/lua/ge/extensions/beamngEarth/trees.lua    |  32 +++-
+ server/earthd.py                                            |  56 +++++-
+ server/farfield.py                                          |  40 +++-
+ server/tests/test_roadmesh.py                               |   1 +
+ tools/road_bench.py                                         | 132 +++++++++++---
+ 9 files changed, 473 insertions(+), 99 deletions(-)
+```
+
+#### 2. Unit Test Suite Outcomes
+
+All requested test suites (plus `test_farfield.py`) passed with zero failures:
+
+| Test Suite | Tests Run | Duration | Result |
+| :--- | :---: | :---: | :--- |
+| `python -m unittest server/tests/test_roads.py` | 38 | 5.690s | **OK** |
+| `python -m unittest server/tests/test_vegetation.py` | 9 | 0.447s | **OK** |
+| `python -m unittest server/tests/test_roadmesh.py` | 14 | 0.044s | **OK** |
+| `python -m unittest server/tests/test_farfield.py` | 34 | 1.197s | **OK** |
+| `python -m unittest server/tests/test_protocol_agreement.py` | 32 | 113.688s | **OK (skipped=1)** |
+| `python -m unittest server/tests/test_server.py` | 43 | 512.353s | **OK** |
+| **Total Verified** | **170** | **633.419s** | **100% PASS** |
+
+---
+
+#### 3. Detailed Technical Audit by Sub-Agent Task
+
+##### TASK-P6-A: Governor Token Starvation, Urgent Target Boost & Terrain Commit Isolation
+* **[governor.lua](file:///C:/Users/hoppj/SynologyDrive/01_Projets/Projet_BeamEarth/BeamNG.Earth/mod/beamng_earth/lua/ge/extensions/beamngEarth/governor.lua)**:
+  * **Token Starvation Elimination (`Gov:chargeEngine`)**: Verified `prevFrameUnits` is snapshotted in `Gov:beginFrame` before resetting `frameUnits`. When `prevFrameUnits == 0` (governor ran zero streaming units on the preceding frame), `chargeEngine` updates the idle C++ engine tick baseline EMA (`self.tickBase`, clamped to `(0, 15) ms`) and returns `0` without deducting tokens. When `prevFrameUnits > 0`, `freeMs = max(M.ENGINE_FREE_MS, (self.tickBase or 2.0) + 1.5)` is subtracted and `M.ENGINE_MAX_DEBT_MS` is capped at `8.0 ms` (down from `25.0 ms`), preventing the 91-second token starvation lockup observed at 120 mph.
+  * **Urgent Target Boost (`Gov:setUrgent`, `Gov:targetNow`)**: Verified `M.URGENT_TARGET_MS = 6.0` boosts the target frame budget and uses `M.RAMP_UP_LOADING` (`+0.25 ms/frame`) whenever `self.urgent` is active.
+* **[core.lua](file:///C:/Users/hoppj/SynologyDrive/01_Projets/Projet_BeamEarth/BeamNG.Earth/mod/beamng_earth/lua/ge/extensions/beamngEarth/core.lua)**:
+  * **Urgent Trigger & Adaptive Pose Cadence**: Verified `gov:setUrgent(true)` activates when `pl.speed > 25` m/s or `underLevel > -1`, and `poseInterval` scales down to `0.20s` (5 Hz) above `25 m/s` and `0.33s` (3 Hz) above `10 m/s`.
+  * **Heavy Frame Isolation**: Verified `onUpdate` checks `local heavyFrame = gov:isHeavyFrame()` and skips `roads.update`, `trees.update`, `parking.update`, and `navgraph.update` on the terrain block commit frame so secondary subsystems never compound a `TerrainBlock` swap spike.
+* **[terrain.lua](file:///C:/Users/hoppj/SynologyDrive/01_Projets/Projet_BeamEarth/BeamNG.Earth/mod/beamng_earth/lua/ge/extensions/beamngEarth/terrain.lua)**:
+  * **Pre-Registration Render Disable**: Verified `applyRender(tb)` (and optional `opts.hidden`) is invoked before `tb:registerObject(M.NAME)` in `getOrCreate`, before `importMaps` in `M.load`, and before `tb:setField('terrainFile', ...)` / `tb:postApply()` in `M.swap`, avoiding unnecessary render-quadtree and shadow allocation in mesh mode while preserving physics collision.
+
+##### TASK-P6-B: Forest Mutation Capping, Solid Demotion Gate & Zero-Allocation GC Fix
+* **[trees.lua](file:///C:/Users/hoppj/SynologyDrive/01_Projets/Projet_BeamEarth/BeamNG.Earth/mod/beamng_earth/lua/ge/extensions/beamngEarth/trees.lua)**:
+  * **Solid Demotion `allow(sh)` Enforcement**: Verified line 615 (`if allow(sh) and (not t.solid[i] or allow(t.madeShape[i] or sh)) then`) and line 633 (`if allow(t.madeShape[i] or '') then`) no longer bypass `allow(sh)` when `t.solid[i]` is true. Unfinished demotions set `t.pending = true` and retain `prio = 0` (`demote = not near and next(t.solid) ~= nil`) across subsequent frames until drained within the `M.SHAPE_ITEMS_PER_FRAME = 2000` cap.
+  * **Reduced Solid Radius**: Verified `M.SOLID_M = 90` (down from `200`) and `M.SOLID_HYST_M = 35` (down from `50`), cutting solid collision forest population by ~77%.
+  * **Zero-Allocation `makeItem` & `removeItem`**: Verified module-level `scratchMat`, `scratchEuler`, and `scratchPos` are reused via `:set(...)` and `pcall(fd.createNewItem, fd, d, scratchMat, sc)` / `pcall(fd.removeItem, fd, it)` eliminate per-item closure and userdata allocations (including fallback `.set` injection for plain-table `vec3` test stubs).
+
+##### TASK-P6-C: Algebraic Swap-Group Cancellation, Velocity-Lookahead `peekImport` & Server Velocity Capsule
+* **[farfield.lua](file:///C:/Users/hoppj/SynologyDrive/01_Projets/Projet_BeamEarth/BeamNG.Earth/mod/beamng_earth/lua/ge/extensions/beamngEarth/farfield.lua)**:
+  * **Algebraic Swap-Group Cancellation (`M.onSwap`)**: Verified that when an incoming swap group `g` removes keys that are still un-shown additions in an earlier waiting group `gOld` (`gOld.state == 'wait'` and `live[k] == nil`), those intermediate tiles are immediately doomed via `doom(inst, true)` (removing them from `mainQ` and decrementing `nQueued`), overlapping inverse `gOld.remove` / `g.add` keys are cancelled (with `slotSerial` ownership preserved on `objSlot[lv.id]` if the server re-sent a live parent tile), and any remaining uncancelled keys of `gOld` are merged into `g` so no partial group executes with a missing quadrant.
+  * **Velocity-Lookahead & Sibling Boost (`peekImport`)**: Verified `peekImport(cam, player)` evaluates minimum squared distance across camera, player (`px, py`), and 3-second velocity lookahead (`lx = px + vx * 3.0, ly = py + vy * 3.0` when `spd > 15`), applies a `0.05x` distance multiplier (`boostInst`) to queued siblings of waiting groups that already have >=1 loaded sibling or cover the player/lookahead point, scales near `L-1` (`0.04x`) and `L0` (`0.25x`) tiles, and exempts `L-1`/`L0` tiles within `450 m` from the `9x` (`VIEW_PENALTY^2`) off-camera penalty.
+* **[farfield.py](file:///C:/Users/hoppj/SynologyDrive/01_Projets/Projet_BeamEarth/BeamNG.Earth/server/farfield.py)** & **[earthd.py](file:///C:/Users/hoppj/SynologyDrive/01_Projets/Projet_BeamEarth/BeamNG.Earth/server/earthd.py)**:
+  * **Forward Velocity Capsule Selection & Priority**: Verified `Connection.reselect_far` and `Connection.order_far` compute a forward velocity segment `(fx, fy) -> lead` when `speed > 2.0 m/s` (`t_look = min(7.0, speed * 0.12)`, capped at `350.0 m`) with lateral radii tightened (`L-1: 160 m`, `L0: 380 m`), evaluating quadtree splits against `farfield.seg_distance` and promoting `L-1`/`L0` tiles within `380 m` of the velocity capsule into priority class `0`.
+
+---
+
+#### 4. Fixes Applied During Verification Audit
+
+1. **Diagonal Corner-Region Projection in [`farfield.seg_distance`](file:///C:/Users/hoppj/SynologyDrive/01_Projets/Projet_BeamEarth/BeamNG.Earth/server/farfield.py#L344-L370)**:
+   * **Finding**: `seg_distance` only evaluated the orthogonal projection `tc` of a rectangle corner `(cx, cy)` onto the segment `(px, py)-(qx, qy)` when one of the axis-line crossing parameters `t` in `ts` satisfied `ox > 0.0 and oy > 0.0` (strictly inside a corner quadrant). However, when a segment enters a corner quadrant across one boundary line (e.g., `x = x0`, where `ox == 0`) and exits across the perpendicular boundary line (e.g., `y = y0`, where `oy == 0`), neither crossing point has `ox > 0 and oy > 0`, missing the true closest approach inside the corner quadrant.
+   * **Fix**: Unconditionally appended the orthogonal projection parameter `tc = ((cx - px) * dx + (cy - py) * dy) / l2` (when `0.0 < tc < 1.0`) for all 4 rectangle corners `(x0, y0), (x0, y1), (x1, y0), (x1, y1)` into `ts`, guaranteeing exact segment-to-AABB Euclidean distance for all segment orientations.
+2. **Direct CLI Module Discovery in [`server/tests/test_roadmesh.py`](file:///C:/Users/hoppj/SynologyDrive/01_Projets/Projet_BeamEarth/BeamNG.Earth/server/tests/test_roadmesh.py#L10-L14)**:
+   * **Finding**: Running `python -m unittest server/tests/test_roadmesh.py` from the repository root raised `ModuleNotFoundError: No module named 'test_roads'` because `test_roadmesh.py` inserted `..` (`server/`) into `sys.path` but not `os.path.dirname(os.path.abspath(__file__))` (`server/tests/`).
+   * **Fix**: Added `sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))` to match the convention used across `test_server.py` and `test_protocol_agreement.py`.
+
+> `[2026-10-19 21:10:32]` **TASK-P6-VERIFY**: Status updated to **COMPLETED & APPROVED (Exit Code 0)**
+
+---
+
+### In-Engine Live Comparison Benchmark (Mont Ventoux @ 120 mph / 53.6 m/s Ascent)
+
+**Route:** Chalet Reynard $\to$ Mont Ventoux Summit (6.23 km, 2,077 curve points, 120 mph)  
+**Run Mode:** WARM (`step = 3.0 m`)  
+**Artifact:** `runs/bench_phase6_120mph_ventoux/summary.json`  
+**Summit Screenshot:** [`scratch/shot_phase6_summit_finish.png`](scratch/shot_phase6_summit_finish.png)
+
+| Metric | Pre-Phase 6 Baseline | Post-Phase 6 Optimized | Improvement / Delta |
+| :--- | :--- | :--- | :--- |
+| **Run Completion** | **PASSED (6.23 km @ 53.08 m/s)** | **PASSED (6.23 km @ 53.30 m/s)** | **100% Full Ascent Finished** |
+| **Average Frame Rate** | 42.4 FPS | **81.8 FPS** | **+92.9% (+39.4 FPS)** |
+| **Median Frame Time (p50)** | 21.83 ms (~46 FPS) | **9.85 ms (~101 FPS)** | **-54.9% (-11.98 ms)** |
+| **95th Percentile (p95)** | 43.12 ms | **24.56 ms** | **-43.0% (-18.56 ms)** |
+| **99th Percentile (p99)** | 63.85 ms | **37.70 ms** | **-41.0% (-26.15 ms)** |
+| **Peak Terrain Commit Hitch** | 56.2 ms | **20.4 ms** | **-63.7% (-35.8 ms)** |
+| **Follow Terrain Commit Latency**| 7.6 – 9.3 ms | **6.7 – 8.2 ms** | **Consistently < 8.2 ms** |
+| **Fine Ground Retention (L-1)** | 21.1% (78.9% exact miss rate) | **100.0% (9,524 / 9,524 frames)** | **Zero Miss Rate (Solid Ground)** |
+| **Client Streaming Queue Peak** | 1,559 queued tiles | **11 queued tiles** | **-99.3% (Bloat Eliminated)** |
+| **Waiting Swap Groups Peak** | 635 groups | **4 groups** | **-99.4% (Near-Zero Lag)** |
+| **Physics Falls / Resets** | 0 falls / 0 resets | **0 falls / 0 resets** | **Zero Instability** |
+| **Server Backlog Peak** | 0 tiles | **0 tiles** | **100% Real-Time Delivery** |
+
+---
+
+## Phase 7: Tree Micro-Chunking, OtherRender & 60 FPS Guarantee
+
+**Orchestrator**: Antigravity  
+**Lead Investigator**: AGY Argon 4 High (`gemini-4-argon-high`, effort=high)  
+**Hardware Profile**: AMD Ryzen 9 9955HX3D (16 physical / 32 logical cores), NVIDIA GeForce RTX 5080 Laptop GPU  
+**Target Scenario**: Mont Ventoux ascent at 120 mph with `--trees on`, frame times strictly < 16.6 ms (>= 60 FPS).  
+
+### Delegated Tasks & Objectives Matrix
+
+| Task ID | Component / Area | Files Allocated | Model | Goal & Technical Scope | Execution Status |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| **TASK-P7-INVESTIGATION** | **Tree Micro-Chunking & 60 FPS Hiccup Investigation** | `mod/.../trees.lua`<br>`mod/.../governor.lua`<br>`mod/.../core.lua`<br>`mod/.../farfield.lua`<br>`server/tests` | `gemini-4-argon-high` | **Goal**: Investigate `OtherRender` (179 ms) & `LuaGC` (64 ms) spikes in `PerfCapture_2026-10-19_21-29-42.bngperfgraph.json`. Design tree micro-batching (< 1.0 ms budget), governor token integration for trees, incremental `collectgarbage('step')`, and 32-core parallel test runner. | **RUNNING** |
+
+> `[2026-10-19 21:38:00]` **TASK-P7-INVESTIGATION**: Investigation agent launched (`gemini-4-argon-high`). Output report: `runs/optimization_logs/phase7_hiccup_investigation_report.md`.
+> `[2026-10-19 21:38:45]` **TASK-P7-INVESTIGATION**: STATUS_UPDATE: Inspected `trees.lua`, `governor.lua`, `core.lua`, `farfield.lua`, `roads.lua`, `terrain.lua`, and `tools/parallel_tests.py` (35%). Analyzing empirical perf capture, test suite bottlenecks (`test_server.py`, `test_protocol_agreement.py`, `modsim.py`), and Lua test contracts.
+> `[2026-10-19 21:40:15]` **TASK-P7-INVESTIGATION**: STATUS_UPDATE: Audited `test_server.py`, `test_protocol_agreement.py`, `test_modsim.py`, and `modsim.py` (65%). Checking Lua unit test contracts (`mod/tests/`) and formulating exact mathematical & code designs for `runs/optimization_logs/phase7_hiccup_investigation_report.md`.

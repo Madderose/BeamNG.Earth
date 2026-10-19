@@ -825,15 +825,18 @@ class Server:
                 self._delete_one()
             return
         self._deleting = True
+        next_t = [loop.time() + self.delete_gap()]
 
         def step():
-            if self.delete_queue:
+            now = loop.time()
+            while self.delete_queue and next_t[0] <= now:
                 self._delete_one()
+                next_t[0] += self.delete_gap()
             if self.delete_queue:
-                loop.call_later(self.delete_gap(), step)
+                loop.call_later(max(0.0, next_t[0] - now), step)
             else:
                 self._deleting = False
-        loop.call_later(self.delete_gap(), step)
+        loop.call_later(max(0.0, next_t[0] - loop.time()), step)
 
     # --- heightmaps ------------------------------------------------------
     def hm_name(self, key):
@@ -2955,10 +2958,25 @@ class Connection:
         self.retired = {ck: t for ck, t in self.retired.items() if now - t < self.s.retired_keep}
         self.node_changed = {n: t for n, t in self.node_changed.items() if now - t < farfield.HOLD_S}
         radius, extra = (self.horizon_select() if self.s.horizon else (self.s.radius, {}))
-        new, refined = farfield.select(*self.focus, self.forced(), self.refined, self.s.kfun,
+        vx, vy = getattr(self, "vel", (0.0, 0.0))
+        speed = math.hypot(vx, vy)
+        dyn_radii = dict(self.s.near_radii)
+        fx, fy = self.focus
+        lead = None
+        if speed > 2.0:
+            ml = self.s.min_level
+            if ml in dyn_radii:
+                dyn_radii[ml] = 160.0
+            if ml + 1 in dyn_radii:
+                dyn_radii[ml + 1] = 380.0
+            t_look = min(7.0, speed * 0.12)
+            scale = min(t_look, 350.0 / speed)
+            lead = (fx + vx * scale, fy + vy * scale)
+
+        new, refined = farfield.select(fx, fy, self.forced(), self.refined, self.s.kfun,
                                        self.s.hysteresis, radius, hold=set(self.node_changed),
-                                       min_level=self.s.min_level, radii=self.s.near_radii, layout=self.s.layout,
-                                       forced_level=self.s.forced_level, view=self.view(), **extra)
+                                       min_level=self.s.min_level, radii=dyn_radii, layout=self.s.layout,
+                                       forced_level=self.s.forced_level, view=self.view(), lead=lead, **extra)
         if self.desired:                # the first selection of an anchor is not a change
             for n in refined ^ self.refined:
                 self.node_changed[n] = now
@@ -3018,6 +3036,13 @@ class Connection:
         cone = (farfield.view_cone(self.cam)
                 if isinstance(self.cam, dict) and getattr(self, "cam_aid", None) == aid else None)
         dist = farfield.view_distances(todo, cone, fx, fy)
+        vx, vy = getattr(self, "vel", (0.0, 0.0))
+        speed = math.hypot(vx, vy)
+        lead_pt = None
+        if speed > 2.0:
+            t_look = min(7.0, speed * 0.12)
+            scale = min(t_look, 350.0 / speed)
+            lead_pt = (fx + vx * scale, fy + vy * scale)
 
         def prio(k):
             t = todo[k]
@@ -3026,7 +3051,24 @@ class Connection:
                 cls = 0
             elif t.key in started:
                 cls = 1
-            return (cls, dist[k], t.level, t.key)
+            d_eff = dist[k]
+            if lead_pt is not None:
+                x0, y0, x1, y1 = t.bbox
+                seg_d = farfield.seg_distance(fx, fy, lead_pt[0], lead_pt[1], x0, y0, x1, y1)
+                if t.level <= 0 and seg_d <= 380.0:
+                    cls = 0
+                    d_eff = min(d_eff, seg_d)
+                else:
+                    tx = (x0 + x1) * 0.5 - fx
+                    ty = (y0 + y1) * 0.5 - fy
+                    t_dist = math.hypot(tx, ty)
+                    if t_dist > 1.0:
+                        cos_v = (tx * vx + ty * vy) / (t_dist * speed)
+                        if cos_v > 0.2:
+                            d_eff = d_eff / (1.0 + cos_v)
+                        elif cos_v < -0.2 and t_dist > 400.0:
+                            d_eff = d_eff * (1.0 - cos_v)
+            return (cls, d_eff, t.level, t.key)
         self.queue = [todo[k] for k in sorted(range(len(todo)), key=prio)]
         self.qi = 0
         self.failed.clear()

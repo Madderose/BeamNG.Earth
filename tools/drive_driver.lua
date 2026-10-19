@@ -46,7 +46,7 @@ D.RAY_LEN = 3000         -- m of ray (a miss: castRayStatic returns >= the lengt
 D.MAX_VZ = 30            -- m/s; |vz| clamp of a ground profile (slope changes, rebase frames)
 D.JUMP_M = 500           -- m between the placed and the actual position that is not a rebase: stop
 D.REBASE_GRACE = 5       -- frames after a rebase in which the actual position may still be the old one
-D.RESYNC_DEG = 5         -- the measured heading this far from the commanded one (collision): resync
+D.RESYNC_DEG = 15        -- the measured heading this far from the commanded one (collision): resync
 D.RESYNC_EVERY = 30      -- frames between heading checks
 D.MAX_FRAMES = 20000     -- frame records kept between two polls (more: counted as dropped)
 D.WATCHDOG_MS = 60000    -- no poll for this long (the harness polls every second): stop and park
@@ -124,11 +124,13 @@ function D.profileAt(prof, u)
   local x = (a.x and b.x) and (a.x + f * (b.x - a.x)) or a.x
   local y = (a.y and b.y) and (a.y + f * (b.y - a.y)) or a.y
   local h
-  if a.x and b.x and a.y and b.y then
+  if a.heading and b.heading then
+    h = (a.heading + f * D.angleDiff(b.heading, a.heading)) % 360
+  elseif a.x and b.x and a.y and b.y then
     local dx, dy = b.x - a.x, b.y - a.y
     if dx ~= 0 or dy ~= 0 then h = D.headingOf(dx, dy) else h = a.heading end
   else
-    h = (a.heading + f * D.angleDiff(b.heading, a.heading)) % 360
+    h = (a.heading + f * D.angleDiff(b.heading or a.heading, a.heading)) % 360
   end
   return a.speed + f * (b.speed - a.speed), h, alt, vz, x, y
 end
