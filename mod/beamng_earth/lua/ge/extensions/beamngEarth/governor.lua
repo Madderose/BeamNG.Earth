@@ -11,10 +11,13 @@
 --    when tokens >= its estimated cost, and a frame never plans more than b + maxUnit. There is no
 --    "at least one unit per frame" rule: an expensive unit waits until enough tokens accumulated.
 --  * heavy operations (terrain commit, rebase phase 2, teleport) are isolated: once one is
---    requested, b ramps down at -0.1 ms/frame; the slot is granted only when b == 0, no unit ran in
---    the 2 frames before, and those 2 frames were calm (<= base + 1.5 ms); then 2 quiet frames
---    follow (no streaming) and b ramps up from 0 again. So no tile import ever runs within 2 frames
---    of a heavy frame, and the heavy frame stays a single isolated spike the dt filter rejects.
+--    requested, b is immediately clamped to 0 for a 2-frame quiet gate (QUIET_BEFORE = 2); the slot
+--    is granted once b == 0 for QUIET_BEFORE frames, no unit ran in the 2 frames before, and those
+--    2 frames were calm (<= base + 1.5 ms); then QUIET_AFTER = 2 quiet frames follow (no streaming)
+--    and b ramps up from 0 again. So no tile import ever runs within 2 frames of a heavy frame, and
+--    the heavy frame stays a single isolated spike the dt filter rejects without 60-frame starvation.
+--  * D3D12 presentation pacing awareness: when frame delta w1 > 11.0 ms (PRESENT_STALL_MS, indicating
+--    a D3D12 present stall), b is held at 0 for 1 cooldown frame so the D3D12 flip queue drains cleanly.
 --  * loading mode (after a teleport, or below 1 m/s for over 3 s): bT = 8 ms, ramped faster; a warp
 --    is invisible there and it speeds up the initial fill.
 -- Clock: the wall time between beginFrame() calls (hptimer, not the smoothed dtReal). base = median
@@ -37,11 +40,13 @@ M.LOADING_TARGET_MS = 8.0
 M.RAMP_UP = 0.05           -- ms per frame while there is work
 M.RAMP_UP_LOADING = 0.25   -- ms per frame in loading mode
 M.RAMP_DOWN_IDLE = 0.05    -- ms per frame without work
-M.RAMP_DOWN_HEAVY = 0.1    -- ms per frame while a heavy op waits
+M.RAMP_DOWN_HEAVY = 0.1    -- legacy constant retained for protocol/test table readers
 M.BASE_FRAMES = 64         -- base = median of this many non-heavy frames
 M.CALM_MARGIN_MS = 1.5     -- a calm frame is <= base + this
 M.QUIET_BEFORE = 2         -- frames without streaming before a heavy op
 M.QUIET_AFTER = 2          -- frames without streaming after it
+M.PRESENT_STALL_MS = 11.0  -- frame delta w1 (ms) threshold indicating a D3D12 present stall
+M.PRESENT_COOLDOWN = 1     -- cooldown frames with b = 0 after a D3D12 present stall
 M.CALM_TIMEOUT = 60        -- frames a granted-but-not-calm heavy op waits at most (b == 0 already)
 M.EST_ALPHA = 0.2          -- cost EMA gain
 -- The engine's own deferred work for what streaming made (2026-10-15, 100 mph drives: new tiles' shapes, materials and
@@ -116,8 +121,11 @@ function M.new(opts)
     heavyPending = false, heavySince = nil, heavyReqFrame = nil,
     heavyFrame = -huge, -- last frame that ran a heavy op
     quiet = 0,          -- quiet frames still to come after a heavy op
+    zeroFrames = 0,     -- consecutive completed frames with b == 0 and no streaming units
+    presentCooldown = 0, -- cooldown frames remaining after a D3D12 present stall (w1 > 11.0 ms)
+    bSaved = nil,       -- pre-cooldown streaming budget restored after 1 present cooldown frame
     blocked = false,    -- no units this frame (quiet or heavy)
-    stats = { heavy = 0, units = 0, maxFrameSpent = 0 },
+    stats = { heavy = 0, units = 0, maxFrameSpent = 0, presentCooldowns = 0 },
   }, Gov)
   if opts.targetMs then g:setTarget(opts.targetMs) end
   return g
@@ -157,10 +165,20 @@ end
 -- Call once per frame, first thing in onUpdate. wallMs: duration of the previous frame (nil =
 -- measure with the clock). hasWork: streaming work is waiting.
 function Gov:beginFrame(hasWork, wallMs)
+  if self.frame > 0 then
+    if self.b == 0 and (self.frameUnits or 0) == 0 and not self.prevHeavy then
+      self.zeroFrames = (self.zeroFrames or 0) + 1
+    else
+      self.zeroFrames = 0
+    end
+  end
   self.frame = self.frame + 1
   local t = self.clock()
+  local wallArg = wallMs ~= nil
   if wallMs == nil then wallMs = self.lastStart and (t - self.lastStart) or nil end
   self.lastStart = t
+  local prevBase = self.base
+  local wasHeavy = self.prevHeavy
   if wallMs then
     if not self.prevHeavy then
       self.histN = self.histN + 1
@@ -179,12 +197,33 @@ function Gov:beginFrame(hasWork, wallMs)
   self.bPrev = self.b
   if self.quiet > 0 then
     self.quiet = self.quiet - 1
+    self.presentCooldown = 0
+    self.bSaved = nil
     self.b, self.tokens, self.engineDebt, self.blocked = 0, 0, 0, true
     return
   end
+  -- D3D12 presentation pacing awareness: when frame delta w1 > 11.0 ms (indicating a D3D12 present stall),
+  -- hold self.b = 0 for 1 cooldown frame so the D3D12 flip queue drains cleanly.
+  if not wasHeavy and self.w1 ~= nil and self.w1 > M.PRESENT_STALL_MS
+      and ((prevBase ~= nil and prevBase <= M.PRESENT_STALL_MS) or (prevBase == nil and wallArg and self.w1 > 11.5)) then
+    if self.bSaved == nil then self.bSaved = self.bPrev end
+    self.presentCooldown = M.PRESENT_COOLDOWN - 1
+    self.b, self.tokens, self.blocked = 0, min(self.tokens, 0), true
+    self.stats.presentCooldowns = (self.stats.presentCooldowns or 0) + 1
+    return
+  elseif (self.presentCooldown or 0) > 0 then
+    self.presentCooldown = self.presentCooldown - 1
+    self.b, self.tokens, self.blocked = 0, min(self.tokens, 0), true
+    return
+  end
+  if self.bSaved ~= nil then
+    self.b = self.bSaved
+    self.bSaved = nil
+    self.bPrev = self.b
+  end
   self.blocked = false
   if self.heavyPending then
-    self.b = max(0, self.b - M.RAMP_DOWN_HEAVY)
+    self.b = 0
   elseif hasWork then
     if self.b < target then
       self.b = min(target, self.b + ((self.loading or self.urgent) and M.RAMP_UP_LOADING or M.RAMP_UP))
@@ -265,6 +304,8 @@ local function grant(self)
   self.heavyPending, self.heavySince = false, nil
   self.heavyFrame = self.frame
   self.quiet = M.QUIET_AFTER
+  self.zeroFrames = 0
+  self.bSaved = nil
   self.b, self.tokens, self.blocked = 0, 0, true
   self.prevHeavy = true -- this frame's duration is not part of base
   self.stats.heavy = self.stats.heavy + 1
@@ -278,13 +319,17 @@ function Gov:requestHeavy(urgent)
   if self.heavyFrame == self.frame then return true end -- one slot per frame, shared
   if not self.heavyPending then
     self.heavyPending, self.heavySince = true, self.frame
-    -- this frame already ramped for streaming: ramp down from the previous frame's b instead
-    if self.frameUnits == 0 and not self.blocked then self.b = max(0, self.bPrev - M.RAMP_DOWN_HEAVY) end
+    -- Immediate 2-frame quiet gate: clamp b = 0 for QUIET_BEFORE = 2 frames before commit
+    if self.frameUnits == 0 and not self.blocked then self.b = 0 end
   end
   self.heavyReqFrame = self.frame
-  self.tokens = min(self.tokens, self.b)
+  self.b = 0
+  self.bSaved = nil
+  self.tokens = min(self.tokens, 0)
   if urgent then return grant(self) end
-  if self.b > 0 or self.frame - self.lastStreamFrame <= M.QUIET_BEFORE then return false end
+  if self.b > 0 or (self.zeroFrames or 0) < M.QUIET_BEFORE or self.frame - self.lastStreamFrame <= M.QUIET_BEFORE then
+    return false
+  end
   local calm = self.base ~= nil and self.w1 ~= nil and self.w2 ~= nil
     and self.w1 <= self.base + M.CALM_MARGIN_MS and self.w2 <= self.base + M.CALM_MARGIN_MS
   if calm or self.frame - self.heavySince >= M.CALM_TIMEOUT then return grant(self) end
@@ -302,7 +347,8 @@ function Gov:snapshot()
     heavyPending = self.heavyPending, estCdae = self.est.cdae, estDae = self.est.dae, estCdaeTex = self.est.cdaeTex,
     estCdaeTex128 = self.est.cdaeTex128, estCdaeTex256 = self.est.cdaeTex256, estCdaeTex512 = self.est.cdaeTex512,
     estMaterial = self.est.material, estMatDelete = self.est.matDelete, heavy = self.stats.heavy,
-    units = self.stats.units, maxFrameSpent = self.stats.maxFrameSpent, engineDebt = self.stats.engineDebt }
+    units = self.stats.units, maxFrameSpent = self.stats.maxFrameSpent, engineDebt = self.stats.engineDebt,
+    presentCooldowns = self.stats.presentCooldowns }
 end
 
 M.Gov = Gov

@@ -39,7 +39,10 @@ M.enabled = true
 -- while driving, most of the hitches of a 34 mph drive: new colliders now wait up to 6 s (still 11 s of margin
 -- at 130 mph), and colliders deleted far behind the car (their stale collision harms nobody) up to 30 s.
 M.RELOAD_EVERY_S = 6
-M.RELOAD_DRIVE_MAX_S = 60   -- maximum deferral window before forcing a collision reload during continuous driving
+M.RELOAD_DRIVE_MAX_S = 15.0 -- maximum deferral window (s) before forcing a collision reload when dirty
+M.RELOAD_HORIZON_RATIO = 0.55 -- reload once vehicle travels > 55% of collideRadius since last reload
+M.DECK_URGENT_M = 200       -- urgent lookahead floor (m) for unflushed collidable decks / tunnels
+M.DECK_URGENT_S = 4.0       -- urgent lookahead time (s) for unflushed collidable decks / tunnels
 -- Collision only near the car (2026-10-15: the rebuild cost scales with every colliding triangle loaded, ~40 ms in
 -- Fells Point with all 36 tiles' buildings and sidewalks): a tile's colliders (sidewalks, decks, the buildings'
 -- lean collision mesh "bldcol") are made once its centre is within COLLIDE_LEAD_S of driving (COLLIDE_M min / max)
@@ -56,7 +59,8 @@ local newColliders = {}    -- { id, walkQ entry } of the colliders made since th
 local parked = {}          -- walkQ entries of colliders whose tile is not near enough yet
 local sinceCollideCheck = stopwatch.new()
 local held = {}            -- walkQ entries of colliding meshes held while the player is in their boxes
-local noteNewColliders, playerIn, releaseHeld
+local lastReloadX, lastReloadY = nil, nil
+local noteNewColliders, playerIn, releaseHeld, hasUrgentStructure
 local tiles = {}            -- key "a:tx_ty" -> { anchor, objs = { DecalRoad ids }, queued = n, walk = TSStatic id,
                             --   road = TSStatic id }
 local walkQ = {}            -- { key, walk = {shape, pos}, what = 'walk' | 'road' } FIFO
@@ -247,10 +251,26 @@ function M.collideRadius(speed)
 end
 
 local lastRadius = M.COLLIDE_M[1]
+
+local function nearPlayerXY(x, y, r, px, py)
+  if not x or not y then return true end
+  if not px or not py then
+    local veh = getPlayerVehicle and getPlayerVehicle(0)
+    if not veh then return true end
+    local q = veh:getPosition()
+    if not q then return true end
+    px, py = q.x, q.y
+  end
+  local dx, dy = x - px, y - py
+  return dx * dx + dy * dy <= r * r
+end
+
 -- Is tile t's centre within the collision radius of the player? (no car or no centre: yes)
-function M.collideNear(t, extra)
+-- Zero per-frame vec3 allocations.
+function M.collideNear(t, extra, px, py)
   if not t or not t.cx then return true end
-  return M.nearPlayer(vec3(t.cx, t.cy, 0), lastRadius + (extra or 0) + M.TILE_M * 0.71)
+  local r = lastRadius + (extra or 0) + M.TILE_M * 0.71
+  return nearPlayerXY(t.cx, t.cy, r, px, py)
 end
 
 -- Every COLLIDE_CHECK_S: parked colliders whose tile came near queued; far tiles' colliders dropped.
@@ -259,19 +279,21 @@ local function updateCollideRange()
   sinceCollideCheck = stopwatch.new()
   local veh = getPlayerVehicle and getPlayerVehicle(0)
   local v = veh and veh.getVelocity and veh:getVelocity()
+  local pos = veh and veh.getPosition and veh:getPosition()
+  local px, py = pos and pos.x, pos and pos.y
   lastRadius = M.collideRadius(v and v:length() or 0)
   if #parked > 0 then
     local keep = {}
     for _, q in ipairs(parked) do
       local t = tiles[q.key]
       if t then
-        if M.collideNear(t) then walkQ[#walkQ + 1] = q else keep[#keep + 1] = q end
+        if M.collideNear(t, 0, px, py) then walkQ[#walkQ + 1] = q else keep[#keep + 1] = q end
       end
     end
     parked = keep
   end
   for key, t in pairs(tiles) do
-    if t.cq and not M.collideNear(t, M.UNCOLLIDE_M) then
+    if t.cq and not M.collideNear(t, M.UNCOLLIDE_M, px, py) then
       for what, q in pairs(t.cq) do
         if t[what] then deleteQ[#deleteQ + 1] = t[what]; t[what] = nil end
         if not t.ghost then parked[#parked + 1] = q end   -- a ghost's queue entries are the old frame's
@@ -288,18 +310,43 @@ local function isCollider(o)
 end
 
 -- collide: true ('Visible Mesh Final'), a collision type name, or false / nil (render only)
-local function createWalk(walk, collide)
+-- shadow: true to keep shadow casting enabled, false/nil to disable when non-colliding
+local function createWalk(walk, collide, shadow)
   local o = createObject('TSStatic')
   o:setField('shapeName', 0, walk.shape)
   -- 'Visible Mesh Final' (the engine's own suggestion: 'Performance: Mesh is using visible collision ... switch the
   -- mesh to Visible Mesh Final'); the same collision (in-game rays, 2026-10-17)
-  o:setField('collisionType', 0, type(collide) == 'string' and collide or (collide and 'Visible Mesh Final' or 'None'))
+  local colType = type(collide) == 'string' and collide or (collide and 'Visible Mesh Final' or 'None')
+  o:setField('collisionType', 0, colType)
   o:setField('decalType', 0, 'None')
+  local castShadow = shadow
+  if castShadow == nil then
+    castShadow = colType == 'Visible Mesh Final'
+  end
+  if not castShadow then
+    o:setField('isRenderShadowEnabled', 0, 'false')
+    o:setField('castShadows', 0, '0')
+  end
   o.canSave = false
   o:setPosition(vec3(walk.pos[1], walk.pos[2], walk.pos[3]))
   o:registerObject('')
   group():addObject(o)
   return o:getID()
+end
+
+local function spawnFar(f)
+  return createWalk({ shape = f.shape, pos = f.pos }, false, false)
+end
+
+local function spawnWalk(q)
+  local isRoad = q.what == 'road' or q.what == 'wire' or q.renderOnly   -- render-only meshes
+  -- the buildings' and sidewalks' lean meshes are a collision detail (server cdae collision_only): never drawn
+  local collide = (q.what == 'bldcol' or q.what == 'walkcol') and 'Collision Mesh' or not isRoad
+  -- Only keep shadow casting enabled on near 3D building meshes (bld), bridge decks (deck), and sidewalks
+  local castShadow = (q.what:sub(1, 3) == 'bld' and q.what ~= 'bldcol')
+    or q.what == 'deck'
+    or (q.what == 'walk' and not q.renderOnly)
+  return createWalk(q.walk, collide, castShadow)
 end
 
 local function createChunk(chunk)
@@ -322,7 +369,7 @@ function M.onTile(msg, currentAnchor)
   if tiles[key] then dropTile(key) end
   local text = readFile(msg.path)
   local ok, data = pcall(jsonDecode, text or '')
-  if not ok or type(data) ~= 'table' or type(data.chunks) ~= 'table' then
+  if not ok or type(data) ~= 'table' or (type(data.chunks) ~= 'table' and type(data.road) ~= 'table') then
     lastError = 'unreadable road tile ' .. tostring(msg.path)
     return false
   end
@@ -340,13 +387,14 @@ function M.onTile(msg, currentAnchor)
     end
   end
   local road = type(data.road) == 'table' and data.road.shape and type(data.road.pos) == 'table' and data.road
-  tiles[key] = { anchor = msg.anchorId, objs = {}, queued = road and 0 or #data.chunks,
+  local chunks = type(data.chunks) == 'table' and data.chunks or {}
+  tiles[key] = { anchor = msg.anchorId, objs = {}, queued = road and 0 or #chunks,
     colliders = type(data.colliders) == 'table' and data.colliders or {}, slots = slots }
   sinceChange = stopwatch.new()
   if road then                -- the tile's road mesh replaces its DecalRoads (server/roadmesh.py)
     table.insert(walkQ, 1, { key = key, walk = road, what = 'road' })
   else
-    for _, c in ipairs(data.chunks) do createQ[#createQ + 1] = { key = key, chunk = c } end
+    for _, c in ipairs(chunks) do createQ[#createQ + 1] = { key = key, chunk = c } end
   end
   if type(data.props) == 'table' and type(data.props.items) == 'table' then   -- street lights, poles (trees.lua)
     require('beamngEarth/trees').onRows(msg.anchorId, 'p' .. tostring(msg.key), data.props.items, data.props.groups)
@@ -430,7 +478,7 @@ local function updateFar(gov)
     if f and not f.id then
       local t0 = now()
       loadMaterials()
-      local ok, id = pcall(createWalk, { shape = f.shape, pos = f.pos }, false)
+      local ok, id = pcall(spawnFar, f)
       if ok then f.id = id; slotMade(id, f.shape) else lastError = tostring(id) end
       gov:charge('roadWalk', now() - t0)
     end
@@ -487,6 +535,9 @@ function M.transform(xf, geodesy)
       f.ghost = true
       any = true
     end
+  end
+  if lastReloadX and lastReloadY then
+    lastReloadX, lastReloadY = xf:apply(lastReloadX, lastReloadY, 0)
   end
   local function keepNew(list)
     local keep = {}
@@ -622,8 +673,7 @@ function M.update(gov, currentAnchor, player)
       local t0 = now()
       loadMaterials()
       local isRoad = q.what == 'road' or q.what == 'wire' or q.renderOnly   -- render-only meshes
-      -- the buildings' and sidewalks' lean meshes are a collision detail (server cdae collision_only): never drawn
-      local ok, id = pcall(createWalk, q.walk, (q.what == 'bldcol' or q.what == 'walkcol') and 'Collision Mesh' or not isRoad)
+      local ok, id = pcall(spawnWalk, q)
       if ok then slotMade(id, q.walk.shape) end
       if ok then
         if not isRoad then t.cq = t.cq or {}; t.cq[q.what] = q end
@@ -636,20 +686,84 @@ function M.update(gov, currentAnchor, player)
   updateFar(gov)                -- far buildings: only with the near meshes all made (they share the budget)
   local veh = getPlayerVehicle and getPlayerVehicle(0)
   local v = veh and veh.getVelocity and veh:getVelocity()
-  local speed = v and v:length() or 0
-  local isMoving = speed > 3.0
-  -- Avoid rebuilding static collision mid-drive: be:reloadCollision() drops contact pairs
-  -- and stalls the physics dt filter, causing severe vehicle rubber-banding.
-  -- Defer until vehicle slows below 3 m/s (or stopped), with an emergency safety ceiling of 60s.
-  local reloadDue = (collisionDirty and sinceReload() > M.RELOAD_EVERY_S * 1000)
-      or (deletesDirty and sinceReload() > M.RELOAD_DELETES_S * 1000)
-  if reloadDue and (not isMoving or sinceReload() > (M.RELOAD_DRIVE_MAX_S or 60) * 1000) then
+  local p = veh and veh.getPosition and veh:getPosition()
+  local px = (p and p.x) or (player and player.x)
+  local py = (p and p.y) or (player and player.y)
+  local speed = (v and v.length and v:length()) or (player and player.speed) or 0
+  local collideR = M.collideRadius(speed)
+  lastRadius = collideR
+  local traveledSq = 0
+  if px and py then
+    if lastReloadX and lastReloadY then
+      local dx, dy = px - lastReloadX, py - lastReloadY
+      traveledSq = dx * dx + dy * dy
+    else
+      lastReloadX, lastReloadY = px, py
+    end
+  end
+  local timeSinceLastReload = sinceReload() / 1000
+  local colDirty = (collisionDirty and timeSinceLastReload > M.RELOAD_EVERY_S)
+      or (deletesDirty and timeSinceLastReload > M.RELOAD_DELETES_S)
+  local horizonM = M.RELOAD_HORIZON_RATIO * collideR
+  local traveledHorizon = collisionDirty and (traveledSq > horizonM * horizonM)
+  local urgentStructure = collisionDirty and hasUrgentStructure(px, py, math.max(M.DECK_URGENT_M, M.DECK_URGENT_S * speed))
+  local shouldReload = traveledHorizon
+      or urgentStructure
+      or (speed <= 3.0 and colDirty)
+      or (timeSinceLastReload > (M.RELOAD_DRIVE_MAX_S or 15.0) and colDirty)
+  if shouldReload then
     local t0 = now()
     noteNewColliders()
     be:reloadCollision()
+    if px and py then lastReloadX, lastReloadY = px, py end
     collisionDirty, deletesDirty, sinceReload = false, false, stopwatch.new()
-    if gov.chargeEngine then gov:chargeEngine(now() - t0) end
+    if gov then
+      if gov.spend then
+        gov:spend(gov.b or 0)
+      elseif gov.chargeMotion then
+        gov:chargeMotion(gov.b or 0)
+      end
+      gov.tokens = 0
+      gov.blocked = true
+      gov.quietAfter = 2
+      gov.quiet = math.max(gov.quiet or 0, 2)
+      if gov.chargeEngine then gov:chargeEngine(now() - t0) end
+    end
   end
+end
+
+-- Any unflushed collidable deck (bridge) or tunnel within r m (horizontally) of (px, py)?
+hasUrgentStructure = function(px, py, r)
+  if #newColliders == 0 or not px or not py then return false end
+  local rSq = r * r
+  for i = 1, #newColliders do
+    local q = newColliders[i][2]
+    if (q.what == 'deck' or q.what == 'tunnel') and not q.renderOnly then
+      local t = tiles[q.key]
+      if t and t[q.what] then
+        local boxes = t.colliders and t.colliders[q.what]
+        if type(boxes) == 'table' and #boxes > 0 then
+          for j = 1, #boxes do
+            local b = boxes[j]
+            local dx = math.max(b[1] - px, 0, px - b[4])
+            local dy = math.max(b[2] - py, 0, py - b[5])
+            if dx * dx + dy * dy <= rSq then return true end
+          end
+        else
+          local pos = q.walk and q.walk.pos
+          if pos and pos[1] and pos[2] then
+            local dx, dy = px - pos[1], py - pos[2]
+            if dx * dx + dy * dy <= rSq then return true end
+          end
+          if t.cx and t.cy then
+            local dx, dy = px - t.cx, py - t.cy
+            if dx * dx + dy * dy <= rSq then return true end
+          end
+        end
+      end
+    end
+  end
+  return false
 end
 
 -- A colliding mesh (sidewalks, bridge decks) never turns solid around the player's car (2026-10-13: the
@@ -661,11 +775,8 @@ M.PLAYER_DZ = 2.5   -- m above / below
 
 -- Is world position p within r m (horizontally) of the player's car? (no car: yes, to be safe)
 function M.nearPlayer(p, r)
-  local veh = getPlayerVehicle and getPlayerVehicle(0)
-  if not veh or not p then return true end
-  local q = veh:getPosition()
-  local dx, dy = p.x - q.x, p.y - q.y
-  return dx * dx + dy * dy <= r * r
+  if not p then return true end
+  return nearPlayerXY(p.x, p.y, r)
 end
 
 playerIn = function(boxes)
@@ -726,6 +837,9 @@ function M.hasWork() return #createQ > 0 or #deleteQ > 0 or #walkQ > 0 or #farQ 
 function M.collisionRebuilt()
   -- that rebuild already made them solid: one held now leaves the physics at the next one
   local removed = noteNewColliders()
+  local veh = getPlayerVehicle and getPlayerVehicle(0)
+  local p = veh and veh.getPosition and veh:getPosition()
+  if p then lastReloadX, lastReloadY = p.x, p.y end
   collisionDirty, deletesDirty, sinceReload = removed > 0, false, stopwatch.new()
 end
 
@@ -748,6 +862,7 @@ function M.clear()
   end
   deleteQ = {}
   walkQ, parked = {}, {}
+  lastReloadX, lastReloadY = nil, nil
   if collisionDirty then be:reloadCollision(); collisionDirty = false end
 end
 
@@ -760,6 +875,7 @@ function M.reset()
   objSlot, slotLive, slotDropped = {}, {}, {}
   tiles, createQ, deleteQ, walkQ, anchorId, loadedMaterials = {}, {}, {}, {}, nil, false
   far, farQ = {}, {}
+  lastReloadX, lastReloadY = nil, nil
   collisionDirty, deletesDirty = false, false
 end
 

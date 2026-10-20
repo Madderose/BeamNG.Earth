@@ -58,7 +58,7 @@ M.MICRO_SHAPE_ITEMS = 600
 -- The engine tells shapes apart by their path, so a tile's items use one of SHAPE_VARIANTS spellings of each shape's
 -- path ('dir/./name', 'dir/././name', ...: the same file, a shape of its own), which splits the big populations (one
 -- beech ~7.7k items: a frame touching it cost ~4-9 ms). A variant's first items cost one ~12 ms frame (its load).
-M.SHAPE_VARIANTS = 4
+M.SHAPE_VARIANTS = 1
 
 local ECA = '/levels/east_coast_usa/art/shapes/'
 local WCA = '/levels/west_coast_usa/art/shapes/'
@@ -289,7 +289,63 @@ function M.pick(group, h, rank)
   return v[1], math.max(0.3, math.min(2.5, h / v[2]))
 end
 
-local GROUPS = { 'deciduous', 'conifer', 'shrub', 'rock' }
+local GROUPS = {
+  'deciduous', 'conifer', 'shrub', 'rock', 'pine_west', 'palm',
+  'juniper', 'desert_shrub', 'desert_rock', 'oak_west', 'tropical',
+}
+
+local VBIN_STRIDE = 16
+local binRowScratch = { 0, 0, 0, 0, 0, 1, 10, 0 }
+local tileStructPool = {}
+for idx = 1, 256 do
+  tileStructPool[idx] = {
+    made = {},
+    solid = {},
+    shapes = {},
+    scales = {},
+    madeShape = {},
+  }
+end
+
+local function decodeFloat32(b1, b2, b3, b4)
+  if b1 == 0 and b2 == 0 and b3 == 0 and (b4 == 0 or b4 == 128) then
+    return 0.0
+  end
+  local sign = b4 >= 128 and -1.0 or 1.0
+  local exp = (b4 % 128) * 2 + math.floor(b3 / 128)
+  local mant = ((b3 % 128) * 65536 + b2 * 256 + b1) / 8388608.0
+  if exp == 255 then
+    return 0.0
+  elseif exp == 0 then
+    return sign * mant * (2.0 ^ -126)
+  end
+  return sign * (1.0 + mant) * (2.0 ^ (exp - 127))
+end
+
+-- Decode a single 16-byte '<fffBBBB' binary tree record on demand using string.byte intrinsic.
+local function decodeBinRow(bin, i)
+  local base = (i - 1) * VBIN_STRIDE
+  local b1, b2, b3, b4, b5, b6, b7, b8, b9, b10, b11, b12, grp, yawQ, scaleQ, flags =
+    string.byte(bin, base + 1, base + 16)
+  local x = decodeFloat32(b1 or 0, b2 or 0, b3 or 0, b4 or 0)
+  local y = decodeFloat32(b5 or 0, b6 or 0, b7 or 0, b8 or 0)
+  local z = decodeFloat32(b9 or 0, b10 or 0, b11 or 0, b12 or 0)
+  local yaw = (yawQ or 0) * (360.0 / 256.0)
+  local sc = (scaleQ and scaleQ > 0) and (scaleQ / 100.0) or 1.0
+  local rank = (flags or 0) * (1.0 / 256.0)
+  local gName = GROUPS[(grp or 0) + 1] or 'deciduous'
+  local cat = M.CATALOG[gName] or M.CATALOG.deciduous
+  local refH = (cat[math.ceil(#cat / 2)] and cat[math.ceil(#cat / 2)][2]) or 10.0
+  binRowScratch[1] = grp or 0
+  binRowScratch[2] = x
+  binRowScratch[3] = y
+  binRowScratch[4] = z
+  binRowScratch[5] = yaw
+  binRowScratch[6] = sc
+  binRowScratch[7] = refH * sc
+  binRowScratch[8] = rank
+  return binRowScratch
+end
 local releaseGhosts
 local groupBand
 local treeClock = stopwatch.clock()
@@ -384,8 +440,74 @@ local function removeItem(fd, it, shape)
 end
 
 -- A 'veg_tile' message: { anchorId, key, path, n }.
+function M.onBin(anchorId, tileKey, bin, groups)
+  local key = tostring(anchorId) .. ':' .. tostring(tileKey)
+  local t = tiles[key]
+  if t then
+    if t.bin ~= bin or t.rows ~= nil then
+      if next(t.made) ~= nil then
+        orphanDrops[#orphanDrops + 1] = {
+          key = key,
+          forestId = t.forestId,
+          made = t.made,
+          solid = t.solid,
+          madeShape = t.madeShape,
+        }
+        t.forestId = nil
+        local spare = table.remove(tileStructPool)
+        t.made = spare and spare.made or {}
+        t.solid = spare and spare.solid or {}
+        t.madeShape = spare and spare.madeShape or {}
+      else
+        releaseForest(t)
+      end
+      for k in pairs(t.shapes) do t.shapes[k] = nil end
+      for k in pairs(t.scales) do t.scales[k] = nil end
+      t.shown, t.band, t.near, t.shadow = 0, nil, nil, nil
+    end
+  else
+    t = table.remove(tileStructPool)
+    if not t then
+      t = { made = {}, solid = {}, shapes = {}, scales = {}, madeShape = {} }
+    end
+    t.shown, t.band, t.near, t.shadow, t.forestId = 0, nil, nil, nil, nil
+  end
+  local tx, ty = tostring(tileKey):match('(%-?%d+)_(%-?%d+)$')
+  t.anchor = anchorId
+  t.bin = bin
+  t.nRows = math.floor(#bin / VBIN_STRIDE)
+  t.rows = nil
+  t.groups = type(groups) == 'table' and groups or nil
+  t.variant = M.tileVariant(key)
+  t.cx = (tonumber(tx) or 0) * 256 + 128
+  t.cy = (tonumber(ty) or 0) * 256 + 128
+  t.drop = false
+  t.ghost = nil
+  t.pending = true
+  t.nextRow = nil
+  t.thinning = nil
+  t.fq, t.ft = nil, nil
+  tiles[key] = t
+  workPending = true
+end
+
 function M.onTile(msg, currentAnchor)
-  if msg.anchorId ~= currentAnchor or type(msg.path) ~= 'string' then return end
+  if not msg then return end
+  local anchorId = msg.anchorId or currentAnchor or 1
+  if currentAnchor ~= nil and msg.anchorId ~= nil and msg.anchorId ~= currentAnchor then return end
+  local bin = type(msg.bin) == 'string' and msg.bin or nil
+  if not bin and type(msg.vbin_path) == 'string' and readFile then
+    bin = readFile(msg.vbin_path)
+  end
+  if not bin and type(msg.path) == 'string' and msg.path:sub(-5) == '.vbin' and readFile then
+    bin = readFile(msg.path)
+  end
+  if type(bin) == 'string' then
+    M.onBin(anchorId, msg.key, bin, msg.groups)
+    return
+  end
+  if type(msg.path) ~= 'string' then return end
+
   local text = readFile(msg.path)
   local ok, data = pcall(jsonDecode, text or '')
   if not ok or type(data) ~= 'table' or type(data.items) ~= 'table' then
@@ -769,6 +891,19 @@ function M.update(anchorId, player, gov)
     local band = groupBand(t, dist)
     local near = dist <= M.SOLID_M or (t.near and dist <= M.SOLID_M + M.SOLID_HYST_M) or false
     local demote = (t.near or next(t.solid) ~= nil) and not near
+    local shadowMaxM = (M.RINGS[2] and M.RINGS[2][1]) or 650
+    local shadow = dist <= shadowMaxM
+    if t.shadow ~= shadow and t.forestId then
+      local forestObj = scenetree.findObjectById(t.forestId)
+      if forestObj then
+        if dist > shadowMaxM then
+          forestObj:setField('isRenderShadowEnabled', 0, 'false')
+        else
+          forestObj:setField('isRenderShadowEnabled', 0, 'true')
+        end
+      end
+      t.shadow = shadow
+    end
     if want ~= t.shown or band ~= t.band or near ~= t.near or demote or t.pending then
       local prio = 3
       local sortKey = dist
@@ -821,7 +956,8 @@ function M.update(anchorId, player, gov)
       t.pending = false
       local fd = nil                          -- the tile's Forest data, made when it first needs an item
       local function data() fd = fd or forest(t):getData(); return fd end
-      local nTileRows = #t.rows
+      local bin = t.bin
+      local nTileRows = bin and math.floor(#bin / VBIN_STRIDE) or (t.rows and #t.rows or 0)
       for i = startRow, nTileRows do
         if governed and (rowsScanned >= rowLimit or (rowsScanned % 32 == 0 and overWallBudget())) then
           if not nextPending then nextPending = i end
@@ -830,7 +966,7 @@ function M.update(anchorId, player, gov)
           break
         end
         rowsScanned = rowsScanned + 1
-        local row = t.rows[i]
+        local row = bin and decodeBinRow(bin, i) or t.rows[i]
         local r = row[8] or 0
         local g = (t.groups or GROUPS)[(row[1] or 0) + 1]
         local cap = g and M.GROUP_MAX_M[g]
@@ -879,7 +1015,21 @@ function M.update(anchorId, player, gov)
         nextPending = 1
       end
       if t.pending then hasMoreWork = true end
-      if next(t.made) == nil then releaseForest(t) end
+      if next(t.made) == nil then
+        releaseForest(t)
+      elseif t.forestId then
+        local forestObj = scenetree.findObjectById(t.forestId)
+        if forestObj then
+          local shadowMaxM = (M.RINGS[2] and M.RINGS[2][1]) or 650
+          if dist > shadowMaxM then
+            forestObj:setField('isRenderShadowEnabled', 0, 'false')
+            t.shadow = false
+          else
+            forestObj:setField('isRenderShadowEnabled', 0, 'true')
+            t.shadow = true
+          end
+        end
+      end
       t.nextRow = t.pending and nextPending or nil
       t.thinning = (t.pending and wasThinning) or nil
       t.shown = want

@@ -373,6 +373,7 @@ class SplitTest(unittest.TestCase):
             shape = cdae.read(os.path.join(d, "t.cdae"))
             self.assertEqual(shape["names"][1:], [f"detail{int(bld.BLD_LOD_PX)}", "detail2"])
             self.assertEqual(len(shape["meshes"]), 2)
+            self.assertEqual(shape["meshes"][1]["primitives"][0], 1, "coarse lite LOD emits a single draw primitive")
 
 
 class MeshTest(unittest.TestCase):

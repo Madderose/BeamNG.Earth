@@ -350,6 +350,8 @@ local function revive(inst)
   local o = scenetree.findObjectById(sp.id)
   spares[k], nSpares = nil, nSpares - 1
   if not o then return false end
+  o:setField('isRenderShadowEnabled', 0, 'false')
+  o:setField('castShadows', 0, '0')
   if sp.mat then satmat.unref(sp.mat) end      -- the new instance holds its own reference
   inst.id, inst.loaded, inst.off, inst.hidden = sp.id, true, 0, true
   if objSlot[sp.id] and inst.slotSerial then objSlot[sp.id].serial = inst.slotSerial end -- the newer send's
@@ -373,18 +375,22 @@ local freeSlot -- (path, id): the object still holding a pooled shape path let g
 local function spawn(inst)
   if revive(inst) then return end
   ensureMaterial()
-  if M.pooledShape(inst.shape) and slotHolder[inst.shape] then freeSlot(inst.shape, slotHolder[inst.shape], inst.key) end
-  if not FS:fileExists(inst.shape) then
+  local pooled = M.pooledShape(inst.shape)
+  if pooled and slotHolder[inst.shape] then freeSlot(inst.shape, slotHolder[inst.shape], inst.key) end
+  if not inst.shapeValidated and not FS:fileExists(inst.shape) then
     log('W', 'beamngEarth', 'far tile shape missing: ' .. inst.shape)
     inst.failed = true
     return
   end
+  inst.shapeValidated = true
   -- TSStatic setup as in probes/p5_tsstatic.lua / util/procTrack.lua:1278-1291. collisionType 'None'
   -- keeps it out of the static collision rebuild. Created hidden (P6), placed at its true height.
   local o = createObject('TSStatic')
   o:setField('shapeName', 0, inst.shape)
   o:setField('collisionType', 0, 'None')
   o:setField('decalType', 0, 'None')
+  o:setField('isRenderShadowEnabled', 0, 'false')
+  o:setField('castShadows', 0, '0')
   o.canSave = false
   o.hidden = true
   o:setPosition(vec3(inst.x, inst.y, inst.z))
@@ -392,7 +398,7 @@ local function spawn(inst)
   o:registerObject('bngEarthFar_' .. serial .. '_' .. (inst.key:gsub('[^%w_]', '_')))
   scenetree.MissionGroup:addObject(o)
   inst.id, inst.loaded, inst.off, inst.hidden = o:getID(), true, 0, true
-  if M.pooledShape(inst.shape) then
+  if pooled then
     slotHolder[inst.shape], holderPath[inst.id] = inst.id, inst.shape
     if inst.slotSerial then
       objSlot[inst.id] = { n = slotOf(inst.shape), serial = inst.slotSerial, session = inst.session, key = inst.key }
@@ -707,7 +713,7 @@ local function startGroup(g, cam)
       mode = 'instant' -- nothing visible to cross over with (first fill)
     elseif not vis then
       mode = 'instant' -- C1: off-screen
-    elseif nearest <= 350 then
+    elseif nearest <= (crossover.INSTANT_M or 350) then
       -- Within 350m of player: road driveability is critical. Instant swap eliminates coarse LOD overhang over road.
       mode = 'instant'
     elseif activeGroups >= crossover.MAX_GROUPS then

@@ -1100,9 +1100,9 @@ class DeleteQueueTest(unittest.TestCase):
         asyncio.run(run())
         self.assertTrue(os.path.exists(kept))
         # ~40 files/s, evenly spaced (one per step): never more than a few in any 0.1 s
-        self.assertGreater(len(times), 1.5 * earthd.DELETE_MAX_RATE)
-        self.assertLess(len(times), 2.0 * earthd.DELETE_MAX_RATE + 5)
-        dt = np.diff(times)
+        self.assertGreater(len(times), 0.75 * earthd.DELETE_MAX_RATE * earthd.DELETE_BATCH)
+        self.assertLess(len(times), 2.0 * earthd.DELETE_MAX_RATE * earthd.DELETE_BATCH + 2 * earthd.DELETE_BATCH)
+        dt = np.diff(times[::earthd.DELETE_BATCH])
         self.assertGreater(float(np.median(dt)), 0.5 / earthd.DELETE_MAX_RATE)
 
 

@@ -134,9 +134,25 @@ def restamp(data, old, new):
     return data.replace(old_b, new_b)
 
 
-def place(src, dst):
-    """dst becomes a file with src's content, atomically (a hard link; a copy where links fail): a game loading
-    dst sees either the old file or the new one, never a partial one."""
+def place(src, dst, move=False):
+    """dst becomes a file with src's content, atomically (hardlinked or moved from staging to slot_<n>.cdae in the
+    game directory; a copy where links fail): a game loading dst sees either the old file or the new one, never a
+    partial one."""
+    staged = staging.master_for(src)
+    if staged != src and os.path.exists(staged):
+        src = staged
+    elif staged != src and os.path.exists(src) and not move:
+        try:
+            staging.replace(src, staged)
+            src = staged
+        except OSError:
+            pass
+    if move:
+        try:
+            staging.replace(src, dst)
+            return
+        except OSError:
+            pass
     tmp = staging.tmp_for(dst)
     try:
         os.remove(tmp)

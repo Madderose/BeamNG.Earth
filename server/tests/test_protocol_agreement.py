@@ -189,7 +189,7 @@ SERVER_TO_MOD = {
                    "slots": F(dict, OPT)},     # {what: [pooled shape path, serial]} (matslots.py; pose.slotsGone)
     "roads_drop": {"anchorId": F(int), "key": F(str)},
     # trees, bushes and rocks of a tile (vegetation.py, --trees on): a JSON file of items
-    "veg_tile": {"anchorId": F(int), "key": F(str), "path": F(str), "n": F(int)},
+    "veg_tile": {"anchorId": F(int), "key": F(str), "path": F(str), "n": F(int), "vbin_path": F(str, OPT), "bin": F((str, bytes), OPT)},
     "veg_drop": {"anchorId": F(int), "key": F(str)},
     # far buildings (buildings.far_tile, --buildings on): a JSON file naming a render-only mesh
     "bldfar_tile": {"anchorId": F(int), "key": F(str), "path": F(str), "n": F(int),

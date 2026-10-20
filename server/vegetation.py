@@ -20,6 +20,7 @@ import hashlib
 import logging
 import math
 import os
+import struct
 import threading
 from collections import OrderedDict
 from dataclasses import dataclass
@@ -664,6 +665,7 @@ def tile_items(frame, tx, ty, veg, cell_ready, elev, sea=None, as_json=False):
         out = JsonRows(fast._ef.veg_rows_json(np.ascontiguousarray(it.group, np.int64), f64(e), f64(n), f64(z),
                                                f64(it.yaw), f64(it.scale), f64(it.height), f64(it.rank)))
         out.n = len(it)
+        out.vbin = _pack_vbin_arrays(e, n, z, it.group, it.yaw, it.scale, it.rank)
         return out
     return [[int(g), round(float(a), 2), round(float(b), 2), round(float(c), 2), round(float(yw), 1),
              round(float(sc), 3), round(float(h), 1), round(float(r), 4)]
@@ -701,6 +703,115 @@ def _concat_all(parts):
     return out
 
 
+VBIN_STRUCT = struct.Struct("<fffBBBB")
+VBIN_STRIDE = 16
+
+
+def _pack_vbin_arrays(xs, ys, zs, groups, yaws, scales, ranks):
+    chunks = []
+    for g, x, y, z, yw, sc, r in zip(groups, xs, ys, zs, yaws, scales, ranks):
+        yaw_q = int(round((float(yw) % 360.0) * (256.0 / 360.0))) & 0xFF
+        scale_q = min(255, max(1, int(round(float(sc) * 100.0))))
+        flags = min(255, max(0, int(float(r) * 256.0)))
+        chunks.append(struct.pack("<fffBBBB", float(x), float(y), float(z), int(g) & 0xFF, yaw_q, scale_q, flags))
+    return b"".join(chunks)
+
+
+def pack_vbin(items):
+    """Pack vegetation items into compact 16-byte binary records (<fffBBBB per tree)."""
+    if isinstance(items, (bytes, bytearray)):
+        return bytes(items)
+    if isinstance(items, JsonRows):
+        if getattr(items, "vbin", None) is not None:
+            return items.vbin
+        import json
+        items = json.loads(f"[{items}]") if items else []
+    elif isinstance(items, str):
+        import json
+        data = json.loads(items) if items else []
+        items = data.get("items", []) if isinstance(data, dict) else data
+    if isinstance(items, Items):
+        xs = getattr(items, "x", items.lon)
+        ys = getattr(items, "y", items.lat)
+        zs = getattr(items, "z", items.height)
+        return _pack_vbin_arrays(xs, ys, zs, items.group, items.yaw, items.scale, items.rank)
+    chunks = []
+    for row in items or ():
+        if isinstance(row, dict):
+            x = float(row.get("x", 0.0))
+            y = float(row.get("y", 0.0))
+            z = float(row.get("z", 0.0))
+            group = int(row.get("group", 0)) & 0xFF
+            if "yaw_q" in row:
+                yaw_q = int(row["yaw_q"]) & 0xFF
+            else:
+                yaw_q = int(round((float(row.get("yaw", 0.0)) % 360.0) * (256.0 / 360.0))) & 0xFF
+            if "scale_q" in row:
+                scale_q = int(row["scale_q"]) & 0xFF
+            else:
+                scale_q = min(255, max(1, int(round(float(row.get("scale", 1.0)) * 100.0))))
+            if "flags" in row:
+                flags = int(row["flags"]) & 0xFF
+            else:
+                flags = min(255, max(0, int(float(row.get("rank", 0.0)) * 256.0)))
+        elif len(row) >= 8:
+            group = int(row[0]) & 0xFF
+            x, y, z = float(row[1]), float(row[2]), float(row[3])
+            yaw_q = int(round((float(row[4]) % 360.0) * (256.0 / 360.0))) & 0xFF
+            scale_q = min(255, max(1, int(round(float(row[5]) * 100.0))))
+            flags = min(255, max(0, int(float(row[7]) * 256.0)))
+        else:
+            x, y, z = float(row[0]), float(row[1]), float(row[2])
+            group = int(row[3]) & 0xFF
+            yw, sc, fl = row[4], row[5], row[6]
+            yaw_q = (int(yw) & 0xFF) if isinstance(yw, int) else (int(round((float(yw) % 360.0) * (256.0 / 360.0))) & 0xFF)
+            scale_q = (int(sc) & 0xFF) if isinstance(sc, int) else min(255, max(1, int(round(float(sc) * 100.0))))
+            flags = (int(fl) & 0xFF) if isinstance(fl, int) else min(255, max(0, int(float(fl) * 256.0)))
+        chunks.append(struct.pack("<fffBBBB", x, y, z, group, yaw_q, scale_q, flags))
+    return b"".join(chunks)
+
+
+def write_vbin(path, items):
+    """Write compact binary vegetation (.vbin) packing each tree into 16 bytes (<fffBBBB)."""
+    data = pack_vbin(items)
+    if path is not None:
+        tmp = staging.tmp_for(str(path))
+        with open(tmp, "wb") as f:
+            f.write(data)
+        staging.replace(tmp, str(path))
+    return data
+
+
+def send_tile(conn, aid, key, path=None, n=0, vbin_path=None, bin=None, kind="veg", items=None, out_dir=None, vfs_dir=None):
+    """Send a vegetation (or bldfar) tile message, supporting .vbin sideband or raw binary payload."""
+    tile_key = f"{key[0]}_{key[1]}" if isinstance(key, (tuple, list)) else str(key)
+    if items is not None:
+        raw = pack_vbin(items)
+        n = len(raw) // VBIN_STRIDE
+        if out_dir is not None:
+            tx_s, ty_s = tile_key.split("_", 1)
+            vname = f"{kind}_{aid}_{tx_s}_{ty_s}.vbin"
+            write_vbin(os.path.join(out_dir, vname), raw)
+            if vfs_dir is not None and vbin_path is None:
+                vbin_path = f"{vfs_dir}/{vname}"
+        elif bin is None and vbin_path is None and path is None:
+            bin = raw
+    if kind == "veg" and vbin_path is None and isinstance(path, str) and path.endswith(".json"):
+        vbin_path = path[:-5] + ".vbin"
+    m = {"type": f"{kind}_tile", "anchorId": aid, "key": tile_key, "path": path, "n": n}
+    if vbin_path is not None:
+        m["vbin_path"] = vbin_path
+    if bin is not None:
+        m["bin"] = bin
+    pool = getattr(getattr(conn, "s", None), "pool_shapes", None)
+    if kind == "bldfar" and pool is not None and isinstance(key, (tuple, list)):
+        slots = pool(conn, {"shape": f"bldfar_{aid}_{key[0]}_{key[1]}.cdae"})
+        if slots:
+            m["slots"] = slots
+    conn.send(m)
+    return m
+
+
 def write_tile(out_dir, vfs_dir, aid, tx, ty, rows):
     import json
     name = f"veg_{aid}_{tx}_{ty}.json"
@@ -712,6 +823,7 @@ def write_tile(out_dir, vfs_dir, aid, tx, ty, rows):
         else:
             f.write(json.dumps({"groups": list(GROUPS), "items": rows}, separators=(",", ":")))  # the C encoder
     staging.replace(tmp, path)
+    write_vbin(os.path.join(out_dir, f"veg_{aid}_{tx}_{ty}.vbin"), rows)
     return f"{vfs_dir}/{name}", rows.n if isinstance(rows, JsonRows) else len(rows)
 
 
@@ -777,6 +889,14 @@ class Tracker:
             return
         path, n = res
         self.sent.add(key)
+        self.send_tile(conn, aid, key, path, n)
+        return
+
+    def send_tile(self, conn, aid, key, path=None, n=0, vbin_path=None, bin=None, items=None, out_dir=None, vfs_dir=None):
+        return send_tile(conn, aid, key, path=path, n=n, vbin_path=vbin_path, bin=bin,
+                         kind=self.kind, items=items, out_dir=out_dir, vfs_dir=vfs_dir)
+
+    def _legacy_built(self, conn, aid, key, path, n):
         m = {"type": f"{self.kind}_tile", "anchorId": aid, "key": f"{key[0]}_{key[1]}", "path": path, "n": n}
         pool = getattr(getattr(conn, "s", None), "pool_shapes", None)
         if self.kind == "bldfar" and pool is not None:      # its mesh at a pooled shape path (matslots.py)

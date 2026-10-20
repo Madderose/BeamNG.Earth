@@ -1530,14 +1530,16 @@ def _build_one(m, spec, gmin, gmax, lite=False):
 def build(specs_and_ground, lite=False):
     """The tile's mesh from [(Spec, ground z min, ground z max)] with rings in the tile's local frame:
     (positions, uvs, tris, tri material indices, MATERIALS) or None if empty. lite (far tiles): no
-    cornices, whole walls instead of one quad per bay."""
+    cornices, whole walls instead of one quad per bay, and a single draw primitive (material index 0)."""
     m = Mesh()
     for spec, gmin, gmax in specs_and_ground:
         _build_one(m, spec, gmin, gmax, lite)
     if m.n == 0:
         return None
     P, UV, T, M, C = m.arrays()
-    return P, UV, T, M, MATERIALS, C
+    if lite:
+        M = np.zeros(len(T), dtype=np.int32)
+    return P, UV, T, M, (MATERIALS[:1] if lite else MATERIALS), C
 
 
 def _steel_frame(m, spec, gmin, mat, lite=False, legs_only=False):
@@ -2207,13 +2209,13 @@ def write(path, mesh, collision_only=False):
     lods = None
     lite = mesh[6] if len(mesh) > 6 and not collision_only else None     # (None: no lite mesh)
     if lite is not None:
-        Pl, UVl, Tl, Ml, matsl, Cl = lite
+        lv, luv, lf, lm, matsl, lc = lite
         for m in matsl:
             if m not in mats:
                 mats.append(m)
-        remap = np.array([mats.index(m) for m in matsl], np.int64)
-        lods = [(BLD_LOD_PX, {"positions": Pl, "tris": Tl, "uvs": UVl, "tri_materials": remap[np.asarray(Ml)],
-                              "colors": Cl})]
+        lm = np.zeros(len(lf), dtype=np.int32)
+        lods = [(BLD_LOD_PX, {"positions": lv, "tris": lf, "uvs": luv, "tri_materials": lm,
+                              "colors": lc})]
     return cdae.write(path, P, T, uvs=UV, material=mats, tri_materials=M, object_name="buildings", colors=C,
                       collision_only=collision_only, lods=lods)
 

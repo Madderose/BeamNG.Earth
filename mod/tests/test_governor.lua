@@ -37,7 +37,7 @@ end
 -- ramp: +0.05 ms/frame with work, -0.05 idle; capped at the target; no unit before tokens suffice
 do
   local g = governor.new({ clock = clock })
-  T.check(g.target == 2.0, 'default target 2 ms')
+  T.check(g.target == governor.DEFAULT_TARGET_MS, 'default target 2.5 ms')
   T.check(g:setTarget(9) == 4 and g:setTarget(0.2) == 1 and g:setTarget(2) == 2, 'target clamped to 1..4 ms')
   local firstUnit
   local prevB = 0
@@ -67,6 +67,7 @@ end
 -- in a frame, never more than b + maxUnit
 do
   local g = governor.new({ clock = clock })
+  g:setTarget(2)
   local frames, units, maxOver = 0, 0, -1
   for _ = 1, 400 do
     local s, u = frame(g, { kind = 'dae', cost = 8 })
@@ -88,13 +89,12 @@ end
 
 ------------------------------------------------------------------------------------------
 -- isolation: a scripted queue of streaming units with heavy requests at random times; no heavy op
--- is ever within 2 frames of a frame that ran a unit; b changes by at most 0.1 ms per frame
+-- is ever within 2 frames of a frame that ran a unit; immediate 2-frame quiet gate
 do
   math.randomseed(12)
   local g = governor.new({ clock = clock })
   local log = {} -- per frame: { units, heavy, b }
   local wantHeavy = false
-  local prevB, maxStep = 0, 0
   local waits, waitStart = {}, nil
   for i = 1, 3000 do
     if not wantHeavy and math.random() < 0.01 then wantHeavy, waitStart = true, i end
@@ -103,8 +103,6 @@ do
     local _, units, heavy = frame(g, { heavy = wantHeavy, queue = q, kind = 'cdae' })
     if heavy then wantHeavy = false; waits[#waits + 1] = i - waitStart end
     log[i] = { units = units, heavy = heavy }
-    maxStep = math.max(maxStep, math.abs(g.b - prevB))
-    prevB = g.b
   end
   local bad, nHeavy = 0, 0
   for i, f in ipairs(log) do
@@ -117,10 +115,9 @@ do
   end
   T.check(nHeavy >= 10, 'heavy ops granted (' .. nHeavy .. ')')
   T.check(bad == 0, 'no streaming unit within +-2 frames of a heavy op (violations: ' .. bad .. ')')
-  T.check(maxStep <= 0.1 + 1e-12, 'b changes by at most 0.1 ms per frame (got ' .. maxStep .. ')')
   local worst = 0
   for _, w in ipairs(waits) do worst = math.max(worst, w) end
-  T.check(worst <= 25, 'worst heavy wait ~ b/0.1 + 2 frames (' .. worst .. ' frames)')
+  T.check(worst <= 6, '2-frame heavy quiet gate grants without 60-frame starvation (' .. worst .. ' frames)')
 end
 
 -- the heavy slot waits for two calm frames (<= base + 1.5 ms) once b == 0; a spike delays it
@@ -151,6 +148,18 @@ do
   T.check(granted and granted <= 21 + governor.CALM_TIMEOUT, 'restless frames: heavy op still granted (frame ' .. tostring(granted) .. ')')
 end
 
+-- D3D12 presentation pacing awareness: w1 > 11.0 ms holds b = 0 for 1 cooldown frame
+do
+  local g = governor.new({ clock = clock })
+  for _ = 1, 40 do g:beginFrame(true, 6.7) end
+  local bBefore = g.b
+  T.check(bBefore > 1.5, 'steady 120 FPS budget active before stall')
+  g:beginFrame(true, 12.5)
+  T.check(g.b == 0 and g.blocked, 'w1 > 11.0 ms holds b = 0 for 1 cooldown frame')
+  g:beginFrame(true, 6.7)
+  T.check(g.b >= bBefore and not g.blocked, 'budget resumes cleanly after 1 cooldown frame')
+end
+
 -- urgent heavy (teleport) is granted at once; loading mode ramps to 8 ms quickly
 do
   local g = governor.new({ clock = clock })
@@ -163,7 +172,7 @@ do
   T.check(g.b == 8 and g:targetNow() == 8, 'loading mode: target 8 ms')
   g:setLoading(false)
   for _ = 1, 200 do frame(g, { cost = 2 }) end
-  T.near(g.b, 2, 1e-9, 'back to 2 ms after loading mode')
+  T.near(g.b, governor.DEFAULT_TARGET_MS, 1e-9, 'back to default target after loading mode')
 end
 
 -- motion is charged but always runs; it delays units instead of adding up
@@ -207,11 +216,13 @@ do
   g:try('cdae')                          -- the kind in use (it sets the bucket's size)
   for i = 1, 200 do t = t + 16; g:beginFrame(true) end
   T.check(g:try('cdae'), 'a calm stream: an import may run')
-  T.check(math.abs(g:chargeEngine(102) - 100) < 1e-9 and g.tokens < 0, 'a 102 ms engine tick: 100 ms of debt')
+  g.prevFrameUnits = 1
+  T.check(math.abs(g:chargeEngine(103.5) - 100) < 1e-9 and g.tokens < 0, 'a 103.5 ms engine tick: 100 ms of debt')
   T.check(not g:try('cdae'), 'in debt: no import')
   local frames = 0
   repeat t = t + 16; g:beginFrame(true); frames = frames + 1 until g:try('cdae') or frames > 500
-  T.check(frames > 10 and frames < 500, 'imports again once the budget paid it (' .. frames .. ' frames)')
+  T.check(frames > 3 and frames < 500, 'imports again once the budget paid it (' .. frames .. ' frames)')
+  g.prevFrameUnits = 1
   g:chargeEngine(1e6)
   T.check(g.tokens >= -governor.ENGINE_MAX_DEBT_MS, "the debt is capped")
   T.check(g:chargeEngine(1.5) == 0, 'a normal tick is free')

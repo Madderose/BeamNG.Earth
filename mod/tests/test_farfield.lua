@@ -12,6 +12,8 @@ farfield.SPARE_MAX = 0 -- these tests check the delete pipeline; the spare pool 
 local governor = require('beamngEarth/governor')
 local geodesy = require('beamngEarth/geodesy')
 local crossover = require('beamngEarth/crossover')
+crossover.MAX_GROUPS = 24
+crossover.INSTANT_M = 0 -- test_farfield tests C2 crossovers down to 126 m; INSTANT_M = 800 is verified in test_crossover.lua
 
 -- fake wall clock: each spawn costs `spawnCost` ms, everything else is free
 local now, spawnCost = 0, 1.5
@@ -59,6 +61,7 @@ local o = obj('1_0_8')
 T.check(o == nil and farfield._pending('1_0_8').loaded, 'loaded, but not live before its swap')
 local pend = S.objects[farfield._pending('1_0_8').id]
 T.check(pend.hidden == true and pend.fields.collisionType == 'None', 'created hidden (P6), render-only')
+T.check(pend.fields.isRenderShadowEnabled == 'false' and pend.fields.castShadows == '0', 'farfield shadows disabled (P8-1)')
 T.check(pend.fields.shapeName:match('%.cdae$') ~= nil, '.cdae shape accepted')
 farfield.onSwap(swap(1, 1, { '1_0_8' }))
 step(free, camNorth)

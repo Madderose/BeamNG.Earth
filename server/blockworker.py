@@ -158,7 +158,8 @@ def ground(frame, la, lo, z):
     return z
 
 
-def build(aid, lat, lon, hm_zoom, q, cx, cy, size, out_dir, name, ter_name=None):
+def build(aid, lat, lon, hm_zoom, q, cx, cy, size, out_dir, name, ter_name=None, defer_ter=False,
+          ter_swap=surfacemod.TER_SWAP):
     """Build and write the block (heightmap PNG name in out_dir, its surface masks beside it, and the
     .ter ter_name if given). Returns the info dict of earthd's make_heightmap (without seconds / zoom /
     base)."""
@@ -187,7 +188,11 @@ def build(aid, lat, lon, hm_zoom, q, cx, cy, size, out_dir, name, ter_name=None)
         def gen(la, lo):        # the ground over the low arches raised over their vaults (roads.arch_raise)
             return roadsmod.block_arch_raise(tun, cell_fn, frame, la, lo, elev(la, lo),
                                              (cx - half, cy - half, cx + half, cy + half))
-    info = heightmap.generate(frame, gen, os.path.join(out_dir, name), cx, cy, q=q, size=size, keep=keep,
+    is_initial = (cx == 0 and cy == 0)
+    hm_path = (os.path.join(out_dir, name)
+               if (is_initial or not ter_swap or ter_name is None or _s.surface is None)
+               else None)
+    info = heightmap.generate(frame, gen, hm_path, cx, cy, q=q, size=size, keep=keep,
                               chunks=chunks)
     stages = {"heights": time.perf_counter() - t0, "grading": grade_s[0]}
     idx = None
@@ -206,14 +211,20 @@ def build(aid, lat, lon, hm_zoom, q, cx, cy, size, out_dir, name, ter_name=None)
         idx = (surfacemod.paint_lots(idx, keep["lat"], keep["lon"], _s.surface.lots(keep["lat"], keep["lon"]))
             if hasattr(_s.surface, "lots") else idx)
         stages["roadPaint"] = time.perf_counter() - t1
-        info["layers"] = surfacemod.write_masks(idx[::-1], out_dir, name[:-4])
+        stem = name[:-4]
+        info["layers"] = (surfacemod.mask_names(stem) if (ter_swap and ter_name is not None and not is_initial)
+                          else surfacemod.write_masks(idx[::-1], out_dir, stem))
         info["surfaceComplete"] = complete and roads_complete
     if ter_name is not None:
         t1 = time.perf_counter()
         idx = _tunnel_holes(aid, frame, elev, keep, cx, cy, idx, info, g)
-        info["ter"], mats = surfacemod.write_ter(out_dir, ter_name, keep["qgrid"], idx)
-        if mats is not None:          # the .ter's own material list (MATERIALS indices)
-            info["mats"] = mats
+        if defer_ter:
+            info["_qgrid"] = keep["qgrid"]
+            info["_idx"] = idx
+        else:
+            info["ter"], mats = surfacemod.write_ter(out_dir, ter_name, keep["qgrid"], idx)
+            if mats is not None:          # the .ter's own material list (MATERIALS indices)
+                info["mats"] = mats
         stages["ter"] = time.perf_counter() - t1
     info["stages"] = stages
     return info

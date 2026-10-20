@@ -65,6 +65,7 @@ import itertools  # noqa: E402
 import logging  # noqa: E402
 import math  # noqa: E402
 import secrets  # noqa: E402
+import socket  # noqa: E402
 import sys  # noqa: E402
 import shutil  # noqa: E402
 import threading  # noqa: E402
@@ -195,6 +196,7 @@ BASE_PX = 1024                  # detail mode: the block's base photo (1 km -> 1
 BASE_AO_VFS = "/levels/beamng_earth/art/terrains/bngEarth_base_ao.png"   # every surface layer's aoBaseTex
 BASE_AO = 251                   # its flat value (tools/make_level_assets.py)
 DETAIL_ROAD_LIFT = 0.05         # detail mode: road surfaces over the drawn block (its 2 m triangles + slack)
+TER_SWAP = surfacemod.TER_SWAP  # .ter swapping enabled: skip hm_*.png and the 10 surface mask PNGs (_m0.._m9.png)
 TEX_NEAR, TEX_FAR = 256, 256    # 32 cells: texture edge (px) of the two finest levels / of the others (512
                                  # near was 15x finer than USGS: no visible gain for 2x build time and VRAM);
                                  # --tex gives one per level (64 cells: farfield.TEX_DEFAULT)
@@ -672,6 +674,9 @@ class Server:
                 pass
         shutil.rmtree(os.path.join(self.root, sid), ignore_errors=True)
         shutil.rmtree(os.path.join(self.cdae_root, sid.lower()), ignore_errors=True)
+        st = staging.session_dir(os.path.join(self.root, sid, SESSION_MARKER), sid)
+        if st is not None:
+            shutil.rmtree(st, ignore_errors=True)
 
     def _touch(self, sid):
         try:
@@ -1200,10 +1205,11 @@ class Server:
         q = self.anchor_q(anchor)
         pool = self.block_pools[lane][0] if self.block_pools and progress is None else None
         if pool is not None:
+            defer_ter = self.near_visual == "detail" and self.imagery is not None
             info = pool.submit(
                 blockworker.build, anchor.id, anchor.lat, anchor.lon, anchor.hm_zoom, q, cx, cy,
                 self.layout.block, self.out_dir, self.hm_name((anchor.id, cx, cy)),
-                self.ter_name((anchor.id, cx, cy))).result()
+                self.ter_name((anchor.id, cx, cy)), defer_ter, TER_SWAP).result()
             return self._finish_heightmap(anchor, cx, cy, info, t0, pool)
         urgent = getattr(self.dem, "urgent", None)     # (test DEMs have no lane)
         with urgent() if urgent is not None else contextlib.nullcontext():     # the player waits for it (teleport,
@@ -1235,8 +1241,11 @@ class Server:
             def gen(la, lo):        # the ground over the low arches raised over their vaults (roads.arch_raise)
                 return roadsmod.block_arch_raise(tun, cell_fn, anchor.frame, la, lo, elev(la, lo),
                                                  (cx - half, cy - half, cx + half, cy + half))
-        info = heightmap.generate(anchor.frame, gen,
-                                  os.path.join(self.out_dir, self.hm_name((anchor.id, cx, cy))), cx, cy, q=q,
+        is_initial = (cx == 0 and cy == 0)
+        hm_path = (os.path.join(self.out_dir, self.hm_name((anchor.id, cx, cy)))
+                   if (is_initial or not TER_SWAP or self.surface is None)
+                   else None)
+        info = heightmap.generate(anchor.frame, gen, hm_path, cx, cy, q=q,
                                   size=self.layout.block, keep=keep, chunks=anchor.chunks)
         stages = {"heights": time.perf_counter() - t0, "grading": grade_s[0]}
         idx = None
@@ -1258,9 +1267,23 @@ class Server:
                 if hasattr(self.surface, "lots") else idx)
             stages["roadPaint"] = time.perf_counter() - t1
             complete = complete and roads_complete
-            info["layers"] = surfacemod.write_masks(idx[::-1], self.out_dir, self.hm_name((anchor.id, cx, cy))[:-4])
+            stem = self.hm_name((anchor.id, cx, cy))[:-4]
+            info["layers"] = (surfacemod.mask_names(stem) if (TER_SWAP and not is_initial)
+                              else surfacemod.write_masks(idx[::-1], self.out_dir, stem))
             info["surfaceComplete"] = complete
         idx = self._tunnel_holes(anchor, elev, keep, cx, cy, idx, info)
+        if self.near_visual == "detail" and self.imagery is not None:
+            t1 = time.perf_counter()
+            photo = []
+            info["base"] = self.write_base(anchor, cx, cy, photo=photo)
+            stages["base"] = time.perf_counter() - t1
+            if photo and idx is not None:
+                try:                # lawns only where the photo is green (in-memory before writing .ter once)
+                    surfacemod.photo_lawns(idx, photo[0])
+                    if not TER_SWAP and info.get("layers"):
+                        surfacemod.write_masks(idx[::-1], self.out_dir, self.hm_name((anchor.id, cx, cy))[:-4])
+                except Exception as e:
+                    log.info("photo lawns %s: %s", (anchor.id, cx, cy), e)
         info["ter"], mats = surfacemod.write_ter(self.out_dir, self.ter_name((anchor.id, cx, cy)), keep["qgrid"], idx)
         if mats is not None:          # the .ter's own material list (MATERIALS indices)
             info["mats"] = mats
@@ -1329,16 +1352,31 @@ class Server:
     def _finish_heightmap(self, anchor, cx, cy, info, t0, pool=None):
         """The base photo (detail mode; rendered here: the imagery corrections live in this process),
         the timings."""
-        if self.near_visual == "detail" and self.imagery is not None:
+        idx = info.pop("_idx", None)
+        qgrid = info.pop("_qgrid", None)
+        if self.near_visual == "detail" and self.imagery is not None and "base" not in info:
             t1 = time.perf_counter()
             photo = []
             info["base"] = self.write_base(anchor, cx, cy, pool, photo=photo)
             info["stages"]["base"] = time.perf_counter() - t1
-            if photo and info.get("layers") and info.get("ter"):
-                try:                # lawns only where the photo is green (before the game reads the block)
-                    surfacemod.photo_lawns(self.out_dir, info["ter"], info["layers"], photo[0])
+            if photo and idx is not None:
+                try:                # lawns only where the photo is green (in-memory before writing .ter once)
+                    surfacemod.photo_lawns(idx, photo[0])
+                    if not TER_SWAP and info.get("layers"):
+                        surfacemod.write_masks(idx[::-1], self.out_dir, self.hm_name((anchor.id, cx, cy))[:-4])
                 except Exception as e:
                     log.info("photo lawns %s: %s", (anchor.id, cx, cy), e)
+            elif photo and info.get("layers") and info.get("ter"):
+                try:                # lawns only where the photo is green (before the game reads the block)
+                    surfacemod.photo_lawns(self.out_dir, info["ter"], None if TER_SWAP else info["layers"], photo[0])
+                except Exception as e:
+                    log.info("photo lawns %s: %s", (anchor.id, cx, cy), e)
+        if qgrid is not None and not info.get("ter"):
+            t1 = time.perf_counter()
+            info["ter"], mats = surfacemod.write_ter(self.out_dir, self.ter_name((anchor.id, cx, cy)), qgrid, idx)
+            if mats is not None:
+                info["mats"] = mats
+            info["stages"]["ter"] = time.perf_counter() - t1
         info["seconds"] = time.perf_counter() - t0
         info["zoom"] = anchor.hm_zoom
         return info
@@ -1533,7 +1571,11 @@ class Server:
         earlier revision's texture up to `rev` (a tile retextured live left them behind) and the
         engine's .cdae cache of it (DAE tiles)."""
         stem = os.path.splitext(name)[0]
-        out = [os.path.join(self.out_dir, name), os.path.join(self.out_dir, stem + ".dds")]
+        path = os.path.join(self.out_dir, name)
+        master = staging.master_for(path)
+        out = [path, os.path.join(self.out_dir, stem + ".dds")]
+        if master != path:
+            out.append(master)
         out += [os.path.join(self.out_dir, f"{stem}_r{r}.dds") for r in range(1, rev + 1)]
         if texture is not None and os.path.join(self.out_dir, texture) not in out:
             out.append(os.path.join(self.out_dir, texture))
@@ -1656,7 +1698,9 @@ class Server:
                     log.warning("tile %s of anchor %d: no imagery (%s), palette material (%d tiles so far)",
                                 tile.key, anchor.id, e, self.imagery_failures)
         t2 = time.perf_counter()
-        size = farfield.write_built(path, built, self.far_format, material or farfield.MATERIAL,
+        pooled = material is not None and self.far_format == "cdae"
+        master = staging.master_for(path) if pooled else path
+        size = farfield.write_built(master, built, self.far_format, material or farfield.MATERIAL,
                                     textured=material is not None, tex_px=self.tex_size(lvl))
         dt = time.perf_counter() - t0
         self.build_stats.append(dt)
@@ -1667,9 +1711,9 @@ class Server:
                                               used if material is not None else None)
         info = TileInfo(built.pos, built.err, built.sink, built.skirt, built.grid, size, dt,
                         material, texture, tex_bytes, t2 - t1, credits=sources)
-        if material is not None and self.far_format == "cdae":    # the pooled shape path (matslots.py)
+        if pooled:                          # the pooled shape path (matslots.py)
             info.shape = matslotsmod.MatSlots.file(material)
-            matslotsmod.place(path, os.path.join(self.out_dir, info.shape))
+            matslotsmod.place(master, os.path.join(self.out_dir, info.shape))
         if material is not None:
             info.rev = self.tex_rev.get((anchor.id, tile.key), 0)
             info.cm_pending = frozenset(pending or ())
@@ -1824,7 +1868,9 @@ class Server:
         if self.far_format != "cdae":
             return out
         for what, fname in files.items():
-            src = os.path.join(self.out_dir, fname)
+            path = os.path.join(self.out_dir, fname)
+            master = staging.master_for(path)
+            src = master if os.path.exists(master) else path
             if not os.path.exists(src):
                 continue
             owner = ("shape", next(self.slot_serial))
@@ -1849,7 +1895,9 @@ class Server:
         tile by now).
         On failure the tile keeps its name (it may show another tile's texture)."""
         new = self.matslots.take(ck)
-        src = os.path.join(self.out_dir, self.tile_name(*ck))
+        path = os.path.join(self.out_dir, self.tile_name(*ck))
+        master = staging.master_for(path)
+        src = master if os.path.exists(master) else path
         pooled = self.far_format == "cdae"
         name = matslotsmod.MatSlots.file(new) if pooled else f"{os.path.splitext(self.tile_name(*ck))[0]}_s{next(self.reslot_serial)}.{self.far_format}"
         try:
@@ -1861,7 +1909,7 @@ class Server:
             tmp = staging.tmp_for(dst)
             with open(tmp, "wb") as fh:
                 fh.write(data)
-            os.replace(tmp, dst)
+            staging.replace(tmp, dst)
         except (OSError, ValueError) as e:
             log.warning("tile %s of anchor %d: material name not renewed (%s)", ck[1], ck[0], e)
             return info
@@ -2044,6 +2092,9 @@ class Server:
                 doomed.append(p)
                 if name.endswith(".dae"):
                     doomed.append(os.path.join(self.cdae_dir, os.path.splitext(name)[0].lower() + ".cdae"))
+            st_dir = staging.session_dir(os.path.join(self.out_dir, SESSION_MARKER), self.sid)
+            if st_dir is not None:
+                doomed += glob.glob(os.path.join(st_dir, f"far_{aid}_*"))
             doomed += glob.glob(os.path.join(self.cdae_dir, f"far_{aid}_*"))  # caches whose source went earlier
             doomed += [p for p in glob.glob(os.path.join(self.out_dir, f"hm_{aid}_*"))
                        if os.path.basename(p) not in keep]
@@ -2051,6 +2102,8 @@ class Server:
             # session folder, and the game's file watchers cost 4.5 ms a frame)
             for stem in ANCHOR_TILE_FILES:
                 doomed += glob.glob(os.path.join(self.out_dir, f"{stem}_{aid}_*"))
+                if st_dir is not None:
+                    doomed += glob.glob(os.path.join(st_dir, f"{stem}_{aid}_*"))
             self.queue_delete(p for p in dict.fromkeys(doomed) if os.path.exists(p))
 
 
@@ -2101,6 +2154,13 @@ class Connection:
         self.reader, self.writer = reader, writer
         self.loop = asyncio.get_running_loop()
         self.peer = writer.get_extra_info("peername")
+        sock = writer.get_extra_info("socket")
+        if hasattr(sock, "setsockopt"):
+            with contextlib.suppress(OSError):
+                sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            for opt in (socket.SO_SNDBUF, socket.SO_RCVBUF):
+                with contextlib.suppress(OSError):
+                    sock.setsockopt(socket.SOL_SOCKET, opt, 262144)
         self.tasks = set()
         self.active = None              # committed anchor id
         self.block = None               # farfield.Block of the committed terrain
