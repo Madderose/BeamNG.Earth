@@ -278,12 +278,16 @@ local function loadBlock(tr)
   local ter = M.TER_SWAP and type(tr.ter) == 'string'
   local movingOnSurface = st.block ~= nil and st.player ~= nil and (st.player.speed or 0) > 5
   if ter and terrain.swap(tr.ter, sq, maxH, x, y, tr.zBase, layers, base, tonumber(tr.baseSize)) then
+    if roads.terrainSwapped then roads.terrainSwapped() end
     if nearVisual ~= 'mesh' then groundcover.afterBlockChange() end
     return true, nil, true
   end
   local ok, err = terrain.load(tr.heightmap, sq, maxH, x, y, tr.zBase, layers, base, tonumber(tr.baseSize))
   local swapped = false
-  if ok and ter then swapped = terrain.swap(tr.ter, sq, maxH, x, y, tr.zBase, layers, base, tonumber(tr.baseSize)) or false end
+  if ok and ter and terrain.swap(tr.ter, sq, maxH, x, y, tr.zBase, layers, base, tonumber(tr.baseSize)) then
+    if roads.terrainSwapped then roads.terrainSwapped() end
+    swapped = true
+  end
   -- every block import / move drops all the grass on it; rebuild it before this frame is drawn
   if nearVisual ~= 'mesh' then groundcover.afterBlockChange() end
   return ok, err, swapped or movingOnSurface
@@ -863,6 +867,7 @@ end
 local function endHold(h)
   if h.pausedByUs and simPaused() then simPause(false) end
   h.pausedByUs = nil
+  roads.setHold(false)
 end
 
 local function updateDropHold(dt)
@@ -878,19 +883,24 @@ local function updateDropHold(dt)
   end
   local h = dropHold
   if h.active and h.last and h.last.anchorId ~= st.anchorId then drophold.moved(h, pl.x, pl.y, pl.z) end
+  roads.setHold(h.active)
   local busy = st.placeFrames ~= nil or st.floorZ ~= nil
-  if not st.paused and drophold.observe(h, pl.x, pl.y, pl.z, pl.speed, dt, st.anchorId, box, busy) == 'start' then
-    log('I', 'beamngEarth', string.format('drop hold: the car is %.0f m from the block; paused until its ground loads',
-      box and math.max(box[1] - pl.x, pl.x - box[3], box[2] - pl.y, pl.y - box[4], 0) or -1))
+  -- (no server: no road tiles will come, nothing to wait for)
+  local nearReady = function(x, y) return not net.isConnected() or roads.readyAround(st.anchorId, x, y, drophold.NEAR_M) end
+  if not st.paused and drophold.observe(h, pl.x, pl.y, pl.z, pl.speed, dt, st.anchorId, box, busy, nearReady) == 'start' then
+    log('I', 'beamngEarth', string.format('drop hold: the car is %.0f m from the block; paused until its ground, bridges ' ..
+      'and buildings load', box and math.max(box[1] - pl.x, pl.x - box[3], box[2] - pl.y, pl.y - box[4], 0) or -1))
     if not simPaused() then
       simPause(true)
       h.pausedByUs = true
     end
   end
+  roads.setHold(h.active)
   if not h.active then return end
   if h.pausedByUs and not simPaused() then         -- the player resumed: their call
     drophold.cancel(h)
     h.pausedByUs = nil
+    roads.setHold(false)
     log('I', 'beamngEarth', 'drop hold: resumed by the player')
     return
   end
@@ -898,14 +908,19 @@ local function updateDropHold(dt)
   if box and drophold.inside(box, h.x, h.y, drophold.EDGE_MARGIN) then
     local ray = rawget(_G, 'castRayStatic')
     if ray then
-      local from = vec3(h.x, h.y, h.z + 600)
-      local d = ray(from, vec3(0, 0, -1), 3000)
-      if d and d < 3000 then gz = from.z - d end
+      -- what is under the drop point first (a drop under a bridge: the road below, not the deck); nothing (the drop
+      -- point under the ground): from high above, the top surface
+      for _, up in ipairs({ 2.5, 600 }) do
+        local from = vec3(h.x, h.y, h.z + up)
+        local d = ray(from, vec3(0, 0, -1), 3000)
+        if d and d < 3000 then gz = from.z - d; break end
+      end
     end
   end
   local serial = st.block and (st.block.cx .. ',' .. st.block.cy .. ',' .. tostring(st.followCount)) or nil
   local building = (st.terrainPending ~= nil or (st.pending ~= nil and not st.pending.ready)) and net.isConnected()
-  local act, z = drophold.step(h, st.clock, box, serial, gz, building)
+  local near = nearReady(h.x, h.y)
+  local act, z = drophold.step(h, st.clock, box, serial, gz, building, near)
   if act == nil then return end
   if act == 'place' then
     setCarAt(veh, h.x, h.y, z)
@@ -1118,8 +1133,12 @@ local function updateGuard()
     edgeguard.release(g)
     g.resumedAt = st.clock
   end
-  -- a guard pause runs on until the car is well inside the (followed) block or the player resumes (edgeguard.update)
-  if not g.pausedByUs and (guardFailed or serverHealthy() or st.placeFrames or st.paused) then
+  -- a guard pause runs on until the car is well inside the (followed) block or the player resumes (edgeguard.update).
+  -- With a healthy server too (2026-10-19, "I always want the ground ... to have collision ... going at high speeds"):
+  -- if the next block is late (a first visit, a busy server) the car is paused at the edge of the collidable ground
+  -- instead of driving off it; normally the block follows long before (the pause needs the edge within PAUSE_LEAD_S).
+  g.healthy = serverHealthy()
+  if not g.pausedByUs and (guardFailed or st.placeFrames or st.paused) then
     g.mode = 'off'
     return
   end
@@ -1143,8 +1162,9 @@ local function updateBanner(dt)
   i.everConnected, i.attempts = net.everConnected(), net.attempts()
   i.note, i.noteDetail = st.serverNote, st.serverNoteDetail
   local m = st.guard.mode
-  i.edge = (m == 'warn' or m == 'hold') and m or nil
-  i.dropHold = dropHold.active or nil
+  -- (healthy: no warning, the block follows; a pause there waits for the late block like a drop hold)
+  i.edge = (not st.guard.healthy and (m == 'warn' or m == 'hold')) and m or nil
+  i.dropHold = (dropHold.active or (st.guard.healthy and st.guard.pausedByUs)) or nil
   -- connected and said hello, yet the guard runs: the server does not (yet) build the terrain
   i.stuck = (i.session and net.isConnected()) and true or false
   banner.update(dt, i)

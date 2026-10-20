@@ -314,8 +314,13 @@ class ServerSurfaceTest(unittest.TestCase):
         self.assertEqual(info["layers"], sf.mask_names(s.hm_name((a.id, 0.0, 0.0))[:-4]))
         self.assertTrue(info["surfaceComplete"])
         self.assertTrue(os.path.exists(os.path.join(s.out_dir, info["ter"])))
-        self.assertFalse(os.path.exists(os.path.join(s.out_dir, s.hm_name((a.id, 0.0, 0.0)))))
+        self.assertTrue(os.path.exists(os.path.join(s.out_dir, s.hm_name((a.id, 0.0, 0.0)))))
         for mask_file in info["layers"]:
+            self.assertTrue(os.path.exists(os.path.join(s.out_dir, mask_file)))
+        # Follow blocks suppress hm PNG and mask writes
+        info_follow = s.make_heightmap(a, 128.0, 0.0, None)
+        self.assertFalse(os.path.exists(os.path.join(s.out_dir, s.hm_name((a.id, 128.0, 0.0)))))
+        for mask_file in info_follow["layers"]:
             self.assertFalse(os.path.exists(os.path.join(s.out_dir, mask_file)))
         conn = earthd.Connection.__new__(earthd.Connection)
         conn.s = s
