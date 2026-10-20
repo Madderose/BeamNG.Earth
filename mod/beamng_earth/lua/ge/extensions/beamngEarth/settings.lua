@@ -549,10 +549,30 @@ end
 function M.mapOpened(on) mapOpen = on and true or false end
 function M.isMapOpen() return mapOpen end
 
+-- Ensure the map and welcome routes are registered with BeamNG's ui_router_routeManager in GELua.
+function M.ensureRoutes()
+  local rm = rawget(_G, 'ui_router_routeManager')
+  if rm and rm.registerModRoutes then
+    pcall(rm.registerModRoutes, 'beamngEarth.routes', {
+      {
+        name = 'beamngEarthWelcome',
+        path = '/beamng-earth-welcome',
+        meta = { luaRoute = { title = 'Welcome to BeamNG.Earth', backTarget = 'play' } }
+      },
+      {
+        name = 'beamngEarthMap',
+        path = '/beamng-earth-map',
+        meta = { luaRoute = { title = 'BeamNG.Earth map', backTarget = 'play' } }
+      }
+    })
+  end
+end
+
 -- Go to a UI screen (route): extensions.ui_router.navigate, BeamNG 0.40's way (its patch notes: "Use
 -- extensions.ui_router.navigate(routeName, params) instead of guihooks.trigger('ChangeState', ...)"; it exists in 0.39.4
 -- too); the old ChangeState only without it.
 function M.navigate(state)
+  M.ensureRoutes()
   local r = rawget(_G, 'ui_router')
   if r and r.navigate then
     local ok = pcall(r.navigate, state)
@@ -565,6 +585,7 @@ end
 
 -- The key binding (actions/beamngEarth.json; M and the pause menu Map via redirectBigMap): open the map, or close it back to driving.
 function M.toggleMap()
+  M.ensureRoutes()
   if mapOpen then
     M.navigate('play')
     mapOpen = false
@@ -583,6 +604,7 @@ end
 M.replaceBigMap = true
 local bigMapOrig = nil
 function M.redirectBigMap(inOurLevel)
+  M.ensureRoutes()
   local bm = rawget(_G, 'freeroam_bigMapMode')
   local career = rawget(_G, 'career_career')
   local want = M.replaceBigMap and inOurLevel and bm ~= nil and not (career and career.isActive and career.isActive())
@@ -599,6 +621,7 @@ end
 function M.onExtensionLoaded()
   M.load()
   M.applyAll()
+  M.ensureRoutes()
 end
 
 -- The one-time welcome (the user, 2026-10-15: "add a 1 time popup with info about this project"): shown a moment after
