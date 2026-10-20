@@ -686,4 +686,56 @@ All requested test suites (plus `test_farfield.py`) passed with zero failures:
 > `[2026-10-19 21:49:45]` **TASK-GIT-DIFF-152**: Completed upstream `v1.5.2-beta` (`c703230`) diff exploration and clean merge (`d85af06`) on `perf/phase6-highspeed-streaming`. Fixed conflict resolution in `server/tests/test_protocol_agreement.py` so both `"where"` and `"open_page"` are preserved in `MOD_TO_SERVER`. Verified zero diff against `c703230` across all 14 upstream files and zero diff against `fb42ca1` across all 11 Phase 6 files. Report written to [`runs/optimization_logs/upstream_1.5.2_diff_exploration.md`](runs/optimization_logs/upstream_1.5.2_diff_exploration.md).
 > `[2026-10-19 21:52:30]` **TASK-P7-INVESTIGATION**: Completed comprehensive Phase 7 CPU frame time hiccup investigation & architecture design report in [`runs/optimization_logs/phase7_hiccup_investigation_report.md`](runs/optimization_logs/phase7_hiccup_investigation_report.md). Detailed mathematical root causes and exact code changes for governor-integrated tree micro-chunking (`MICRO_PER_FRAME = 20`, `< 0.80 ms`), road corridor priority cone, `far_swap` 1-group-per-frame staggering + `.cdae` mutual exclusion, `be:reloadCollision()` debouncing (`treesDirty` 20s / `deletesDirty` 30s), incremental per-frame LuaJIT GC (`collectgarbage('step', 1)`), and 28-worker LPT method-level test runner (`< 10s` on 32-thread Ryzen 9 9955HX3D). Status updated to **COMPLETED**.
 
+---
+
+## Phase 8: Shadow Cascade Culling & High-Speed Streaming Optimization Pipeline
+
+**Orchestrator**: Antigravity (Lead Orchestration Agent)  
+**Assigned Sub-Agents**: AGY Argon 4 Medium (`gemini-4-argon-medium`)  
+**Hardware Profile**: AMD Ryzen 9 9955HX3D (16 physical / 32 logical cores), NVIDIA GeForce RTX 5080 Laptop GPU  
+**Target Scenario**: Mont Ventoux ascent & high-speed driving at 120–200+ mph with zero stutter (`RenderShadows` < 1.5 ms, streaming budget <= 3.0 ms/frame).
+
+### Sub-Agent Delegated Tasks & Objectives Matrix
+
+| Task ID | Component / Area | Files Allocated | Model | Goal & Technical Scope | Execution Status |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| **TASK-P8-A** | **Shadow Culling & Materials Pipeline** | `mod/.../buildings.materials.json`<br>`server/buildings.py`<br>`server/tests/test_buildings.py` | `gemini-4-argon-medium` | **Goal**: Material-level shadow stripping (`castShadows: false` on `bne_bld_glass`, `bne_wire`, etc.), and merge submeshes on coarse building LODs (`detail50` / `bldfar`) so building shadow draw calls drop from 15 to 1-2. | **COMPLETED (Exit Code 0)** |
+| **TASK-P8-B** | **$O(1)$ Framing Buffer & Governed Two-Lane IPC** | `mod/.../core.lua`<br>`mod/.../roads.lua`<br>`server/earthd.py` | `gemini-4-argon-medium` | **Goal**: Velocity-adaptive `PSSMLightShadowMap.sdsmMaxDistanceScale` in `core.lua`, Two-Lane IPC queue (Lane 0 immediate, Lane 1 time-sliced data under 0.5 ms), and inlined `bldfar_tile` metadata eliminating sideband JSON disk reads. | **COMPLETED (Exit Code 0)** |
+| **TASK-P8-C** | **Physics Micro-Block & Ping-Pong CDAE Slots** | `mod/.../follow.lua`<br>`mod/.../terrain.lua`<br>`server/matslots.py`<br>`server/earthd.py` | `gemini-4-argon-medium` | **Goal**: In `mesh` mode, shrink invisible physics `TerrainBlock` to $256 \times 256$ ahead of car ($4\times$ smaller `.ter`, reducing shift from 15 ms to <3 ms), and implement generational ping-pong slots (`slot_<n>_0.cdae` / `slot_<n>_1.cdae`). | **COMPLETED (Exit Code 0)** |
+| **TASK-P8-D** | **Speed-Gated C1 Instant Swaps & Predictive Governor** | `mod/.../governor.lua`<br>`mod/.../farfield.lua`<br>`mod/.../trees.lua` | `gemini-4-argon-medium` | **Goal**: Implement predictive D3D12 swapchain pacing via EMA engine cost headroom, speed-gated C1 instant swaps at high speeds ($\ge 50$ m/s), and cap forest rings to 5 / 900m + `SHAPE_VARIANTS = 1`. | **COMPLETED (Exit Code 0)** |
+
+> `[2026-10-20 14:13:28]` **TASK-P8-A**: Subagent running (`gemini-4-argon-medium`, task ID `task-593`).
+> `[2026-10-20 14:18:48]` **TASK-P8-A**: Status updated to **COMPLETED (Exit Code 0)**. `bne_bld_glass` shadow culling disabled, coarse building LODs merged to single primitive, window omission in `lite=True`. 56 tests passed in `test_buildings.py`.
+> `[2026-10-20 14:13:32]` **TASK-P8-B**: Subagent running (`gemini-4-argon-medium`, task ID `task-595`).
+> `[2026-10-20 14:28:05]` **TASK-P8-B**: Status updated to **COMPLETED (Exit Code 0)**. Two-lane IPC queue (0.5ms streaming budget, immediate Lane 0 control), velocity-adaptive SDSM shadow scale, inlined `bldfar_tile` metadata in `earthd.py` and `roads.lua`. 73 tests passed in `test_roads.py` and `test_protocol_agreement.py`.
+> `[2026-10-20 14:13:35]` **TASK-P8-C**: Subagent running (`gemini-4-argon-medium`, task ID `task-597`).
+> `[2026-10-20 14:13:39]` **TASK-P8-D**: Subagent running (`gemini-4-argon-medium`, task ID `task-599`).
+> `[2026-10-20 14:29:48]` **TASK-P8-D**: Status updated to **COMPLETED (Exit Code 0)**. Predictive D3D12 governor pacing (EMA engine base-cost headroom), speed-gated C1 instant swaps (spd >= 50 m/s), active forest capped to 5 rings (900 m) & `SHAPE_VARIANTS = 1`. 78 tests passed across `test_farfield.py`, `test_vegetation.py`, `test_modsim.py`, and `test_protocol_agreement.py`.
+> `[2026-10-20 14:50:45]` **TASK-P8-C**: Status updated to **COMPLETED (Exit Code 0)**. Configured $256 \times 256$ ($512\text{ m}$ span at $2.0\text{ m/px}$, $\mathbf{P} + \mathbf{v} \cdot 1.5\text{ s}$) physics micro-block in `follow.lua` and `terrain.lua` when `nearVisual == 'mesh'`, and implemented generational ping-pong `.cdae` slots (`slot_<n>_0.cdae` / `slot_<n>_1.cdae`) in `matslots.py` and `earthd.py`. 89 tests passed across `test_matslots.py`, `test_modsim.py`, `test_protocol_agreement.py`, and `test_server.py`.
+> `[2026-10-20 14:56:14]` **TASK-P8-VERIFY**: Executed full repository test suite via `python tools/parallel_tests.py -j 12`: **266 / 266 tests passed in 46.84s wall-clock (0 failed)**.
+> `[2026-10-20 14:56:47]` **TASK-P8-DEPLOY**: In-engine mod synced to `C:\Users\hoppj\AppData\Local\BeamNG\BeamNG.drive\current\mods\unpacked\beamng_earth` via `install.py --no-venv`.
+> `[2026-10-20 14:57:41]` **TASK-P8-BUILD**: Recompiled standalone Windows binaries `dist\BeamNG.Earth-1.5.3-experimental.exe` and `dist\1.5.3-experimental.exe` (71.7 MB, PyInstaller 6.22.3, Python 3.14.3). Smoke test passed with code 0 (`--server --help`).
+
+---
+
+### Phase 8 Verification Sign-Off Report (Antigravity Lead Orchestrator)
+
+**Status:** **100% COMPLETE & VERIFIED (ALL TASKS P8-A, P8-B, P8-C, P8-D PASSED)**  
+**Lead Orchestrator:** Antigravity  
+**Sub-Agents:** 4 Concurrent AGY Argon 4 Medium (`gemini-4-argon-medium`) agents  
+**Verification Date:** `2026-10-20 14:58:00+02:00`  
+**Built Executables:**
+- `dist/BeamNG.Earth-1.5.3-experimental.exe` (71,782,466 bytes)
+- `dist/1.5.3-experimental.exe` (71,782,466 bytes)
+
+#### Final Test Matrix:
+- `python tools/parallel_tests.py -j 12`: **266 tests passed in 46.84s** (100% PASS, 0 failures).
+- Mod synced to BeamNG user directory: `mods/unpacked/beamng_earth`.
+- Executable verified: smoke test passed with exit code 0.
+
+
+
+
+
+
 

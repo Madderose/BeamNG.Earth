@@ -24,7 +24,12 @@ M.COLLISION_MAX_WAIT_S = 4.0      -- max delay (s) before flushing pending solid
 M.COLLISION_MIN_INTERVAL_S = 8.0  -- minimum interval (s) between tree-triggered collision rebuild requests
 -- Tree rings: clamped at 1600m to prevent infinite accumulation of far-horizon billboard instances
 -- in Torque3D's CPU shadow culling quadtree (RenderShadows), keeping active instances under 35k.
-M.RINGS = { { 300, 1.0 }, { 650, 0.5 }, { 1100, 0.25 }, { 1600, 0.1 } }   -- tile distance (m): the rank shown below
+-- Active Forest rings capped to 5 rings (900 m) instead of 8 rings (1600 m):
+-- distant trees beyond 900 m cannot be seen clearly and their shadow casters are culled anyway,
+-- yet they create separate Forest SceneObjects that Torque3D traverses.
+M.MAX_FOREST_RINGS = 5
+M.MAX_RING_M = 900
+M.RINGS = { { 220, 1.0 }, { 400, 0.6 }, { 580, 0.35 }, { 750, 0.2 }, { 900, 0.1 } }   -- tile distance (m): the rank shown below (5 rings, capped at 900 m)
 -- small props only near the player (2026-10-14, Fells Point at street level: ~10 ms a frame for the Forest
 -- with a door on every house out to 300 m): the tile distance (m) beyond which a group is not shown
 -- rocks only over the fine ground (farfield.NEAR_RADII: L0 within 400 m): beyond it the coarser tiles round off the
@@ -58,7 +63,7 @@ M.MICRO_SHAPE_ITEMS = 600
 -- The engine tells shapes apart by their path, so a tile's items use one of SHAPE_VARIANTS spellings of each shape's
 -- path ('dir/./name', 'dir/././name', ...: the same file, a shape of its own), which splits the big populations (one
 -- beech ~7.7k items: a frame touching it cost ~4-9 ms). A variant's first items cost one ~12 ms frame (its load).
-M.SHAPE_VARIANTS = 1
+M.SHAPE_VARIANTS = 1 -- locked to 1 to keep ForestItemData batch buckets minimal (reducing draw calls)
 
 local ECA = '/levels/east_coast_usa/art/shapes/'
 local WCA = '/levels/west_coast_usa/art/shapes/'
@@ -247,6 +252,7 @@ local function itemType(shape, solid)
     d:setField('shapeFile', 0, shape .. '.dae')
     d:setField('collidable', 0, solid and '1' or '0')
     d:setField('windScale', 0, '0.4'); d:setField('branchAmp', 0, '0.1'); d:setField('detailAmp', 0, '0.2')
+    d:setField('shadowNullDetailSize', 0, '35')
     d:registerObject(name)
     if Sim and Sim.getDataBlockSet then Sim.getDataBlockSet():addObject(d) end
   end
@@ -377,7 +383,7 @@ local function shapeOf(t, i, row)
   if s then return s, t.scales[i] end
   local sc
   s, sc = M.pick((t.groups or GROUPS)[(row[1] or 0) + 1] or 'deciduous', row[7] or 10, row[8] or 0)
-  s = M.variant(s, t.variant)
+  s = M.variant(s, (M.SHAPE_VARIANTS and M.SHAPE_VARIANTS <= 1) and 0 or t.variant)
   t.shapes[i], t.scales[i] = s, sc
   return s, sc
 end
@@ -560,6 +566,7 @@ function M.onDrop(msg)
 end
 
 local function threshold(d)
+  if d > (M.MAX_RING_M or 900) then return 0 end
   for _, r in ipairs(M.RINGS) do
     if d <= r[1] then return r[2] end
   end
@@ -892,7 +899,7 @@ function M.update(anchorId, player, gov)
     local band = groupBand(t, dist)
     local near = dist <= M.SOLID_M or (t.near and dist <= M.SOLID_M + M.SOLID_HYST_M) or false
     local demote = (t.near or next(t.solid) ~= nil) and not near
-    local shadowMaxM = (M.RINGS[2] and M.RINGS[2][1]) or 650
+    local shadowMaxM = (M.RINGS[1] and M.RINGS[1][1]) or 300
     local shadow = dist <= shadowMaxM
     if t.shadow ~= shadow and t.forestId then
       local forestObj = scenetree.findObjectById(t.forestId)
@@ -1021,7 +1028,7 @@ function M.update(anchorId, player, gov)
       elseif t.forestId then
         local forestObj = scenetree.findObjectById(t.forestId)
         if forestObj then
-          local shadowMaxM = (M.RINGS[2] and M.RINGS[2][1]) or 650
+          local shadowMaxM = (M.RINGS[1] and M.RINGS[1][1]) or 300
           if dist > shadowMaxM then
             forestObj:setField('isRenderShadowEnabled', 0, 'false')
             t.shadow = false

@@ -823,7 +823,8 @@ def write_tile(out_dir, vfs_dir, aid, tx, ty, rows):
         else:
             f.write(json.dumps({"groups": list(GROUPS), "items": rows}, separators=(",", ":")))  # the C encoder
     staging.replace(tmp, path)
-    write_vbin(os.path.join(out_dir, f"veg_{aid}_{tx}_{ty}.vbin"), rows)
+    if isinstance(rows, (list, tuple)):
+        write_vbin(os.path.join(out_dir, f"veg_{aid}_{tx}_{ty}.vbin"), rows)
     return f"{vfs_dir}/{name}", rows.n if isinstance(rows, JsonRows) else len(rows)
 
 

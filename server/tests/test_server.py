@@ -214,7 +214,7 @@ class ServerHarness(unittest.TestCase):
             self.assertEqual(m["state"], "group")
             own = f"far_{aid}_{m['key']}.{self.far_format}"        # a textured cdae tile: its pooled file (matslots.py)
             if "material" in m and self.far_format == "cdae":
-                own = f"slot_{m['material'].rsplit('_', 1)[1]}.cdae"
+                own = self.server.matslots.file(m["material"])
             self.assertEqual(m["shape"], f"/temp/beamngEarth/{self.server.sid}/{own}")
             self.assertGreaterEqual(m["err"], 0)
             self.assertGreaterEqual(m["skirt"], ff.skirt_depth(t.size, m["err"]) - 0.01)

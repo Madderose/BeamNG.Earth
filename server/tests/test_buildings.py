@@ -375,6 +375,24 @@ class SplitTest(unittest.TestCase):
             self.assertEqual(len(shape["meshes"]), 2)
             self.assertEqual(shape["meshes"][1]["primitives"][0], 1, "coarse lite LOD emits a single draw primitive")
 
+    def test_shadow_materials_and_lite_window_omission(self):
+        import json
+        mats_path = (Path(__file__).resolve().parents[2] / "mod" / "beamng_earth" / "levels" / "beamng_earth"
+                     / "art" / "shapes" / "beamngEarth" / "buildings.materials.json")
+        mats = json.loads(mats_path.read_text(encoding="utf-8"))
+        for non_shadow in ("bne_bld_glass", "bne_wire", "bne_sidewalk_brick"):
+            self.assertIn(non_shadow, mats)
+            self.assertIs(mats[non_shadow].get("castShadows"), False, non_shadow)
+        # A house with plain walls uses bne_bld_glass for laid-over windows in the full mesh and omits them in lite
+        spec = next(bld.plan(rect(k * 40, 20, 12, 9), {"class": "house"}, 0, 39.2, -76.9)
+                    for k in range(40) if bld.plan(rect(k * 40, 20, 12, 9), {"class": "house"}, 0, 39.2, -76.9).wall)
+        _, _, T_full, M_full, mats_full, _ = bld.build([(spec, 0.0, 0.0)], lite=False)
+        _, _, T_lite, M_lite, mats_lite, _ = bld.build([(spec, 0.0, 0.0)], lite=True)
+        self.assertIn(mats_full.index(bld.GLASS), set(M_full.tolist()))
+        self.assertLess(len(T_lite), len(T_full), "lite mesh omits laid-over glass window quads")
+        self.assertEqual(len(mats_lite), 1, "lite mesh merges materials into a single primitive")
+        self.assertTrue((M_lite == 0).all())
+
 
 class MeshTest(unittest.TestCase):
     def check_outward(self, ring, attrs):

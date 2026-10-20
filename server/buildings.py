@@ -73,14 +73,16 @@ BARN_CLASSES = {"barn", "farm_auxiliary", "stable", "cowshed"}
 MARBLE = "bne_bld_marble"   # cut white marble (the stock m_marble_cut): Baltimore's row house steps
 BRICK_WALL = "bne_bld_brick"    # plain red brick (the stock brick_plain): a garage's skin
 CONCRETE = "bne_bridge_concrete"  # plain concrete (tunnel.materials.json): a precast garage's skin
+GLASS = "bne_bld_glass"     # laid-over window panes (castShadows: false, coplanar with opaque walls)
 MATERIALS = (FACADE, SHOP, OFFICE, ROOF_FLAT, ROOF_SLATE, ROOF_SHINGLE, SIDING, STUCCO, ROOF_METAL, PANEL, METALWALL,
-             STONE, MARBLE, BRICK_WALL, CONCRETE)
+             STONE, MARBLE, BRICK_WALL, CONCRETE, GLASS)
 LOOKS = {
     "bne_bridge_steel": (METALWALL, (0.50, 0.52, 0.54)),
     "bne_marble": (MARBLE, (1.0, 1.0, 1.0)),
     "bne_brick_red": (BRICK_WALL, (1.0, 1.0, 1.0)), "bne_brick_dark": (BRICK_WALL, (0.78, 0.72, 0.70)),
     "bne_brick_tan": (BRICK_WALL, (1.0, 0.92, 0.80)),
     "bne_precast": (CONCRETE, (1.0, 1.0, 1.0)), "bne_precast_warm": (CONCRETE, (1.0, 0.95, 0.86)),
+    "bne_bld_glass": (GLASS, (1.0, 1.0, 1.0)),
     "bne_bld_fac_white": (FACADE, (1.0, 1.0, 1.0)), "bne_bld_fac_cream": (FACADE, (1.0, 0.93, 0.80)),
     "bne_bld_fac_sand": (FACADE, (0.92, 0.82, 0.68)), "bne_bld_fac_grey": (FACADE, (0.80, 0.82, 0.84)),
     "bne_bld_fac_brickdark": (FACADE, (0.78, 0.72, 0.70)), "bne_bld_fac_brickwarm": (FACADE, (1.0, 0.88, 0.80)),
@@ -760,12 +762,14 @@ DOOR_GAP_M = 0.75           # m each side of a front door kept free of the groun
 WIN_OUT_M = 0.03            # m the window stands proud of its wall
 
 
-def _plain_wall_with_windows(m, spec, a, b, L, z0, z_eave, wallmat, mat_idx, edge=None):
+def _plain_wall_with_windows(m, spec, a, b, L, z0, z_eave, wallmat, mat_idx, edge=None, lite=False):
     """A wall of a plain tileable material (world-scaled UV) with sash windows laid over it, a whole
     number per floor centred in their bays."""
     su = SIDING_UV_M
     m.quad((a[0], a[1], z0), (b[0], b[1], z0), (b[0], b[1], z_eave), (a[0], a[1], z_eave),
            (0, z0 / su), (L / su, z0 / su), (L / su, z_eave / su), (0, z_eave / su), wallmat)
+    if lite:
+        return
     if spec.windows is False:
         if spec.front is not None and spec.front == edge and L > 4.0:
             # a big box's storefront: the shopfront band over the wall, a whole number of its bays
@@ -784,7 +788,7 @@ def _plain_wall_with_windows(m, spec, a, b, L, z0, z_eave, wallmat, mat_idx, edg
         return
     d = (b - a) / L
     out = np.array([d[1], -d[0]]) * WIN_OUT_M
-    win = mat_idx["bne_bld_fac_white"]
+    win = mat_idx[GLASS]
     u0, u1, v0, v1 = WIN_UV
     base = z_eave - spec.floors * spec.floor_h
     for f in range(spec.floors):
@@ -810,7 +814,7 @@ def _walls(m, spec, ring, z0, z_eave, mat_idx, lite=False):
         if L < 0.05:
             continue
         if spec.wall:
-            _plain_wall_with_windows(m, spec, a, b, L, z0, z_eave, fac, mat_idx, i)
+            _plain_wall_with_windows(m, spec, a, b, L, z0, z_eave, fac, mat_idx, i, lite)
             continue
         if spec.plain:
             u1 = L / SIDING_UV_M

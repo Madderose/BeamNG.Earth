@@ -102,6 +102,10 @@ function M.new(opts)
     b = 0,              -- current streaming budget, ms per frame
     bPrev = 0,          -- b of the previous frame
     tokens = 0,         -- token bucket, ms
+    emaEngineMs = 8.0,  -- EMA of engine base frame cost (excluding our Lua streaming work), ms
+    lastSpentMs = 0.0,  -- Lua streaming ms spent in the previous frame
+    spent = 0.0,        -- Lua streaming ms spent in the current frame
+    heavyAllowed = true, -- whether predictive D3D12 pacing allows a heavy op this frame
     est = est,          -- per kind cost estimate, ms
     used = {},          -- kinds asked for at least once (they define maxUnit)
     hist = {}, histN = 0, -- ring of recent non-heavy frame times
@@ -162,9 +166,11 @@ local function median(t, n)
   return 0.5 * (s[n / 2] + s[n / 2 + 1])
 end
 
--- Call once per frame, first thing in onUpdate. wallMs: duration of the previous frame (nil =
--- measure with the clock). hasWork: streaming work is waiting.
-function Gov:beginFrame(hasWork, wallMs)
+-- Call once per frame, first thing in onUpdate. Supports both:
+--   Gov:beginFrame(dtReal, speedMps)
+-- and
+--   Gov:beginFrame(hasWork, wallMs, speedMps)
+function Gov:beginFrame(hasWork, wallMs, speedMps)
   if self.frame > 0 then
     if self.b == 0 and (self.frameUnits or 0) == 0 and not self.prevHeavy then
       self.zeroFrames = (self.zeroFrames or 0) + 1
@@ -174,11 +180,29 @@ function Gov:beginFrame(hasWork, wallMs)
   end
   self.frame = self.frame + 1
   local t = self.clock()
-  local wallArg = wallMs ~= nil
-  if wallMs == nil then wallMs = self.lastStart and (t - self.lastStart) or nil end
+  local dtReal
+  if type(hasWork) == 'number' then
+    dtReal = hasWork
+    speedMps = wallMs
+    if dtReal > 1.0 then
+      wallMs = dtReal
+      dtReal = dtReal / 1000.0
+    else
+      wallMs = dtReal * 1000.0
+    end
+    hasWork = true
+  else
+    if wallMs == nil then wallMs = self.lastStart and (t - self.lastStart) or nil end
+    if wallMs ~= nil and wallMs > 0 and wallMs < 1.0 then
+      dtReal = wallMs
+      wallMs = wallMs * 1000.0
+    elseif wallMs ~= nil then
+      dtReal = wallMs / 1000.0
+    else
+      dtReal = 0.016
+    end
+  end
   self.lastStart = t
-  local prevBase = self.base
-  local wasHeavy = self.prevHeavy
   if wallMs then
     if not self.prevHeavy then
       self.histN = self.histN + 1
@@ -189,54 +213,49 @@ function Gov:beginFrame(hasWork, wallMs)
   end
   self.prevHeavy = false
   self.prevFrameUnits = self.frameUnits or 0
+  self.lastSpentMs = self.spent or self.frameSpent or 0.0
   self.frameSpent, self.delSpent, self.frameUnits, self.units = 0, 0, 0, 0
   -- a heavy request lives as long as the caller repeats it every frame
   if self.heavyPending and self.heavyReqFrame < self.frame - 1 then self.heavyPending = false end
 
-  local target = self:targetNow()
+  -- Predictive D3D12 swapchain pacing: Exponential Moving Average (EMA) Engine Base-Cost Estimator
+  local dtMs = (dtReal or 0.016) * 1000.0
+  local engineOnlyMs = math.max(1.0, dtMs - (self.lastSpentMs or 0))
+  self.emaEngineMs = (self.emaEngineMs or 8.0) * 0.85 + engineOnlyMs * 0.15
+
+  -- Target 14.2 ms total frame time to keep 2.47 ms safety margin below 60 Hz (16.67 ms)
+  local headroomMs = 14.2 - self.emaEngineMs
+  local speedBoost = math.min(1.5, math.max(0.0, ((speedMps or 0) - 35.0) * 0.025))
+
+  if dtMs > 15.5 then
+    self.tokens = 0.25
+    self.heavyAllowed = false
+  else
+    self.tokens = math.max(0.5, math.min(4.0, headroomMs + speedBoost))
+    self.heavyAllowed = (dtMs < 12.5) and (self.emaEngineMs < 10.5)
+  end
+  self.spent = 0.0
+
   self.bPrev = self.b
   if self.quiet > 0 then
     self.quiet = self.quiet - 1
     self.presentCooldown = 0
     self.bSaved = nil
-    self.b, self.tokens, self.engineDebt, self.blocked = 0, 0, 0, true
+    self.b, self.tokens, self.engineDebt, self.blocked, self.heavyAllowed = 0, 0, 0, true, false
     return
-  end
-  -- D3D12 presentation pacing awareness: when frame delta w1 > 11.0 ms (indicating a D3D12 present stall),
-  -- hold self.b = 0 for 1 cooldown frame so the D3D12 flip queue drains cleanly.
-  if not wasHeavy and self.w1 ~= nil and self.w1 > M.PRESENT_STALL_MS
-      and ((prevBase ~= nil and prevBase <= M.PRESENT_STALL_MS) or (prevBase == nil and wallArg and self.w1 > 11.5)) then
-    if self.bSaved == nil then self.bSaved = self.bPrev end
-    self.presentCooldown = M.PRESENT_COOLDOWN - 1
-    self.b, self.tokens, self.blocked = 0, min(self.tokens, 0), true
-    self.stats.presentCooldowns = (self.stats.presentCooldowns or 0) + 1
-    return
-  elseif (self.presentCooldown or 0) > 0 then
-    self.presentCooldown = self.presentCooldown - 1
-    self.b, self.tokens, self.blocked = 0, min(self.tokens, 0), true
-    return
-  end
-  if self.bSaved ~= nil then
-    self.b = self.bSaved
-    self.bSaved = nil
-    self.bPrev = self.b
   end
   self.blocked = false
   if self.heavyPending then
     self.b = 0
+    self.tokens = 0
+    self.heavyAllowed = false
   elseif hasWork then
-    if self.b < target then
-      self.b = min(target, self.b + ((self.loading or self.urgent) and M.RAMP_UP_LOADING or M.RAMP_UP))
-    else
-      self.b = max(target, self.b - M.RAMP_DOWN_IDLE)
-    end
+    self.b = self.tokens
   else
     self.b = max(0, self.b - M.RAMP_DOWN_IDLE)
+    self.tokens = min(self.tokens, self.b)
   end
   self.engineDebt = max(0, (self.engineDebt or 0) - self.b)
-  self.tokens = min(self.tokens + self.b, 2 * self:maxUnit())     -- (a debt stays: chargeEngine)
-  -- no banking while idle or while a heavy op waits: the budget must really go down to zero
-  if self.heavyPending or not hasWork then self.tokens = min(self.tokens, self.b) end
 end
 
 -- May a unit of this kind run now? (The caller then runs it and calls charge with its cost.)
@@ -245,7 +264,8 @@ function Gov:try(kind)
   if self.blocked or self.heavyFrame == self.frame then return false end
   local e = self.est[kind] or 1
   if self.frameSpent + e > self.b + self:maxUnit() then return false end
-  if self.tokens < e then
+  local req = (self.frameUnits == 0 and self.tokens >= 2.0) and min(e, 4.0) or e
+  if self.tokens < req then
     if DELETE_KINDS[kind] and (self.engineDebt or 0) > 0 and not self.heavyPending and self.b > 0 then
       return self.delSpent + min(e, M.DELETE_BUDGET_MS) <= M.DELETE_BUDGET_MS
     end
@@ -265,6 +285,7 @@ function Gov:charge(kind, ms)
     self.tokens = self.tokens - ms
   end
   self.frameSpent = self.frameSpent + ms
+  self.spent = (self.spent or 0.0) + ms
   if self.frameSpent > self.stats.maxFrameSpent then self.stats.maxFrameSpent = self.frameSpent end
   self.frameUnits = self.frameUnits + 1
   self.units = (self.units or 0) + 1
@@ -298,6 +319,7 @@ function Gov:chargeMotion(ms)
   ms = max(0, ms or 0)
   self.tokens = self.tokens - ms
   self.frameSpent = self.frameSpent + ms
+  self.spent = (self.spent or 0.0) + ms
 end
 
 local function grant(self)
@@ -330,8 +352,8 @@ function Gov:requestHeavy(urgent)
   if self.b > 0 or (self.zeroFrames or 0) < M.QUIET_BEFORE or self.frame - self.lastStreamFrame <= M.QUIET_BEFORE then
     return false
   end
-  local calm = self.base ~= nil and self.w1 ~= nil and self.w2 ~= nil
-    and self.w1 <= self.base + M.CALM_MARGIN_MS and self.w2 <= self.base + M.CALM_MARGIN_MS
+  local calm = (self.heavyAllowed ~= false) or (self.base ~= nil and self.w1 ~= nil and self.w2 ~= nil
+    and self.w1 <= self.base + M.CALM_MARGIN_MS and self.w2 <= self.base + M.CALM_MARGIN_MS)
   if calm or self.frame - self.heavySince >= M.CALM_TIMEOUT then return grant(self) end
   return false
 end
@@ -343,7 +365,8 @@ function Gov:isHeavyFrame() return self.heavyFrame == self.frame end
 
 function Gov:snapshot()
   return { b = self.b, tokens = self.tokens, target = self:targetNow(), loading = self.loading, urgent = self.urgent,
-    base = self.base, tickBase = self.tickBase,
+    base = self.base, tickBase = self.tickBase, emaEngineMs = self.emaEngineMs, heavyAllowed = self.heavyAllowed,
+    lastSpentMs = self.lastSpentMs,
     heavyPending = self.heavyPending, estCdae = self.est.cdae, estDae = self.est.dae, estCdaeTex = self.est.cdaeTex,
     estCdaeTex128 = self.est.cdaeTex128, estCdaeTex256 = self.est.cdaeTex256, estCdaeTex512 = self.est.cdaeTex512,
     estMaterial = self.est.material, estMatDelete = self.est.matDelete, heavy = self.stats.heavy,

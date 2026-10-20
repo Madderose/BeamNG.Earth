@@ -45,6 +45,7 @@ M.DETAIL_MAP = '/art/beamngEarth/detail_ground.dds'
 M.FIELDS = {
   { 'useAnisotropic', '1' },
   { 'roughnessFactor', '1' },
+  { 'castShadows', '0' },
 }
 M.DETAIL_FIELDS = {
   { 'detailMapUseUV', '1' },

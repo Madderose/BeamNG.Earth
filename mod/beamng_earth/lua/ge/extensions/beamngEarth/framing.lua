@@ -27,10 +27,6 @@ end
 
 function Reassembler:push(chunk)
   if chunk and #chunk > 0 then
-    if self.pos > 1 then
-      self.buf = self.buf:sub(self.pos)
-      self.pos = 1
-    end
     self.parts[#self.parts + 1] = chunk
     self.pending = self.pending + #chunk
   end
@@ -54,6 +50,9 @@ function Reassembler:pop()
     end
     self.buf = self.buf .. table.concat(self.parts)
     self.parts, self.pending = {}, 0
+  elseif self.pos > 32768 then
+    self.buf = self.buf:sub(self.pos)
+    self.pos = 1
   end
   if not self.need then
     local b1, b2, b3, b4 = byte(self.buf, self.pos, self.pos + 3)

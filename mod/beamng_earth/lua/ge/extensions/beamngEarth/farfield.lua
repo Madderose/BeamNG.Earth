@@ -227,8 +227,8 @@ local function deleteById(id)
 end
 
 -- Is the shape path a pooled one (re-used by later tiles)? Its slot number.
-function M.pooledShape(path) return type(path) == 'string' and path:find('/slot_%d+%.cdae$') ~= nil end
-local function slotOf(path) return tonumber(type(path) == 'string' and path:match('/slot_(%d+)%.cdae$') or nil) end
+function M.pooledShape(path) return type(path) == 'string' and path:find('/slot_%d+[_%d]*%.cdae$') ~= nil end
+local function slotOf(path) return tonumber(type(path) == 'string' and path:match('/slot_(%d+)[_%d]*%.cdae$') or nil) end
 
 -- An instance that never got an object is gone: its far_tile's slot is reported as such.
 local function instGone(inst)
@@ -664,7 +664,7 @@ end
 -- Start a ready group. Returns false (nothing changed) when it must wait: it would cross over in
 -- view within NEAR_POP_M while MAX_GROUPS crossovers already run (v1.3 D: the cap stays, but a near
 -- in-view swap waits a few frames for a free slot instead of popping).
-local function startGroup(g, cam)
+local function startGroup(g, cam, player)
   -- 1. plan, without changing any state
   -- what goes: the live instances of the removed keys, and any live instance an add replaces
   local rems, seen = {}, {}
@@ -709,8 +709,18 @@ local function startGroup(g, cam)
     for _, a in ipairs(visAdds) do all[#all + 1] = a end
     for _, r in ipairs(visRems) do all[#all + 1] = r end
     local vis, nearest = inView(all, cam, max(dIn, dOut))
+    local spd = 0.0
+    if player then
+      local vx, vy = tonumber(player.vx) or 0.0, tonumber(player.vy) or 0.0
+      spd = tonumber(player.speed) or sqrt(vx * vx + vy * vy)
+    end
+    local alpha = min(1.0, max(0.0, (spd - 25.0) / 65.0))
+    local highSpeedBypass = (spd >= 50.0) or (alpha >= 0.4)
     if #visRems == 0 and oldCount == 0 then
       mode = 'instant' -- nothing visible to cross over with (first fill)
+    elseif highSpeedBypass then
+      -- Speed-Gated C1 Instant Swaps: bypass moving crossover list and execute an instant atomic C1 swap
+      mode = 'instant'
     elseif not vis then
       mode = 'instant' -- C1: off-screen
     elseif nearest <= (crossover.INSTANT_M or 350) then
@@ -1408,7 +1418,7 @@ function M.update(gov, dt, cam, player)
   local t0 = now()
   local nMoving = 0
   for _, g in ipairs(groups) do
-    if g.state == 'run' and clock - g.t0 >= g.dur then finishGroup(g) end
+    if g.state == 'run' and (clock - g.t0 >= g.dur or (player and ((tonumber(player.speed) or sqrt((tonumber(player.vx) or 0)^2 + (tonumber(player.vy) or 0)^2)) >= 50.0 or min(1.0, max(0.0, ((tonumber(player.speed) or sqrt((tonumber(player.vx) or 0)^2 + (tonumber(player.vy) or 0)^2)) - 25.0) / 65.0)) >= 0.4))) then finishGroup(g) end
   end
   for inst in pairs(moving) do
     refresh(inst)
@@ -1439,7 +1449,7 @@ function M.update(gov, dt, cam, player)
       if not blocked and groupReady(g) then
         if gov:try('reveal') then
           local t1 = now()
-          if startGroup(g, cam) then
+          if startGroup(g, cam, player) then
             gov:charge('reveal', now() - t1)
             units = units + 1
           end -- else: waits for a crossover slot; its keys stay busy, other groups go on

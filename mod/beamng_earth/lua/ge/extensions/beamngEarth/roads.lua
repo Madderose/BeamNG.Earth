@@ -150,7 +150,7 @@ local objSlot = {}         -- object id -> slot number of the pooled file it loa
 local slotLive = {}        -- slot number -> objects alive with it
 local slotDropped = {}     -- slot number -> { serial, session } of a dropped tile's slot, reported at its last delete
 local slotsGone = {}       -- { n, serial, session } to report
-local function slotOf(path) return tonumber(type(path) == 'string' and path:match('/slot_(%d+)%.cdae$') or nil) end
+local function slotOf(path) return tonumber(type(path) == 'string' and path:match('/slot_(%d+)[_%d]*%.cdae$') or nil) end
 
 function M.setSession(s) session = s end
 
@@ -374,10 +374,9 @@ local function spawnWalk(q)
   local isRoad = q.what == 'road' or q.what == 'wire' or q.renderOnly   -- render-only meshes
   -- the buildings' and sidewalks' lean meshes are a collision detail (server cdae collision_only): never drawn
   local collide = (q.what == 'bldcol' or q.what == 'walkcol') and 'Collision Mesh' or not isRoad
-  -- Only keep shadow casting enabled on near 3D building meshes (bld), bridge decks (deck), and sidewalks
+  -- Only keep shadow casting enabled on near 3D building meshes (bld) and bridge decks (deck)
   local castShadow = (q.what:sub(1, 3) == 'bld' and q.what ~= 'bldcol')
     or q.what == 'deck'
-    or (q.what == 'walk' and not q.renderOnly)
   return createWalk(q.walk, collide, castShadow)
 end
 
@@ -460,22 +459,49 @@ function M.onTile(msg, currentAnchor)
   return true
 end
 
--- Server message `bldfar_tile` {anchorId, key, path, n}: a far tile's buildings (render-only, the lite mesh);
+-- Server message `bldfar_tile` {anchorId, key, path, n, ...}: a far tile's buildings (render-only, the lite mesh);
 -- shown only while the road tile of the same square has no building mesh of its own.
+-- Uses inlined metadata (cx, cy, cz, shape, cdae, tx, ty, rev, pos) directly without reading msg.path when present.
 function M.onFarTile(msg, currentAnchor)
   if not M.enabled then return false end
   switchAnchor(currentAnchor)
   if msg.anchorId ~= currentAnchor then return false end
-  local ok, data = pcall(jsonDecode, readFile(msg.path) or '')
-  if not ok or type(data) ~= 'table' then lastError = 'unreadable far building tile ' .. tostring(msg.path); return false end
+  local m = msg
+  local kx, ky = tostring(msg.key or ''):match('^(%-?%d+)_(%-?%d+)$')
+  local tx = m.tx ~= nil and tonumber(m.tx) or tonumber(kx)
+  local ty = m.ty ~= nil and tonumber(m.ty) or tonumber(ky)
+  local inlinedShape = msg.shape or m.cdae
+  local inlinedPos = (type(msg.pos) == 'table' and msg.pos)
+    or (msg.cx ~= nil and msg.cy ~= nil and { tonumber(msg.cx), tonumber(msg.cy), tonumber(m.cz) or 0 })
+    or (tx ~= nil and ty ~= nil and { tx * M.TILE_M, ty * M.TILE_M, tonumber(m.cz) or 0 })
+  local data
+  if inlinedShape ~= nil or type(msg.pos) == 'table' or (msg.cx ~= nil and msg.cy ~= nil) then
+    data = {
+      shape = inlinedShape,
+      cdae = m.cdae or inlinedShape,
+      pos = inlinedPos,
+      cx = msg.cx,
+      cy = msg.cy,
+      cz = m.cz,
+      tx = tx,
+      ty = ty,
+      rev = m.rev,
+    }
+  else
+    local ok, decoded = pcall(jsonDecode, readFile(msg.path) or '')
+    if not ok or type(decoded) ~= 'table' then lastError = 'unreadable far building tile ' .. tostring(msg.path); return false end
+    data = decoded
+  end
   local key = tileKey(msg.anchorId, msg.key)
   local old = far[key]
   if old and old.id then deleteQ[#deleteQ + 1] = old.id end
   if old then slotDrop(old.slot) end
   far[key] = nil
   local sl = msgSlot(msg, 'shape')
-  if data.shape and type(data.pos) == 'table' then
-    far[key] = { anchor = msg.anchorId, shape = sl and sl.path or data.shape, pos = data.pos, slot = sl }
+  local shape = sl and sl.path or data.shape or data.cdae
+  local pos = type(data.pos) == 'table' and data.pos or inlinedPos
+  if type(shape) == 'string' and shape ~= '' and type(pos) == 'table' then
+    far[key] = { anchor = msg.anchorId, shape = shape, pos = pos, slot = sl, tx = tx, ty = ty, rev = m.rev }
     farQ[#farQ + 1] = key
   else
     slotDrop(sl)

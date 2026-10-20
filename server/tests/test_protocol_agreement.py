@@ -221,7 +221,7 @@ MOD_INTERNAL = {"_connected": set(), "_disconnected": {"error"}}
 LUA = modsim.MOD_DIR
 GRAVITY_FIXTURE = Path(__file__).resolve().parent / "fixtures" / "egm2008_n36.npz"     # degree 36 (test_gravity)
 # levels down to -2 (mesh mode); a textured tile's shape is its material name's pooled file (matslots.py)
-SHAPE_RE = r"^/temp/beamngEarth/[^/]+/(far_\d+_-?\d+_-?\d+_-?\d+|slot_\d{5})\.cdae$"
+SHAPE_RE = r"^/temp/beamngEarth/[^/]+/(far_\d+_-?\d+_-?\d+_-?\d+|slot_\d{5}(?:_[01])?)\.cdae$"
 HM_RE = r"^/temp/beamngEarth/[^/]+/hm_\d+_-?\d+_-?\d+\.png$"
 
 
@@ -778,7 +778,7 @@ class ServerMessagesTest(test_server.ServerHarness):
             self.assertRegex(m["material"], r"^bngEarthFar_[0-9a-f]{4}_\d{5}$")
             # in the shape's folder; the shape is the name's pooled file (slot_<n>.cdae, matslots.py)
             self.assertEqual(m["texture"].rsplit("/", 1)[0], m["shape"].rsplit("/", 1)[0])
-            self.assertEqual(m["shape"].rsplit("/", 1)[1], f"slot_{m['material'].rsplit('_', 1)[1]}.cdae")
+            self.assertEqual(m["shape"].rsplit("/", 1)[1], self.server.matslots.file(m["material"]))
             self.assertIs(m["detail"], True)
         if kind == "hello":
             self.assertIn(m["nearVisual"], ("mesh", "terrain"))

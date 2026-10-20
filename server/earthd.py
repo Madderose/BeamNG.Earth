@@ -1714,7 +1714,7 @@ class Server:
         info = TileInfo(built.pos, built.err, built.sink, built.skirt, built.grid, size, dt,
                         material, texture, tex_bytes, t2 - t1, credits=sources)
         if pooled:                          # the pooled shape path (matslots.py)
-            info.shape = matslotsmod.MatSlots.file(material)
+            info.shape = self.matslots.file(material)
             matslotsmod.place(master, os.path.join(self.out_dir, info.shape))
         if material is not None:
             info.rev = self.tex_rev.get((anchor.id, tile.key), 0)
@@ -1877,7 +1877,7 @@ class Server:
                 continue
             owner = ("shape", next(self.slot_serial))
             name = self.matslots.take(owner)
-            slot = matslotsmod.MatSlots.file(name)
+            slot = self.matslots.file(name)
             try:
                 matslotsmod.place(src, os.path.join(self.out_dir, slot))
             except OSError as e:
@@ -1901,7 +1901,7 @@ class Server:
         master = staging.master_for(path)
         src = master if os.path.exists(master) else path
         pooled = self.far_format == "cdae"
-        name = matslotsmod.MatSlots.file(new) if pooled else f"{os.path.splitext(self.tile_name(*ck))[0]}_s{next(self.reslot_serial)}.{self.far_format}"
+        name = self.matslots.file(new) if pooled else f"{os.path.splitext(self.tile_name(*ck))[0]}_s{next(self.reslot_serial)}.{self.far_format}"
         try:
             with open(src, "rb") as fh:
                 data = fh.read()
@@ -2335,7 +2335,64 @@ class Connection:
         log.debug("geocode %r: %d results%s", q, len(out["results"]), (" (" + out["error"] + ")") if "error" in out else "")
         self.send(out)
 
+    def _inline_tile_meta(self, m):
+        """Inline essential tile metadata (tx, ty, cx, cy, cz, pos, shape, cdae, rev) on bldfar_tile and
+        roads_tile messages so the client need not read a separate sideband file."""
+        if not isinstance(m, dict) or m.get("type") not in ("bldfar_tile", "roads_tile"):
+            return m
+        typ = m.get("type")
+        key = str(m.get("key") or "")
+        tx, ty = m.get("tx"), m.get("ty")
+        if (tx is None or ty is None) and "_" in key:
+            try:
+                tx_s, ty_s = key.split("_", 1)
+                tx, ty = int(tx_s), int(ty_s)
+            except ValueError:
+                tx = ty = 0
+        tx, ty = int(tx or 0), int(ty or 0)
+        x0, y0, _, _ = roadsmod.tile_bbox(tx, ty)
+        m.setdefault("tx", tx)
+        m.setdefault("ty", ty)
+        m.setdefault("cx", float(x0))
+        m.setdefault("cy", float(y0))
+        m.setdefault("cz", 0.0)
+        m.setdefault("pos", [float(x0), float(y0), 0.0])
+        m.setdefault("rev", 1)
+        slots = m.get("slots") if isinstance(m.get("slots"), dict) else {}
+        aid = m.get("anchorId", self.active)
+        if typ == "bldfar_tile":
+            cdae_path = None
+            shape_path = None
+            if (m.get("n") or 0) > 0:
+                if self.s is not None and aid is not None:
+                    fname = f"bldfar_{aid}_{tx}_{ty}.cdae"
+                    p = os.path.join(self.s.out_dir, fname)
+                    jpath = os.path.join(self.s.out_dir, f"bldfar_{aid}_{tx}_{ty}.json")
+                    if os.path.exists(p) or os.path.exists(staging.master_for(p)) or not os.path.exists(jpath):
+                        cdae_path = f"{self.s.vfs_dir}/{fname}"
+                sl = slots.get("shape")
+                shape_path = sl[0] if (isinstance(sl, (list, tuple)) and sl) else cdae_path
+                if cdae_path is None:
+                    cdae_path = shape_path
+            m.setdefault("shape", shape_path)
+            m.setdefault("cdae", cdae_path)
+        elif typ == "roads_tile":
+            cdae_path = None
+            if self.s is not None and aid is not None:
+                fname = f"road_{aid}_{tx}_{ty}.cdae"
+                p = os.path.join(self.s.out_dir, fname)
+                if os.path.exists(p) or os.path.exists(staging.master_for(p)):
+                    cdae_path = f"{self.s.vfs_dir}/{fname}"
+            sl = slots.get("road")
+            shape_path = sl[0] if (isinstance(sl, (list, tuple)) and sl) else cdae_path
+            if cdae_path is None:
+                cdae_path = shape_path
+            m.setdefault("shape", shape_path)
+            m.setdefault("cdae", cdae_path)
+        return m
+
     def send(self, msg):
+        self._inline_tile_meta(msg)
         if not self.writer.is_closing():
             self.writer.write(protocol.encode(msg))
 

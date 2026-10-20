@@ -34,8 +34,8 @@ local TERRAIN_DIR_BASE = TERRAIN_DIR .. 'bngEarth_base_b.png'   -- the level's f
 local FLAT_H = TERRAIN_DIR .. 'bngEarth_flat_h_1024.png'          -- neutral height (detail / macro slots)
 local MATERIALS_FILE = TERRAIN_DIR .. 'main.materials.json'
 -- per block size (tools/make_level_assets.py): all white = material 0 everywhere; all zero, 16-bit
-local LAYER_MAPS = { [1024] = TERRAIN_DIR .. 'beamngEarth_layer_1024.png', [512] = TERRAIN_DIR .. 'beamngEarth_layer_512.png' }
-local FLAT_HEIGHTMAPS = { [1024] = TERRAIN_DIR .. 'beamngEarth_flat_1024.png', [512] = TERRAIN_DIR .. 'beamngEarth_flat_512.png' }
+local LAYER_MAPS = { [1024] = TERRAIN_DIR .. 'beamngEarth_layer_1024.png', [512] = TERRAIN_DIR .. 'beamngEarth_layer_512.png', [256] = TERRAIN_DIR .. 'beamngEarth_layer_256.png' }
+local FLAT_HEIGHTMAPS = { [1024] = TERRAIN_DIR .. 'beamngEarth_flat_1024.png', [512] = TERRAIN_DIR .. 'beamngEarth_flat_512.png', [256] = TERRAIN_DIR .. 'beamngEarth_flat_256.png' }
 local LAYER_MAP, FLAT_HEIGHTMAP = LAYER_MAPS[1024], FLAT_HEIGHTMAPS[1024]
 
 -- Surface materials (server --surface on, server/surface.py): runtime clones of M.MATERIAL with other
@@ -163,10 +163,18 @@ end
 
 -- The session's block size (1024 or 512, after lattice.configure): the imports' layer map and the
 -- flat start map follow it. Returns the size in use.
-function M.configure(size)
-  local n = LAYER_MAPS[size] and size or 1024
-  M.SIZE, LAYER_MAP, FLAT_HEIGHTMAP = n, LAYER_MAPS[n], FLAT_HEIGHTMAPS[n]
+function M.configure(size, nearVisual)
+  local n = (size == 256 or nearVisual == 'mesh') and 256 or (LAYER_MAPS[size] and size or 1024)
+  local assetN = (n == 256 and not (rawget(_G, 'FS') and FS.fileExists and FS:fileExists(LAYER_MAPS[256]))) and 512 or n
+  M.SIZE, LAYER_MAP, FLAT_HEIGHTMAP = n, LAYER_MAPS[assetN], FLAT_HEIGHTMAPS[assetN]
   return n
+end
+
+function M.setNearVisual(mode)
+  M.nearVisual = (mode == 'mesh' or mode == 'detail') and mode or 'terrain'
+  M.setRenderEnabled(M.nearVisual ~= 'mesh')
+  if M.nearVisual == 'mesh' then M.configure(256, 'mesh') end
+  return M.nearVisual
 end
 
 -- Apply the render flag to the block. Terrain mode never calls the engine unless the flag was off
@@ -353,6 +361,7 @@ function M.base() return baseNow end
 -- the first anchor (the session's block size: a 512² session imports the 512² flat map).
 function M.loadFlat()
   local x, y = lattice.blockOrigin(0, 0)
+  if M.SIZE == 256 then x, y = -M.SIZE * M.SQUARE_SIZE / 2, -M.SIZE * M.SQUARE_SIZE / 2 end
   return M.load(FLAT_HEIGHTMAP, M.SQUARE_SIZE, 50, x, y, 0)
 end
 

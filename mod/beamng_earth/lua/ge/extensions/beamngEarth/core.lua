@@ -111,6 +111,8 @@ local cacheInfo = nil         -- the server's last 'cache' message (download cac
 local updateInfo = nil       -- a newer version on GitHub: { current, latest, url } (server updates.py)
 local cacheClears = 0         -- answers to a clear so far (the settings page waits for the next one)
 
+local clearDataQueue
+
 local function resetState()
   st = {
     inOurLevel = false,
@@ -164,6 +166,7 @@ local function resetState()
     guard = edgeguard.new(), -- the edge guard's state (mode 'off' while the block can follow)
     guardBox = {},           -- the collidable area it guards (reused)
   }
+  if clearDataQueue then clearDataQueue() end
 end
 resetState()
 
@@ -720,9 +723,11 @@ local function onMessage(msg)
     roads.onDrop(msg)
   elseif t == 'far_tile' then
     farfield.onTile(msg)
+  elseif t == 'far_batch' then
+    for _, tile in ipairs(msg.tiles or {}) do farfield.onTile(tile) end
   elseif t == 'far_swap' then
     farfield.onSwap(msg)
-  elseif t == 'far_remove' then
+  elseif t == 'far_remove' or t == 'far_drop' then
     farfield.onRemove(msg)
   elseif t == 'far_done' then
     farfield.onDone(msg)
@@ -1325,6 +1330,49 @@ local function engineTickMs()
   return tonumber(tickMetrics.Ticking) or 0
 end
 
+-- Two-Lane IPC Priority Queue:
+-- Lane 0 (Immediate Control Messages - zero latency, bypass governor): dispatched immediately on the frame received.
+-- Lane 1 (Streaming Data Queue): pushed into FIFO ring/table queue dataQueue and drained up to IPC_BUDGET_MS per frame.
+M.IPC_BUDGET_MS = 0.5
+local LANE0_TYPES = {
+  hello = true, prepare_anchor_reply = true, anchor_ready = true, anchor_error = true,
+  terrain_ready = true, terrain_error = true, commit_anchor_reply = true,
+  ground_ahead = true, elev_probe_reply = true, status = true,
+  where_reply = true, where_result = true, geocode_reply = true, geocode_result = true,
+  route_reply = true, route_result = true, cache = true, open_page = true,
+  _connected = true, _disconnected = true, weather = true, gravity = true,
+  block_base = true, map_tiles_ready = true, sea = true, credits = true, update = true,
+}
+local LANE1_TYPES = {
+  far_tile = true, far_batch = true, far_swap = true, far_drop = true,
+  far_remove = true, far_done = true, far_retex = true,
+  roads_tile = true, roads_drop = true,
+  bldfar_tile = true, bldfar_drop = true,
+  veg_tile = true, veg_drop = true,
+  navgraph = true,
+}
+local dataQueue = {}
+local dataHead, dataTail = 1, 0
+
+local function pushDataQueue(msg)
+  dataTail = dataTail + 1
+  dataQueue[dataTail] = msg
+end
+
+local function popDataQueue()
+  if dataHead > dataTail then return nil end
+  local msg = dataQueue[dataHead]
+  dataQueue[dataHead] = nil
+  dataHead = dataHead + 1
+  if dataHead > dataTail then dataHead, dataTail = 1, 0 end
+  return msg
+end
+
+clearDataQueue = function()
+  for i = dataHead, dataTail do dataQueue[i] = nil end
+  dataHead, dataTail = 1, 0
+end
+
 local function onUpdate(dtReal, dtSim)
   dtReal = dtReal or 0
   local frameMs0 = frameTimer and frameTimer:stopAndReset() or dtReal * 1000
@@ -1365,12 +1413,30 @@ local function onUpdate(dtReal, dtSim)
   end
   st.clock = st.clock + dtReal
   -- the governor's frame opens first: its clock is the wall time since the last onUpdate (hptimer)
+  local pl = st.player
   gov:setLoading(st.placeFrames ~= nil or st.clock < st.loadingUntil or st.slowFor > SLOW_S)
-  gov:beginFrame(farfield.hasWork() or roads.hasWork() or (trees.hasWork and trees.hasWork(st.anchorId, st.player) or false))
+  gov:beginFrame(
+    farfield.hasWork() or roads.hasWork() or (trees.hasWork and trees.hasWork(st.anchorId, pl) or false) or (dataHead <= dataTail),
+    pl and pl.speed
+  )
   gov:chargeEngine(engineTickMs())     -- what the engine spent on last frame's new tiles (governor.lua)
   for _, msg in ipairs(net.update(dtReal)) do
-    local ok, err = pcall(onMessage, msg)
-    if not ok then log('E', 'beamngEarth', 'message ' .. tostring(msg.type) .. ' failed: ' .. tostring(err)) end
+    local mtype = msg and msg.type
+    if LANE1_TYPES[mtype] and not LANE0_TYPES[mtype] then
+      pushDataQueue(msg)
+    else
+      local ok, err = pcall(onMessage, msg)
+      if not ok then log('E', 'beamngEarth', 'message ' .. tostring(mtype) .. ' failed: ' .. tostring(err)) end
+    end
+  end
+  if dataHead <= dataTail then
+    local ipcDeadline = hitchClock() + (M.IPC_BUDGET_MS or 0.5)
+    repeat
+      local msg = popDataQueue()
+      if not msg then break end
+      local ok, err = pcall(onMessage, msg)
+      if not ok then log('E', 'beamngEarth', 'message ' .. tostring(msg.type) .. ' failed: ' .. tostring(err)) end
+    until dataHead > dataTail or hitchClock() >= ipcDeadline
   end
   t = mark('net', t)
   if not scenetree.MissionGroup then return end -- no level loaded
@@ -1448,6 +1514,18 @@ end
 -- After physics, before rendering (main.lua:819-824): measure when a rebase's vehicle move became
 -- visible. Hook order relative to core_camera does not matter here; this only measures.
 local function onPreRender(dtReal, dtSim)
+  local pl = st and st.player
+  if PSSMLightShadowMap then
+    if PSSMLightShadowMap.lastSplitCastersEnabled ~= false then
+      PSSMLightShadowMap.lastSplitCastersEnabled = false
+    end
+    -- Velocity-adaptive shadow scaling:
+    -- At <= 20 m/s (<= 72 km/h): scale = 0.45
+    -- At >= 60 m/s (>= 216 km/h): scale = 0.25 (halves cascade world area -> 4x fewer objects to cull)
+    local spd = (pl and pl.speed) or 0
+    local t = math.min(1.0, math.max(0.0, (spd - 20.0) / 40.0))
+    PSSMLightShadowMap.sdsmMaxDistanceScale = 0.45 - 0.20 * t
+  end
   local probe = st.lagProbe
   if not probe then return end
   if moveVisible(probe) then
