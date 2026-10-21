@@ -2388,26 +2388,30 @@ class Connection:
         self.following = True                   # the mod moves its block (pose "follow"; false high up)
 
     async def place_previews(self, msg):
-        """Featured places' aerial thumbnails {"places": [[key, lat, lon], ...]} -> place_previews_ready {"ready": [key]}
-        as each is written (placepreview.py, <user>/temp/beamngEarth/previews/<key>.jpg)."""
-        mt = getattr(self.s, "map_tiles", None)
-        if mt is None:
-            return
+        """{"places": [{"key", "lat", "lon"}]} -> place_previews_ready {"keys"}: each place's picture for the level
+        select, written into the game's user folder (placepreview.write) when the server has imagery."""
         raw = msg.get("places")
         if not isinstance(raw, list):
             return
-        root = os.path.join(self.s.root, "previews")
-        loop = asyncio.get_running_loop()
-        for item in raw[:PLACE_PREVIEWS_MAX]:
-            try:
-                key, lat, lon = str(item[0]), float(item[1]), float(item[2])
-            except (TypeError, ValueError, IndexError):
-                continue
-            if not placepreview.valid_key(key):
-                continue
-            ok = await loop.run_in_executor(self.s.ui_pool, placepreview.ensure, mt, root, key, lat, lon)
-            if ok:
-                self.send({"type": "place_previews_ready", "ready": [key]})
+        items = []
+        for p in raw:
+            if isinstance(p, dict):
+                k, la, lo = p.get("key"), p.get("lat"), p.get("lon")
+                if isinstance(k, str) and la is not None and lo is not None:
+                    items.append((k, la, lo))
+            elif isinstance(p, (list, tuple)) and len(p) >= 3:
+                k, la, lo = p[0], p[1], p[2]
+                if isinstance(k, str) and la is not None and lo is not None:
+                    items.append((k, la, lo))
+        if not items or self.s.imagery is None:
+            return
+        try:
+            keys = await asyncio.get_running_loop().run_in_executor(
+                self.s.ui_pool, placepreviewmod.write, self.s.imagery, self.s.user_dir, items[:PLACE_PREVIEWS_MAX])
+        except Exception as e:
+            log.warning("place previews: %s: %s", type(e).__name__, e)
+            return
+        self.send({"type": "place_previews_ready", "keys": keys})
 
     async def map_tiles(self, msg):
         """The world map's tiles {"tiles": [[z, x, y, layer?], ...]} (layer "sat" by default, "map", "labels"; the
