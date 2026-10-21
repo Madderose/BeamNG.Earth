@@ -2050,7 +2050,21 @@ class Server:
             with open(src, "rb") as fh:
                 data = fh.read()
             if new != info.material:
-                data = matslotsmod.restamp(data, info.material, new)
+                try:
+                    data = matslotsmod.restamp(data, info.material, new)
+                except ValueError:
+                    prefix_b = self.matslots.prefix.encode("ascii")
+                    idx = data.find(prefix_b)
+                    if idx >= 0:
+                        old_in_data = data[idx:idx + len(prefix_b) + matslotsmod.DIGITS].decode("ascii", errors="replace")
+                        data = matslotsmod.restamp(data, old_in_data, new)
+                    else:
+                        raise
+                if os.path.exists(master):
+                    tmp_m = staging.tmp_for(master)
+                    with open(tmp_m, "wb") as fh:
+                        fh.write(data)
+                    staging.replace(tmp_m, master)
             dst = os.path.join(self.out_dir, name)
             tmp = staging.tmp_for(dst)
             with open(tmp, "wb") as fh:

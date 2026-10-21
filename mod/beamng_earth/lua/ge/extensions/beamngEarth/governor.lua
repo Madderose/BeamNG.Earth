@@ -227,12 +227,9 @@ function Gov:beginFrame(hasWork, wallMs, speedMps)
   local headroomMs = 14.2 - self.emaEngineMs
   local speedBoost = math.min(1.5, math.max(0.0, ((speedMps or 0) - 35.0) * 0.025))
 
-  if dtMs > 15.5 then
-    self.tokens = 0.25
-    self.heavyAllowed = false
-  else
-    self.tokens = math.max(0.5, math.min(4.0, headroomMs + speedBoost))
-    self.heavyAllowed = (dtMs < 12.5) and (self.emaEngineMs < 10.5)
+  local target = self:targetNow()
+  if not self.loading then
+    target = math.max(M.MIN_TARGET_MS, math.min(target, headroomMs + speedBoost))
   end
   self.spent = 0.0
 
@@ -246,11 +243,18 @@ function Gov:beginFrame(hasWork, wallMs, speedMps)
   end
   self.blocked = false
   if self.heavyPending then
-    self.b = 0
-    self.tokens = 0
+    self.b = max(0, self.b - M.RAMP_DOWN_HEAVY)
+    self.tokens = min(self.tokens, self.b)
     self.heavyAllowed = false
   elseif hasWork then
-    self.b = self.tokens
+    if self.b < target then
+      self.b = min(target, self.b + (self.loading and M.RAMP_UP_LOADING or M.RAMP_UP))
+    else
+      self.b = max(target, self.b - M.RAMP_DOWN_IDLE)
+    end
+    local cap = math.max(8.4, 2 * self:maxUnit())
+    self.tokens = min(self.tokens + self.b, cap)
+    self.heavyAllowed = (dtMs < 12.5) and (self.emaEngineMs < 10.5)
   else
     self.b = max(0, self.b - M.RAMP_DOWN_IDLE)
     self.tokens = min(self.tokens, self.b)
