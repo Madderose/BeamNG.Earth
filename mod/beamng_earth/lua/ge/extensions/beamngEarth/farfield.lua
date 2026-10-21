@@ -718,7 +718,7 @@ local function startGroup(g, cam, player)
     local highSpeedBypass = (spd >= 50.0) or (alpha >= 0.4)
     if #visRems == 0 and oldCount == 0 then
       mode = 'instant' -- nothing visible to cross over with (first fill)
-    elseif highSpeedBypass then
+    elseif highSpeedBypass and #visAdds > 0 then
       -- Speed-Gated C1 Instant Swaps: bypass moving crossover list and execute an instant atomic C1 swap
       mode = 'instant'
     elseif not vis then
@@ -1553,8 +1553,7 @@ function M.update(gov, dt, cam, player)
 
   -- 5. after a rebase: once far_done came and everything received is shown, the previous anchor's
   --    tiles go (progressively, through the delete queue)
-  if doneReceived and oldCount > 0 and ((#groups == 0 and pendingMainCount() == 0)
-      or (player ~= nil and not pendingBefore(doneSeq or seqN))) then
+  if doneReceived and oldCount > 0 and #groups == 0 and pendingMainCount() == 0 then
     for _, inst in pairs(old) do doom(inst, false) end
     old, oldCount, oldFrames, lossy = {}, 0, {}, {}
   end

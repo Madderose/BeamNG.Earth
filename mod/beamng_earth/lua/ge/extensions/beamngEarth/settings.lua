@@ -549,11 +549,12 @@ end
 function M.mapOpened(on) mapOpen = on and true or false end
 function M.isMapOpen() return mapOpen end
 
--- Ensure the map and welcome routes are registered with BeamNG's ui_router_routeManager in GELua.
+local routesRegistered = false
 function M.ensureRoutes()
+  if routesRegistered then return end
   local rm = rawget(_G, 'ui_router_routeManager')
   if rm and rm.registerModRoutes then
-    pcall(rm.registerModRoutes, 'beamngEarth.routes', {
+    local ok = pcall(rm.registerModRoutes, 'beamngEarth.routes', {
       {
         name = 'beamngEarthWelcome',
         path = '/beamng-earth-welcome',
@@ -565,6 +566,7 @@ function M.ensureRoutes()
         meta = { luaRoute = { title = 'BeamNG.Earth map', backTarget = 'play' } }
       }
     })
+    if ok then routesRegistered = true end
   end
 end
 
@@ -604,7 +606,6 @@ end
 M.replaceBigMap = true
 local bigMapOrig = nil
 function M.redirectBigMap(inOurLevel)
-  M.ensureRoutes()
   local bm = rawget(_G, 'freeroam_bigMapMode')
   local career = rawget(_G, 'career_career')
   local want = M.replaceBigMap and inOurLevel and bm ~= nil and not (career and career.isActive and career.isActive())

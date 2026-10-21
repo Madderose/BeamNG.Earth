@@ -841,7 +841,7 @@ class ServerMessagesTest(test_server.ServerHarness):
             self.check(m)
         old_removes = [m for m in seen if m["type"] == "far_remove" and m["anchorId"] == aid]
         self.assertTrue(old_removes)
-        textured = [m for m in seen if m["type"] == "far_tile" and "material" in m]
+        textured = [m for m in seen if m["type"] == "far_tile" and "material" in m and m.get("anchorId") == b["anchorId"]]
         self.assertEqual(bool(textured), self.with_imagery)
         for m in textured[::max(1, len(textured) // 12)]:
             self.check_textured(m)
