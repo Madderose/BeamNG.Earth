@@ -31,11 +31,12 @@ import fast
 from polygon import Path
 
 import mapcells
+import pacer
 import staging
 
 log = logging.getLogger("earthd.vegetation")
 
-VERSION = 11
+VERSION = 13
 TREE_MIN_M = 3.0
 CROWN_SPACING = 0.5          # tops kept this many crown radii apart (0.8 looked sparse: the user, 2026-10-13)
 BUSH_MIN_M = 1.0
@@ -59,6 +60,14 @@ SCATTER_CELL_M = 6.0        # the hashed scatter's grid (one candidate per cell)
 SCATTER_P = {10: (0.30, 0.0), 20: (0.10, 0.04), 30: (0.01, 0.003), 60: (0.0, 0.08), 100: (0.02, 0.02)}
 UNDERSTORY = 10
 BUILT_NEAR_M = 60.0         # bare ground with built-up land this far around gets no scatter (squares, lots)
+# Rocks on bare ground lie on slopes, outcrops and fans, not on flat playas, salt pans and dry lake beds (the
+# Bonneville Salt Flats had a rock every ~75 m2, the user 2026-10-20; photos: a bare white crust for miles). A bare
+# cell's rock is kept with the share of the ground's slope between these (the DEM ROCK_SLOPE_D m either side, at
+# ROCK_SLOPE_ZOOM: coarse tiles, few downloads); without a DEM, as before.
+ROCK_SLOPE = (0.02, 0.10)
+BARREN_NEAR_M = 20.0        # m: a canopy top on bare ground or snow needs vegetated land this near (_build)
+ROCK_SLOPE_D = 40.0
+ROCK_SLOPE_ZOOM = 12
 # Forest edges along roads in humid country (Columbia's photos: a wall of shrubs, saplings and vines from the
 # ground up, where ours showed bare trunks over grass): a denser band of bigger bushes within EDGE_M of a road.
 EDGE_M = 7.0
@@ -189,6 +198,7 @@ def _conifer_share(lat, lon):
 class Vegetation:
     def __init__(self, md, cache_dir=None):
         self.md = md
+        self.dem = None                 # (set by the server: rocks on bare ground by slope, ROCK_SLOPE)
         self.dir = os.path.join(cache_dir, "vegetation", f"v{VERSION}") if cache_dir else None
         self._mem = OrderedDict()
         self._lock = threading.Lock()
@@ -237,6 +247,7 @@ class Vegetation:
 
     def _warm_loop(self):
         while True:
+            pacer.hold()                # (a teleport's first block first)
             with self._warm_cv:
                 while not self._warm:
                     self._warm_cv.wait()
@@ -270,7 +281,7 @@ class Vegetation:
             tmp = f"{p}.{os.getpid()}.{threading.get_ident()}.tmp"
             with open(tmp, "wb") as fh:
                 np.savez_compressed(fh, **{n: getattr(items, n) for n in fields})
-            os.replace(tmp, p)
+            staging.replace_cached(tmp, p)
         return items
 
     # --- the build ------------------------------------------------------------------------------
@@ -348,6 +359,22 @@ class Vegetation:
         # the landcover class at each top (rocks / bushes scatter below)
         lcls = lc.sample(tlon, tlat) if lc is not None else np.zeros(len(tlon), np.uint8)
         is_tree &= lcls != WC["water"]
+        # canopy heights on bare ground or permanent snow with no vegetated land around: the canopy map misreading
+        # bright ground (the Bonneville Salt Flats had ~19k "trees" up to 21 m tall on bare salt, 2026-10-20). By
+        # its definition bare land has under 10 % plant cover; an edge tree, or one by an oasis, has some within
+        # BARREN_NEAR_M and stays
+        barren = np.flatnonzero((lcls == WC["bare"]) | (lcls == WC["snow"])) if lc is not None else []
+        if len(barren):
+            k = max(0.05, float(np.cos(np.radians(tlat[barren[0]]))))
+            dm = BARREN_NEAR_M / k
+            near = np.zeros(len(barren), bool)
+            for ox, oy in ((dm, 0.0), (-dm, 0.0), (0.0, dm), (0.0, -dm)):
+                lo2, la2 = _to4326(mx[ii[barren]] + ox, my[jj[barren]] + oy)
+                near |= ~np.isin(lc.sample(lo2, la2), (WC["bare"], WC["snow"], WC["water"]))
+            keep = np.ones(len(jj), bool)
+            keep[barren[~near]] = False
+            jj, ii, th, tlon, tlat, lcls, is_tree = jj[keep], ii[keep], th[keep], tlon[keep], tlat[keep], lcls[keep], \
+                is_tree[keep]
         # hashed choices keyed on the global pixel (z17 Web-Mercator index: the CHM grid)
         gx = np.floor((mx[ii] + 20037508.342789244) / chm.dx).astype(np.int64)
         gy = np.floor((20037508.342789244 - my[jj]) / chm.dy).astype(np.int64)
@@ -417,6 +444,21 @@ class Vegetation:
                      _hash01(GI, GJ, 26).astype(np.float32), (_hash01(GI, GJ, 27) * 360.0).astype(np.float32),
                      (0.8 + 0.4 * _hash01(GI, GJ, 28)).astype(np.float32))
 
+    def _slope(self, px, py):
+        """The ground's slope (rise over run) at Web Mercator points (px, py), from the DEM ROCK_SLOPE_D m either side
+        in x and y; None when the DEM cannot say."""
+        k = np.cos(np.radians(_to4326(px[:1], py[:1])[1][0]))       # Web Mercator m per ground m (one cell)
+        d = ROCK_SLOPE_D / max(k, 0.05)
+        x = np.concatenate([px + d, px - d, px, px])
+        y = np.concatenate([py, py, py + d, py - d])
+        lon, lat = _to4326(x, y)
+        try:
+            z = np.asarray(self.dem.sample(lat, lon, ROCK_SLOPE_ZOOM), np.float64).reshape(4, len(px))
+        except Exception as e:          # (offline, no tile): rocks as without a DEM
+            log.debug("vegetation: no slope: %s", e)
+            return None
+        return np.hypot(z[0] - z[1], z[2] - z[3]) / (2 * ROCK_SLOPE_D)
+
     def _scatter(self, cd, lc, blocked, chm, hs):
         """Bushes and rocks on a hashed SCATTER_CELL_M grid over shrubland, grass and bare ground."""
         if lc is None:
@@ -457,6 +499,14 @@ class Vegetation:
                 near += lc.sample(lo2, la2) == WC["built"]
             free[bare[near >= 2]] = False
         rock = free & (u < pr)
+        bare_rock = np.flatnonzero(rock & (cls == WC["bare"]))
+        if len(bare_rock) and self.dem is not None:
+            slope = self._slope(px[bare_rock], py[bare_rock])
+            if slope is not None:
+                lo_s, hi_s = ROCK_SLOPE
+                keep = _hash01(GI[bare_rock], GJ[bare_rock], 19) < np.clip((slope - lo_s) / (hi_s - lo_s), 0.0, 1.0)
+                rock[bare_rock[~keep]] = False
+                free[bare_rock[~keep]] = False     # (nor a bush there: bare ground stays bare)
         bush = free & ~rock & (u < pr + pb)
         sel = rock | bush
         n = int(sel.sum())
@@ -618,6 +668,9 @@ def _mask_roads(f, mask, chm, push=None, clear=ROAD_CLEAR_M):
 
 # --- tiles for the mod --------------------------------------------------------------------------------
 TILE = 256.0                # m, as the road tiles (roads.tile_bbox)
+TILE_ROWS_MAX = 6000        # items a tile sends at most, the lowest ranks: the most the mod shows of one (trees.lua
+                            # TILE_CAP). Dense forest has 10-20k a tile: Bodø's 145 tiles held 1.66 M rows in the game's
+                            # Lua (394 MB of heap, 1.25 s garbage collection pauses on a Steam Deck; GitHub #66)
 SEND_M = 1280.0             # tiles this close to the player (Chebyshev) are sent ...
 DROP_M = 1536.0             # ... and dropped beyond this
 BUILD_PER_POSE = 8
@@ -656,6 +709,9 @@ def tile_items(frame, tx, ty, veg, cell_ready, elev, sea=None, as_json=False):
         it, e, n = it.take(dry), e[dry], n[dry]
     if len(it) == 0:
         return []
+    if len(it) > TILE_ROWS_MAX:         # dense forest: the lowest ranks only (the mod shows no more of a tile)
+        keep = np.sort(np.argpartition(it.rank, TILE_ROWS_MAX - 1)[:TILE_ROWS_MAX])
+        it, e, n = it.take(keep), e[keep], n[keep]
     zg = np.asarray(elev(it.lat, it.lon), np.float64)
     _, _, z = frame.geodetic_to_enu(it.lat, it.lon, zg)
     z = _sink_rocks(frame, it, e, n, np.asarray(z, np.float64), elev)
@@ -703,113 +759,59 @@ def _concat_all(parts):
     return out
 
 
-VBIN_STRUCT = struct.Struct("<fffBBBB")
+VBIN_STRUCT = struct.Struct("<fffBBH")
 VBIN_STRIDE = 16
 
 
-def _pack_vbin_arrays(xs, ys, zs, groups, yaws, scales, ranks):
-    chunks = []
-    for g, x, y, z, yw, sc, r in zip(groups, xs, ys, zs, yaws, scales, ranks):
-        yaw_q = int(round((float(yw) % 360.0) * (256.0 / 360.0))) & 0xFF
-        scale_q = min(255, max(1, int(round(float(sc) * 100.0))))
-        flags = min(255, max(0, int(float(r) * 256.0)))
-        chunks.append(struct.pack("<fffBBBB", float(x), float(y), float(z), int(g) & 0xFF, yaw_q, scale_q, flags))
-    return b"".join(chunks)
+def _pack_vbin_arrays(x, y, z, g, yaw, scale, rank=None):
+    """Vectorized 16-byte record packer from numpy arrays."""
+    n = len(x)
+    if n == 0:
+        return b""
+    if rank is not None and n > 1:
+        order = np.argsort(rank, kind="stable")
+        x, y, z = x[order], y[order], z[order]
+        g, yaw, scale = g[order], yaw[order], scale[order]
+    dt = np.dtype([("x", "<f4"), ("y", "<f4"), ("z", "<f4"), ("g", "u1"), ("yaw", "u1"), ("scale", "<u2")])
+    arr = np.empty(n, dtype=dt)
+    arr["x"] = x
+    arr["y"] = y
+    arr["z"] = z
+    arr["g"] = np.clip(g, 0, 255).astype(np.uint8)
+    arr["yaw"] = (np.round((yaw % 360.0) * (256.0 / 360.0)).astype(np.int32) & 0xFF).astype(np.uint8)
+    arr["scale"] = np.clip(np.round(scale * 1000.0), 0, 65535).astype("<u2")
+    return arr.tobytes()
 
 
-def pack_vbin(items):
-    """Pack vegetation items into compact 16-byte binary records (<fffBBBB per tree)."""
-    if isinstance(items, (bytes, bytearray)):
-        return bytes(items)
-    if isinstance(items, JsonRows):
-        if getattr(items, "vbin", None) is not None:
-            return items.vbin
-        import json
-        items = json.loads(f"[{items}]") if items else []
-    elif isinstance(items, str):
-        import json
-        data = json.loads(items) if items else []
-        items = data.get("items", []) if isinstance(data, dict) else data
-    if isinstance(items, Items):
-        xs = getattr(items, "x", items.lon)
-        ys = getattr(items, "y", items.lat)
-        zs = getattr(items, "z", items.height)
-        return _pack_vbin_arrays(xs, ys, zs, items.group, items.yaw, items.scale, items.rank)
-    chunks = []
-    for row in items or ():
-        if isinstance(row, dict):
-            x = float(row.get("x", 0.0))
-            y = float(row.get("y", 0.0))
-            z = float(row.get("z", 0.0))
-            group = int(row.get("group", 0)) & 0xFF
-            if "yaw_q" in row:
-                yaw_q = int(row["yaw_q"]) & 0xFF
-            else:
-                yaw_q = int(round((float(row.get("yaw", 0.0)) % 360.0) * (256.0 / 360.0))) & 0xFF
-            if "scale_q" in row:
-                scale_q = int(row["scale_q"]) & 0xFF
-            else:
-                scale_q = min(255, max(1, int(round(float(row.get("scale", 1.0)) * 100.0))))
-            if "flags" in row:
-                flags = int(row["flags"]) & 0xFF
-            else:
-                flags = min(255, max(0, int(float(row.get("rank", 0.0)) * 256.0)))
-        elif len(row) >= 8:
-            group = int(row[0]) & 0xFF
-            x, y, z = float(row[1]), float(row[2]), float(row[3])
-            yaw_q = int(round((float(row[4]) % 360.0) * (256.0 / 360.0))) & 0xFF
-            scale_q = min(255, max(1, int(round(float(row[5]) * 100.0))))
-            flags = min(255, max(0, int(float(row[7]) * 256.0)))
-        else:
-            x, y, z = float(row[0]), float(row[1]), float(row[2])
-            group = int(row[3]) & 0xFF
-            yw, sc, fl = row[4], row[5], row[6]
-            yaw_q = (int(yw) & 0xFF) if isinstance(yw, int) else (int(round((float(yw) % 360.0) * (256.0 / 360.0))) & 0xFF)
-            scale_q = (int(sc) & 0xFF) if isinstance(sc, int) else min(255, max(1, int(round(float(sc) * 100.0))))
-            flags = (int(fl) & 0xFF) if isinstance(fl, int) else min(255, max(0, int(float(fl) * 256.0)))
-        chunks.append(struct.pack("<fffBBBB", x, y, z, group, yaw_q, scale_q, flags))
-    return b"".join(chunks)
+def pack_vbin(rows):
+    """Pack vegetation rows into compact 16-byte binary records sorted by rank (7th element, index 7)."""
+    if not rows:
+        return b""
+    sorted_rows = sorted(rows, key=lambda r: r[7] if len(r) > 7 else 0.0)
+    buf = bytearray(len(sorted_rows) * VBIN_STRIDE)
+    pack_into = VBIN_STRUCT.pack_into
+    for i, r in enumerate(sorted_rows):
+        g = max(0, min(255, int(r[0])))
+        x = float(r[1])
+        y = float(r[2])
+        z = float(r[3])
+        yaw_deg = float(r[4]) % 360.0
+        yaw_u8 = int(round(yaw_deg * 256.0 / 360.0)) & 0xFF
+        sc = float(r[5])
+        sc_u16 = max(0, min(65535, int(round(sc * 1000.0))))
+        pack_into(buf, i * VBIN_STRIDE, x, y, z, g, yaw_u8, sc_u16)
+    return bytes(buf)
 
 
-def write_vbin(path, items):
-    """Write compact binary vegetation (.vbin) packing each tree into 16 bytes (<fffBBBB)."""
-    data = pack_vbin(items)
-    if path is not None:
-        tmp = staging.tmp_for(str(path))
-        with open(tmp, "wb") as f:
-            f.write(data)
-        staging.replace(tmp, str(path))
-    return data
-
-
-def send_tile(conn, aid, key, path=None, n=0, vbin_path=None, bin=None, kind="veg", items=None, out_dir=None, vfs_dir=None):
-    """Send a vegetation (or bldfar) tile message, supporting .vbin sideband or raw binary payload."""
-    tile_key = f"{key[0]}_{key[1]}" if isinstance(key, (tuple, list)) else str(key)
-    if items is not None:
-        raw = pack_vbin(items)
-        n = len(raw) // VBIN_STRIDE
-        if out_dir is not None:
-            tx_s, ty_s = tile_key.split("_", 1)
-            vname = f"{kind}_{aid}_{tx_s}_{ty_s}.vbin"
-            write_vbin(os.path.join(out_dir, vname), raw)
-            if vfs_dir is not None and vbin_path is None:
-                vbin_path = f"{vfs_dir}/{vname}"
-        elif bin is None and vbin_path is None and path is None:
-            bin = raw
-    if kind == "veg" and vbin_path is None and isinstance(path, str) and path.endswith(".json"):
-        vbin_path = path[:-5] + ".vbin"
-    m = {"type": f"{kind}_tile", "anchorId": aid, "key": tile_key, "path": path, "n": n}
-    if vbin_path is not None:
-        m["vbin_path"] = vbin_path
-    if bin is not None:
-        m["bin"] = bin
-    pool = getattr(getattr(conn, "s", None), "pool_shapes", None)
-    if kind == "bldfar" and pool is not None and isinstance(key, (tuple, list)):
-        slots = pool(conn, {"shape": f"bldfar_{aid}_{key[0]}_{key[1]}.cdae"})
-        if slots:
-            m["slots"] = slots
-    conn.send(m)
-    return m
+def write_vbin(out_dir, vfs_dir, aid, tx, ty, rows_or_bytes):
+    name = f"veg_{aid}_{tx}_{ty}.vbin"
+    path = os.path.join(out_dir, name)
+    data = rows_or_bytes if isinstance(rows_or_bytes, (bytes, bytearray)) else pack_vbin(rows_or_bytes)
+    tmp = staging.tmp_for(path)
+    with open(tmp, "wb") as f:
+        f.write(data)
+    staging.replace(tmp, path)
+    return f"{vfs_dir}/{name}", len(data) // VBIN_STRIDE
 
 
 def write_tile(out_dir, vfs_dir, aid, tx, ty, rows):
@@ -823,9 +825,19 @@ def write_tile(out_dir, vfs_dir, aid, tx, ty, rows):
         else:
             f.write(json.dumps({"groups": list(GROUPS), "items": rows}, separators=(",", ":")))  # the C encoder
     staging.replace(tmp, path)
-    if isinstance(rows, (list, tuple)):
-        write_vbin(os.path.join(out_dir, f"veg_{aid}_{tx}_{ty}.vbin"), rows)
+    if getattr(rows, "vbin", None) is not None:
+        write_vbin(out_dir, vfs_dir, aid, tx, ty, rows.vbin)
+    elif isinstance(rows, (list, tuple)):
+        write_vbin(out_dir, vfs_dir, aid, tx, ty, rows)
     return f"{vfs_dir}/{name}", rows.n if isinstance(rows, JsonRows) else len(rows)
+
+
+def send_tile(conn, aid, tx, ty, path, n, kind="veg"):
+    m = {"type": f"{kind}_tile", "anchorId": aid, "key": f"{tx}_{ty}", "path": path, "n": n}
+    if kind == "veg" and path.endswith(".json"):
+        m["vbin"] = path[:-5] + ".vbin"
+        m["groups"] = list(GROUPS)
+    conn.send(m)
 
 
 class Tracker:
@@ -850,7 +862,9 @@ class Tracker:
         if self.pool is not None:
             self.pool.shutdown(wait=False, cancel_futures=True)
 
-    def on_pose(self, conn, aid, x, y, loop, build):
+    def on_pose(self, conn, aid, x, y, loop, build, view=None):
+        """As roads.Tracker.on_pose: the tiles within send_m of the car (x, y) and of the camera when it is away
+        (view), the car's first; dropped beyond drop_m of both."""
         import roads as roadsmod
         if aid != self.aid:
             for f in self.futs.values():
@@ -859,10 +873,14 @@ class Tracker:
         if self.pool is None:
             from concurrent.futures import ThreadPoolExecutor
             self.pool = ThreadPoolExecutor(self.per_pose, thread_name_prefix=f"{self.kind}-tile")
-        skip = set(roadsmod.tiles_near(x, y, self.skip_m)) if self.skip_m else ()
-        want = [k for k in roadsmod.tiles_near(x, y, self.send_m)
-                if k not in self.sent and k not in self.building and k not in skip]
-        want.sort(key=roadsmod.view_key(conn, aid, x, y))
+        spots = [(x, y)] + ([tuple(view)] if view else [])
+        skip = {k for p in spots for k in roadsmod.tiles_near(*p, self.skip_m)} if self.skip_m else ()
+        car = set(roadsmod.tiles_near(x, y, self.send_m))
+        seen = set(roadsmod.tiles_near(*view, self.send_m)) - car if view else set()
+        want = [k for k in car | seen if k not in self.sent and k not in self.building and k not in skip]
+        car_key = roadsmod.view_key(conn, aid, x, y)
+        cam_key = roadsmod.view_key(conn, aid, *view) if seen else None
+        want.sort(key=lambda k: (1, cam_key(k)) if k in seen else (0, car_key(k)))
         # at most per_pose in flight: each waits in a thread of the loop's shared executor, and a teleport's
         # hundreds (one per pose, uncapped) held every thread while the road tiles under the car waited for one
         # (Sinaia 2026-10-15: bare ground for minutes)
@@ -870,7 +888,7 @@ class Tracker:
             self.building.add((tx, ty))
             fut = self.futs[(tx, ty)] = loop.run_in_executor(self.pool, build, aid, tx, ty)
             fut.add_done_callback(lambda f, k=(tx, ty), a=aid: self._built(conn, a, k, f))
-        for k in [k for k in self.sent if roadsmod.tile_distance(k[0], k[1], x, y) > self.drop_m]:
+        for k in [k for k in self.sent if all(roadsmod.tile_distance(k[0], k[1], *p) > self.drop_m for p in spots)]:
             self.sent.discard(k)
             conn.send({"type": f"{self.kind}_drop", "anchorId": aid, "key": f"{k[0]}_{k[1]}"})
 
@@ -891,11 +909,18 @@ class Tracker:
         path, n = res
         self.sent.add(key)
         self.send_tile(conn, aid, key, path, n)
-        return
 
-    def send_tile(self, conn, aid, key, path=None, n=0, vbin_path=None, bin=None, items=None, out_dir=None, vfs_dir=None):
-        return send_tile(conn, aid, key, path=path, n=n, vbin_path=vbin_path, bin=bin,
-                         kind=self.kind, items=items, out_dir=out_dir, vfs_dir=vfs_dir)
+    def send_tile(self, conn, aid, key, path, n):
+        if self.kind == "veg":
+            send_tile(conn, aid, key[0], key[1], path, n, kind=self.kind)
+            return
+        m = {"type": f"{self.kind}_tile", "anchorId": aid, "key": f"{key[0]}_{key[1]}", "path": path, "n": n}
+        pool = getattr(getattr(conn, "s", None), "pool_shapes", None)
+        if self.kind == "bldfar" and pool is not None:      # its mesh at a pooled shape path (matslots.py)
+            slots = pool(conn, {"shape": f"bldfar_{aid}_{key[0]}_{key[1]}.cdae"})
+            if slots:
+                m["slots"] = slots
+        conn.send(m)
 
     def _legacy_built(self, conn, aid, key, path, n):
         m = {"type": f"{self.kind}_tile", "anchorId": aid, "key": f"{key[0]}_{key[1]}", "path": path, "n": n}

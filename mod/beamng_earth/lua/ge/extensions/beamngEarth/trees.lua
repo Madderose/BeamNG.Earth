@@ -30,6 +30,10 @@ M.COLLISION_MIN_INTERVAL_S = 8.0  -- minimum interval (s) between tree-triggered
 M.MAX_FOREST_RINGS = 5
 M.MAX_RING_M = 900
 M.RINGS = { { 220, 1.0 }, { 400, 0.6 }, { 580, 0.35 }, { 750, 0.2 }, { 900, 0.1 } }   -- tile distance (m): the rank shown below (5 rings, capped at 900 m)
+-- A dense forest's tile can have ~20k items (Bodø, GitHub #66: 1.66 M items in the level, ~100 ms frames): a tile
+-- shows at most this many items at each distance (by its own ranks, so a tile the server already capped at 30 % still
+-- keeps its cap-th trees instead of 30 % of the cap). Sparse tiles (under the cap) follow RINGS as before.
+M.TILE_CAP = { { 300, 6000 }, { 700, 2400 }, { 1500, 900 }, { 1e9, 400 } }
 -- small props only near the player (2026-10-14, Fells Point at street level: ~10 ms a frame for the Forest
 -- with a door on every house out to 300 m): the tile distance (m) beyond which a group is not shown
 -- rocks only over the fine ground (farfield.NEAR_RADII: L0 within 400 m): beyond it the coarser tiles round off the
@@ -470,14 +474,14 @@ function M.onBin(anchorId, tileKey, bin, groups)
       end
       for k in pairs(t.shapes) do t.shapes[k] = nil end
       for k in pairs(t.scales) do t.scales[k] = nil end
-      t.shown, t.band, t.near, t.shadow = 0, nil, nil, nil
+      t.shown, t.band, t.near, t.shadow, t.ranks = 0, nil, nil, nil, nil
     end
   else
     t = table.remove(tileStructPool)
     if not t then
       t = { made = {}, solid = {}, shapes = {}, scales = {}, madeShape = {} }
     end
-    t.shown, t.band, t.near, t.shadow, t.forestId = 0, nil, nil, nil, nil
+    t.shown, t.band, t.near, t.shadow, t.forestId, t.ranks = 0, nil, nil, nil, nil, nil
   end
   local tx, ty = tostring(tileKey):match('(%-?%d+)_(%-?%d+)$')
   t.anchor = anchorId
@@ -547,6 +551,7 @@ function M.onRows(anchorId, tileKey, rows, groups)
   local t = { anchor = anchorId, rows = rows, groups = type(groups) == 'table' and groups or nil,
     made = old and old.made or {}, solid = old and old.solid or {}, near = old and old.near,
     shapes = old and old.rows == rows and old.shapes or {}, scales = old and old.rows == rows and old.scales or {},
+    ranks = old and old.rows == rows and old.ranks or nil,
     madeShape = old and old.madeShape or {}, shown = old and old.shown or 0, forestId = old and old.forestId or nil,
     variant = M.tileVariant(key), cx = (tonumber(tx) or 0) * 256 + 128, cy = (tonumber(ty) or 0) * 256 + 128, drop = false }
   tiles[key] = t
@@ -572,6 +577,34 @@ local function threshold(d)
   end
   return 0
 end
+
+-- What a tile at distance d shows: threshold(d), and at most M.TILE_CAP's rank for the tile (sorted once on t.ranks).
+local function tileThreshold(d, t)
+  local th = threshold(d)
+  if th <= 0 or not t then return th end
+  local bin = t.bin
+  local rows = t.rows
+  local nRows = bin and (t.nRows or math.floor(#bin / VBIN_STRIDE)) or (rows and #rows or 0)
+  if nRows == 0 then return th end
+  for _, r in ipairs(M.TILE_CAP) do
+    if d <= r[1] then
+      if nRows <= r[2] then return th end
+      if not t.ranks then
+        local rk = {}
+        if bin then
+          for i = 1, nRows do rk[i] = decodeBinRow(bin, i)[8] or 0 end
+        else
+          for i = 1, nRows do rk[i] = rows[i][8] or 0 end
+        end
+        table.sort(rk)
+        t.ranks = rk
+      end
+      return math.min(th, t.ranks[r[2]])
+    end
+  end
+  return th
+end
+M.tileThreshold = tileThreshold
 
 -- M.suppress(group, x, y) -> true hides that item (set by navgraph.lua); M.refresh() re-runs every tile's rows
 -- after it changes.
@@ -699,10 +732,22 @@ local function sortOrder(a, b)
   return a[8] < b[8]
 end
 
+-- The distance from a point to a tile's 256 m square.
+local function boxDist(p, t)
+  local dx = math.max(math.abs(p.x - t.cx) - 128, 0)
+  local dy = math.max(math.abs(p.y - t.cy) - 128, 0)
+  return math.sqrt(dx * dx + dy * dy)
+end
+
 -- Every calm frame: tiles of other anchors and dropped ones emptied, the others filled / thinned to their
 -- distance's rank within a governed micro-budget (M.PER_FRAME = 20 items/frame, < 1.0 ms wall-clock cap).
+-- With view (core.viewAway: the camera away from the car), a tile's shown rank and group caps follow the nearer of
+-- the camera and the car while its solidity (near) stays around the car.
 local frameN = 0
-function M.update(anchorId, player, gov)
+function M.update(anchorId, player, view, gov)
+  if type(view) == 'table' and (view.try ~= nil or view.charge ~= nil or view.chargeEngine ~= nil or view.take ~= nil or view.tokens ~= nil or view.frame ~= nil) and gov == nil then
+    gov, view = view, nil
+  end
   if not next(tiles) and #orphanDrops == 0 then
     workPending = false
     return
@@ -892,12 +937,11 @@ function M.update(anchorId, player, gov)
   local nearRing = M.RINGS[1] and M.RINGS[1][1] or 300
   for key, t in pairs(tiles) do
     if t.anchor ~= anchorId or t.drop then goto continue end     -- still being emptied
-    local dx = math.max(math.abs(player.x - t.cx) - 128, 0)
-    local dy = math.max(math.abs(player.y - t.cy) - 128, 0)
-    local dist = math.sqrt(dx * dx + dy * dy)
-    local want = threshold(dist)
+    local dCar = boxDist(player, t)
+    local dist = view and math.min(boxDist(view, t), dCar) or dCar
+    local want = tileThreshold(dist, t)
     local band = groupBand(t, dist)
-    local near = dist <= M.SOLID_M or (t.near and dist <= M.SOLID_M + M.SOLID_HYST_M) or false
+    local near = dCar <= M.SOLID_M or (t.near and dCar <= M.SOLID_M + M.SOLID_HYST_M) or false
     local demote = (t.near or next(t.solid) ~= nil) and not near
     local shadowMaxM = (M.RINGS[1] and M.RINGS[1][1]) or 300
     local shadow = dist <= shadowMaxM

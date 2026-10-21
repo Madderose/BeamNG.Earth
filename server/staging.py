@@ -6,16 +6,23 @@ A write as "<path>.tmp" then os.replace() made two events per tile file (3,220 i
 tmp_for(path) puts the temporary file in "beamngEarth_staging" next to the user folder (the same disk: the rename stays
 atomic), so only the finished file shows up. Paths outside a user folder's "temp" (the download cache) keep
 "<path>.tmp". Pure but for creating that folder.
+
+replace() is the atomic rename into the game's folder; a destination folder that vanished mid-session is made again
+(GitHub #27: a player's session folder under temp/beamngEarth was gone, and every terrain write after it failed).
 """
 import itertools
+import logging
 import os
 import threading
+import time
 
 STAGING = "beamngEarth_staging"
 FILE_ATTRIBUTE_TEMPORARY = 0x100
 _made = set()
 _lock = threading.Lock()
 _serial = itertools.count()
+_remade = set()
+log = logging.getLogger("earthd.staging")
 
 
 SWEEP_AGE_S = 3600
@@ -38,7 +45,6 @@ def mark_temporary(path, create=False):
 def _sweep(d):
     """Temporary files left by a process that ended mid-write (older than SWEEP_AGE_S), once per process."""
     import shutil
-    import time
     now = time.time()
     for name in os.listdir(d):
         p = os.path.join(d, name)
@@ -137,12 +143,45 @@ def tmp_for(path):
 
 
 def replace(tmp, path):
-    """Atomic replace that guarantees the destination folder exists (resilient against game update / temp wipe)."""
+    """os.replace(tmp, path), making path's folder again if it was deleted under us (the game or the player
+    clearing its temp folder) instead of failing every write after it."""
     if os.name == "nt" and (STAGING in os.path.abspath(tmp) or STAGING in os.path.abspath(path)):
         mark_temporary(tmp)
     try:
         os.replace(tmp, path)
     except FileNotFoundError:
-        os.makedirs(os.path.dirname(path), exist_ok=True)
+        if not os.path.exists(tmp):
+            raise
+        d = os.path.dirname(path)
+        os.makedirs(d, exist_ok=True)
+        with _lock:
+            first = d not in _remade
+            _remade.add(d)
+        if first:
+            log.warning("folder %s was deleted while in use (cleared temp folder?): made again", d)
         os.replace(tmp, path)
 
+
+REPLACE_WAITS = (0.02, 0.05, 0.1, 0.25, 0.5)    # s between the tries of replace_cached (~0.9 s in all)
+
+
+def replace_cached(tmp, path):
+    """replace(tmp, path) for a cache file whose content is the same whoever writes it (a download, a decoded or built
+    copy of one). On Windows a file another thread or process has open, or memory-mapped, cannot be replaced
+    (PermissionError, WinError 5: GitHub #67, the DEM tile cache on a cloud PC failed terrain requests): retried
+    REPLACE_WAITS; still held but there, that copy is kept and tmp removed. True when tmp went in, False when the
+    copy already there was kept."""
+    for wait in REPLACE_WAITS + (None,):
+        try:
+            replace(tmp, path)
+            return True
+        except PermissionError:
+            if wait is None:
+                if not os.path.exists(path):
+                    raise
+                try:
+                    os.remove(tmp)
+                except OSError:
+                    pass
+                return False
+            time.sleep(wait)

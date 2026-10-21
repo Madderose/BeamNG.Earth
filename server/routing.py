@@ -69,31 +69,30 @@ def simplify(points, tol_m=SIMPLIFY_M):
     return [p for p, k in zip(points, keep) if k]
 
 
-def parse(data, simplify_pts=True):
+def parse(data):
     """{points: [[lat, lon], ...], dist (m), dur (s)} of an OSRM route response, or raises ValueError. Pure."""
     if not isinstance(data, dict) or data.get("code") != "Ok" or not data.get("routes"):
         raise ValueError(f"no route ({(data or {}).get('code') if isinstance(data, dict) else 'bad answer'})")
     r = data["routes"][0]
     coords = r["geometry"]["coordinates"]
     pts = [(float(c[1]), float(c[0])) for c in coords]
-    if simplify_pts:
-        pts = simplify(pts)
-        tol = SIMPLIFY_M
-        while len(pts) > MAX_POINTS:            # very long routes: coarser
-            tol *= 2
-            pts = simplify(pts, tol)
+    pts = simplify(pts)
+    tol = SIMPLIFY_M
+    while len(pts) > MAX_POINTS:            # very long routes: coarser
+        tol *= 2
+        pts = simplify(pts, tol)
     return {"points": [[round(a, 6), round(b, 6)] for a, b in pts], "dist": float(r.get("distance") or 0),
             "dur": float(r.get("duration") or 0)}
 
 
-def plan(lat0, lon0, lat1, lon1, net=None, bearing=None, simplify_pts=True):
+def plan(lat0, lon0, lat1, lon1, net=None, bearing=None):
     """The road route from (lat0, lon0) to (lat1, lon1) (blocking), starting the way bearing points if it can (else
     without it). Raises netfetch.FetchError or ValueError."""
     net = net if net is not None else netfetch.default_fetcher()
     if bearing is not None:
         try:
-            return parse(json.loads(net.get(url(lat0, lon0, lat1, lon1, bearing), kind="demand").body.decode("utf-8")), simplify_pts=simplify_pts)
+            return parse(json.loads(net.get(url(lat0, lon0, lat1, lon1, bearing), kind="demand").body.decode("utf-8")))
         except (ValueError, netfetch.FetchFailed) as e:   # no road that way near the start (OSRM: 400 NoSegment,
             if isinstance(e, netfetch.FetchFailed) and e.status != 400:      # a car across a field): any direction
                 raise
-    return parse(json.loads(net.get(url(lat0, lon0, lat1, lon1), kind="demand").body.decode("utf-8")), simplify_pts=simplify_pts)
+    return parse(json.loads(net.get(url(lat0, lon0, lat1, lon1), kind="demand").body.decode("utf-8")))

@@ -756,7 +756,7 @@ def material_json(palette_vfs):
     return {MATERIAL: {
         "name": MATERIAL, "mapTo": MATERIAL, "class": "Material", "version": 1.5,
         "persistentId": "6f1c2a3e-4b5d-4e6f-8a9b-0c1d2e3f4a5b",
-        "castShadows": False,
+        "castShadows": False,       # (PR #41; the far tiles lie beyond the shadow distance: no change measured)
         "Stages": [{"baseColorMap": palette_vfs, "metallicFactor": 0, "roughnessFactor": 1}, {}, {}, {}],
     }}
 
