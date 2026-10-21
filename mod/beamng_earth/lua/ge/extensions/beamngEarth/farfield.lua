@@ -91,6 +91,7 @@ local crossover = require('beamngEarth/crossover')
 local lattice = require('beamngEarth/lattice')
 local satmat = require('beamngEarth/satmat')
 local governor = require('beamngEarth/governor')
+local shadowctl = require('beamngEarth/shadowctl')
 
 local floor, min, max, abs, huge, ln = math.floor, math.min, math.max, math.abs, math.huge, math.log
 local sqrt, deg, rad, atan, tan = math.sqrt, math.deg, math.rad, math.atan, math.tan
@@ -119,6 +120,7 @@ M.MAX_LEVEL = 9         -- coarsest level (server farfield.MAX_LEVEL); the horiz
                         -- are never under the player (they split within 328 km), so shownAt stops here
 M.EXACT_OFF = 0.01      -- m; an exact tile further than this off its height (crossover) is a miss
 M.RETEX_PER_FRAME = 2   -- far_retex material switches per frame at most (each also a governor unit)
+M.REVEALS_PER_FRAME = 2 -- swap groups revealed per frame at most during governed streaming (1 in burst mode)
 
 local pending = {}      -- key -> unclaimed instance received but not yet claimed by a far_swap (current anchor)
 local waitingInsts = {} -- inst -> inst for every unstarted instance (unclaimed in pending, or claimed by a waiting group)
@@ -350,8 +352,7 @@ local function revive(inst)
   local o = scenetree.findObjectById(sp.id)
   spares[k], nSpares = nil, nSpares - 1
   if not o then return false end
-  o:setField('isRenderShadowEnabled', 0, 'false')
-  o:setField('castShadows', 0, '0')
+  shadowctl.excludeObject(o, 'far')
   if sp.mat then satmat.unref(sp.mat) end      -- the new instance holds its own reference
   inst.id, inst.loaded, inst.off, inst.hidden = sp.id, true, 0, true
   if objSlot[sp.id] and inst.slotSerial then objSlot[sp.id].serial = inst.slotSerial end -- the newer send's
@@ -389,8 +390,7 @@ local function spawn(inst)
   o:setField('shapeName', 0, inst.shape)
   o:setField('collisionType', 0, 'None')
   o:setField('decalType', 0, 'None')
-  o:setField('isRenderShadowEnabled', 0, 'false')
-  o:setField('castShadows', 0, '0')
+  shadowctl.excludeObject(o, 'far')
   o.canSave = false
   o.hidden = true
   o:setPosition(vec3(inst.x, inst.y, inst.z))
@@ -519,11 +519,16 @@ park = function(inst)
   if not inst.hidden then setHidden(o, true); inst.hidden = true end
   local k = inst.key .. '|' .. inst.shape
   if spares[k] then dropSpare(k) end           -- an older copy of the same tile
+  sT = sT + 1
   spares[k] = { id = inst.id, mat = inst.mat, anchor = inst.anchor, session = inst.session,
-    folder = M.folderOf(inst.shape), t = clock }
+    folder = M.folderOf(inst.shape), t = clock, q = sT }
   inst.mat = nil
   nSpares = nSpares + 1
-  sT = sT + 1; spareQ[sT] = k
+  spareQ[sT] = k
+  while nSpares > M.SPARE_MAX and sH <= sT do
+    local q = sH; local ok = spareQ[q]; spareQ[q] = nil; sH = q + 1
+    if spares[ok] and spares[ok].q == q then dropSpare(ok) end
+  end
   counters.parked = counters.parked + 1
   if watcher then watcher.onRemove(inst.id) end
   return true
@@ -1437,9 +1442,11 @@ function M.update(gov, dt, cam, player)
     end
   end
   local stop = false
+  local nRevealed = 0
+  local maxReveals = (gov.frame == nil or gov.loading) and huge or (((gov.burst and not gov.urgent) and 1) or M.REVEALS_PER_FRAME or 2)
   for _, g in ipairs(groups) do
     if g.state == 'wait' then
-      local blocked = stop or frozen
+      local blocked = stop or frozen or (nRevealed >= maxReveals)
       if not blocked then
         for _, k in ipairs(g.add) do if busy[k] then blocked = true; break end end
       end
@@ -1452,6 +1459,8 @@ function M.update(gov, dt, cam, player)
           if startGroup(g, cam, player) then
             gov:charge('reveal', now() - t1)
             units = units + 1
+            nRevealed = nRevealed + 1
+            if nRevealed >= maxReveals then stop = true end
           end -- else: waits for a crossover slot; its keys stay busy, other groups go on
         else
           stop = true -- out of budget: keep the order, try again next frame
@@ -1493,8 +1502,11 @@ function M.update(gov, dt, cam, player)
   -- 4. imports (hidden), group tiles first, prefetch only when nothing else waits. A tile with its
   --    own imagery material gets the Material first, as a separate unit (satmat.lua); a re-sent key
   --    or a sibling sharing the name re-uses it for free.
+  --    Yield imports on frames that already revealed a swap group (unless loading or free test gov) so
+  --    unhide + .cdae resource init never stack in the same frame's RenderShadows pass.
   local imported = false
-  while true do
+  local allowImports = (gov.frame == nil or gov.loading or nRevealed == 0)
+  while allowImports do
     local inst = peekImport(cam, player)
     if not inst then break end
     if inst.material and not inst.mat and not inst.matFailed then
@@ -1535,9 +1547,9 @@ function M.update(gov, dt, cam, player)
   end
 
   -- 4b. far_retex: material texture switches, a few per frame within the budget (never thrown out of
-  --     the frame: a failing switch is counted and dropped)
+  --     the frame: a failing switch is counted and dropped). Yield when an import or reveal already ran.
   local nRetex = 0
-  while nRetex < M.RETEX_PER_FRAME and satmat.hasRetex() and gov:try('retex') do
+  while (not imported and nRevealed == 0) and nRetex < M.RETEX_PER_FRAME and satmat.hasRetex() and gov:try('retex') do
     local t1 = now()
     local ok, res = pcall(satmat.retexNext)
     if not ok then
@@ -1563,11 +1575,12 @@ function M.update(gov, dt, cam, player)
   --    its material and a few deletes would make a frame more than 4 ms long.
   -- spares past SPARE_S, or beyond SPARE_MAX, join the delete queue
   while sH <= sT do
-    local k = spareQ[sH]
+    local q = sH
+    local k = spareQ[q]
     local sp = spares[k]
-    if sp and nSpares <= M.SPARE_MAX and clock - sp.t < M.SPARE_S then break end
-    spareQ[sH] = nil; sH = sH + 1
-    if sp then dropSpare(k) end
+    if sp and sp.q == q and nSpares <= M.SPARE_MAX and clock - sp.t < M.SPARE_S then break end
+    spareQ[q] = nil; sH = q + 1
+    if sp and sp.q == q then dropSpare(k) end
   end
   local pressure = #doomed > M.DELETE_PRESSURE
   if (nQueued == 0 and not imported) or pressure or (player ~= nil and not imported) then

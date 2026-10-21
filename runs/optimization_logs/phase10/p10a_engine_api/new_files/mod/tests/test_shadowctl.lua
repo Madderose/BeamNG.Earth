@@ -1,0 +1,114 @@
+-- luajit mod/tests/test_shadowctl.lua  (Phase 10A: shadowctl.lua unit tests)
+local dir = (arg and arg[0] or ''):match('^(.*)[/\\]') or '.'
+local T = dofile(dir .. '/testlib.lua')
+local S = dofile(dir .. '/stubs.lua')
+
+-- Put new_files shadowctl on package.path when running from repo root or test dir
+package.path = dir .. '/../../runs/optimization_logs/phase10/p10a_engine_api/new_files/mod/beamng_earth/lua/ge/extensions/?.lua;' .. package.path
+
+local shadowctl = require('beamngEarth/shadowctl')
+
+-- 1. Pure velocity & streaming-burst distance scale calculation
+T.near(shadowctl.computeDistanceScale(0, 0), 0.45, 1e-6, 'stationary, no burst: 0.45')
+T.near(shadowctl.computeDistanceScale(20, 0), 0.45, 1e-6, '20 m/s threshold: 0.45')
+T.near(shadowctl.computeDistanceScale(40, 0), 0.35, 1e-6, '40 m/s midpoint: 0.35')
+T.near(shadowctl.computeDistanceScale(60, 0), 0.25, 1e-6, '60 m/s high speed: 0.25')
+T.near(shadowctl.computeDistanceScale(90, 0), 0.25, 1e-6, '90 m/s clamped: 0.25')
+T.near(shadowctl.computeDistanceScale(0, 1.0), 0.22, 1e-6, 'stationary + full burst blend: tightened to 0.22')
+T.near(shadowctl.computeDistanceScale(0, 0.5), 0.335, 1e-6, 'stationary + half burst blend: interpolated')
+
+-- 2. Global PSSMLightShadowMap profile + burst hold decay + setter quantization
+local pssmWrites = 0
+local pssmState = { lastSplitCastersEnabled = true, sdsmMaxDistanceScale = 0.5 }
+PSSMLightShadowMap = setmetatable({}, {
+  __index = function(_, k) return pssmState[k] end,
+  __newindex = function(_, k, v)
+    pssmWrites = pssmWrites + 1
+    pssmState[k] = v
+  end,
+})
+
+shadowctl.reset()
+local caps = shadowctl.probe()
+T.check(caps.pssm == true, 'probe detects PSSMLightShadowMap')
+
+local sc1 = shadowctl.applyGlobalProfile(10, { frameUnits = 0, spent = 0 }, 1 / 60)
+T.near(sc1, 0.45, 1e-6, 'normal frame applies 0.45 scale')
+T.check(pssmState.lastSplitCastersEnabled == false, 'lastSplitCastersEnabled forced false')
+local writesAfterFirst = pssmWrites
+shadowctl.applyGlobalProfile(10, { frameUnits = 0, spent = 0 }, 1 / 60)
+T.check(pssmWrites == writesAfterFirst, 'steady speed skips redundant C++ userdata writes')
+
+-- Simulate cameraUpdate.lua clobbering sdsmMaxDistanceScale back to 0.5
+pssmState.sdsmMaxDistanceScale = 0.5
+shadowctl.applyGlobalProfile(10, { frameUnits = 0, spent = 0 }, 1 / 60)
+T.near(pssmState.sdsmMaxDistanceScale, 0.45, 1e-6, 'restores scale if cameraUpdate overwrote it')
+
+-- Trigger streaming burst via governor frameUnits
+local scBurst = shadowctl.applyGlobalProfile(10, { frameUnits = 2, spent = 3.2 }, 1 / 60)
+T.near(scBurst, 0.22, 1e-6, 'streaming burst tightens shadow distance scale to 0.22')
+-- Decay over 0.5s of calm frames
+for _ = 1, 35 do
+  shadowctl.applyGlobalProfile(10, { frameUnits = 0, spent = 0 }, 1 / 60)
+end
+T.near(pssmState.sdsmMaxDistanceScale, 0.45, 1e-6, 'shadow scale smoothly relaxes back to 0.45 after burst hold')
+
+-- 3. Material cloning & TSStatic skin remap in excludeObject
+local facade = createObject('Material')
+facade:setField('baseColorMap', 0, '/tex/plaster.png')
+facade:setField('castShadows', 0, '1')
+facade:registerObject('bne_bld_facade')
+
+local curbs = createObject('Material')
+curbs:setField('castShadows', 0, '1')
+curbs:registerObject('curbs')
+
+shadowctl.reset()
+shadowctl.FORCE_ENGINE_MODE = true
+local bldFarObj = createObject('TSStatic')
+shadowctl.excludeObject(bldFarObj, 'road_static')
+T.check(bldFarObj:getField('skin') == 'bne_bld_=bne_noshad_', 'non-shadow road_static gets bne_noshad_ skin remap')
+T.check(bldFarObj:getField('isRenderShadowEnabled') == nil, 'engine mode does not write dead isRenderShadowEnabled field')
+T.check(curbs:getField('castShadows') == '0', 'stock curbs material stripped of castShadows')
+local clonedFacade = scenetree.findObject('bne_noshad_facade')
+T.check(clonedFacade ~= nil and clonedFacade:getField('castShadows') == '0'
+  and clonedFacade:getField('mapTo') == 'bne_noshad_facade', 'shadowless clone bne_noshad_facade created')
+shadowctl.FORCE_ENGINE_MODE = false
+
+-- 4. Forest datablock shadowNullDetailSize split & empty Forest hiding
+local dbNear = createObject('TSForestItemData')
+dbNear:setField('collidable', 0, '1')
+dbNear:setField('shadowNullDetailSize', 0, '35')
+dbNear:registerObject('bngEarthTree_oak')
+
+local dbFar = createObject('TSForestItemData')
+dbFar:setField('collidable', 0, '0')
+dbFar:setField('shadowNullDetailSize', 0, '35')
+dbFar:registerObject('bngEarthTree_oak_n')
+
+Sim = {
+  getDataBlockSet = function()
+    local ids = { dbNear:getID(), dbFar:getID() }
+    return {
+      getCount = function() return #ids end,
+      idAt = function(_, i) return ids[i + 1] end,
+    }
+  end
+}
+
+local fEmpty = createObject('Forest')
+fEmpty.getData = function() return { getItems = function() return {} end } end
+fEmpty:registerObject('bngEarthForest_1')
+
+local fFull = createObject('Forest')
+fFull.hidden = true
+fFull.getData = function() return { getItems = function() return { 1, 2 } end } end
+fFull:registerObject('bngEarthForest_2')
+
+shadowctl.onForestTileUpdated(fFull:getID(), false)
+T.check(dbNear:getField('shadowNullDetailSize') == '35', 'near solid tree datablock keeps shadowNullDetailSize=35')
+T.check(dbFar:getField('shadowNullDetailSize') == '500', 'far non-solid tree datablock upgraded to shadowNullDetailSize=500')
+T.check(fEmpty.hidden == true, 'empty pooled Forest is hidden from SceneOctree shadow traversal')
+T.check(fFull.hidden == false, 'active non-empty Forest is unhidden')
+
+T.done('test_shadowctl')

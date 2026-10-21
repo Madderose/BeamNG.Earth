@@ -1,0 +1,47 @@
+diff --git a/mod/beamng_earth/lua/ge/extensions/beamngEarth/core.lua b/mod/beamng_earth/lua/ge/extensions/beamngEarth/core.lua
+index 8610920..4b6464c 100644
+--- a/mod/beamng_earth/lua/ge/extensions/beamngEarth/core.lua
++++ b/mod/beamng_earth/lua/ge/extensions/beamngEarth/core.lua
+@@ -1366,13 +1366,15 @@ function M.hitches()
+   return out
+ end
+ 
+--- The previous frame's engine tick (ms), 0 without the metrics.
++-- The previous frame's engine tick, shadow pass, and file watcher costs (ms), 0 without the metrics.
+ local tickMetrics = {}
+-local function engineTickMs()
++local function enginePerfMs()
+   local dbg = Engine and Engine.Debug
+-  if not (dbg and dbg.getLastPerformanceMetrics) then return 0 end
+-  if not pcall(dbg.getLastPerformanceMetrics, tickMetrics) then return 0 end
+-  return tonumber(tickMetrics.Ticking) or 0
++  if not (dbg and dbg.getLastPerformanceMetrics) then return 0, 0, 0 end
++  if not pcall(dbg.getLastPerformanceMetrics, tickMetrics) then return 0, 0, 0 end
++  return tonumber(tickMetrics.Ticking) or 0,
++         tonumber(tickMetrics.RenderShadows) or 0,
++         tonumber(tickMetrics.FileWatchers) or 0
+ end
+ 
+ 
+@@ -1480,7 +1482,7 @@ local function onUpdate(dtReal, dtSim)
+     farfield.hasWork() or roads.hasWork() or (trees.hasWork and trees.hasWork(st.anchorId, pl) or false) or (dataHead <= dataTail),
+     pl and pl.speed
+   )
+-  gov:chargeEngine(engineTickMs())     -- what the engine spent on last frame's new tiles (governor.lua)
++  gov:chargeEngine(enginePerfMs())     -- what the engine spent on last frame's new tiles & shadows (governor.lua)
+   for _, msg in ipairs(net.update(dtReal)) do
+     local mtype = msg and msg.type
+     if LANE1_TYPES[mtype] and not LANE0_TYPES[mtype] then
+@@ -1509,6 +1511,12 @@ local function onUpdate(dtReal, dtSim)
+       if not ok then log('E', 'beamngEarth', 'message ' .. tostring(msg.type) .. ' failed: ' .. tostring(err)) end
+     until dataHead > dataTail or (drained >= 64 and hitchClock() >= ipcDeadline)
+   end
++  if gov.noteQueue then
++    local fCnt = farfield.counters and farfield.counters()
++    local fq = (fCnt and fCnt.queued) or 0
++    local ipcQ = math.max(0, dataTail - dataHead + 1)
++    gov:noteQueue(fq + ipcQ)
++  end
+   t = mark('net', t)
+   if not scenetree.MissionGroup then return end -- no level loaded
+   tickMotionBlur()

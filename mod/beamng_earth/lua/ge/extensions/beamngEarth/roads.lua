@@ -20,6 +20,7 @@
 -- Console: beamngEarth_roads.status(), .setEnabled(bool)
 
 local stopwatch = require('beamngEarth/stopwatch')
+local shadowctl = require('beamngEarth/shadowctl')
 
 local M = {}
 
@@ -83,8 +84,9 @@ local createQ = {}          -- { key, chunk } FIFO
 local deleteQ = {}          -- object ids
 local loadedMaterials = false
 local anchorId = nil
-local far = {}              -- far buildings (server buildings.far_tile): key "a:tx_ty" -> { anchor, id, shape, pos, hidden }
-local farQ = {}             -- keys of far tiles to make
+local far = {}              -- far buildings (server buildings.far_tile): key "a:tx_ty" -> { anchor, id, shape, pos, hidden, deferred }
+local farQ = {}             -- keys of far tiles to make (ring queue: farH..#farQ)
+local farH = 1
 local lastError = nil
 local sinceChange = stopwatch.new()  -- ms since a tile arrived / went or a road was made / deleted
 local sinceReload = stopwatch.new()
@@ -140,18 +142,48 @@ end
 -- many more translucent objects in view (buildings' windows, signals) they vanished. Opaque asphalt is
 -- drawn first, always, and the translucent lines, crossings and gutters over it.
 M.OPAQUE = { 'road_asphalt_2lane', 'italy_cobblestone' }
+-- Ground-hugging road ribbons, markings, drains, and raised sidewalks/curbs should never cast shadows
+-- into PSSM cascades (per-object shadow flags on TSStatic are no-ops in BeamNG 0.40; Material.castShadows is real).
+M.NO_SHADOW = {
+  'road_asphalt_2lane', 'italy_cobblestone', 'm_dirt_road', 'sidewalk_concrete',
+  'm_metal_grid_drain', 'gutter1', 'line_white', 'line_yellow', 'line_dashed_long', 'crossing_white',
+  'curbs', 'sidewalk1', 'tactile_indicator',
+}
 
+-- Stock levels reload their own .materials.json on level load, so session-wide Material edits here do not leak.
 local function loadMaterials()
   if loadedMaterials then return end
   for _, f in ipairs(M.MATERIAL_FILES) do loadJsonMaterialsFile(f) end
   for _, name in ipairs(M.OPAQUE) do
     local m = scenetree.findObject(name)
     if m then
-      pcall(function() m:setField('translucent', 0, '0'); m:flush(); m:reload() end)
+      pcall(function()
+        local cur = m.getField and m:getField('translucent', 0)
+        if cur ~= '0' and cur ~= 'false' then
+          m:setField('translucent', 0, '0'); m:setField('castShadows', 0, '0'); m:flush(); m:reload()
+        end
+      end)
     end
   end
   local pad = scenetree.findObject('tactile_indicator')    -- curb ramp pads: US truncated domes are yellow
-  if pad then pcall(function() pad:setField('baseColorFactor', 0, '0.95 0.78 0.18 1'); pad:flush(); pad:reload() end) end
+  if pad then
+    pcall(function()
+      if not pad.getField or pad:getField('baseColorFactor', 0) ~= '0.95 0.78 0.18 1' then
+        pad:setField('baseColorFactor', 0, '0.95 0.78 0.18 1'); pad:setField('castShadows', 0, '0'); pad:flush(); pad:reload()
+      end
+    end)
+  end
+  for _, name in ipairs(M.NO_SHADOW) do
+    local m = scenetree.findObject(name)
+    if m then
+      pcall(function()
+        local cur = m.getField and m:getField('castShadows', 0)
+        if cur ~= '0' and cur ~= 'false' then
+          m:setField('castShadows', 0, '0'); m:flush(); m:reload()
+        end
+      end)
+    end
+  end
   loadedMaterials = true
 end
 
@@ -226,6 +258,25 @@ end
 
 local function now() return os.clock() * 1000 end
 
+-- Event-driven sync of a far building tile against its square's near road tile `bld`.
+-- Avoids scanning the entire `far` table every frame in updateFar.
+local function syncFar(key)
+  local f = far[key]
+  if not f then return end
+  local nt = tiles[key]
+  local hide = nt ~= nil and nt.bld ~= nil
+  if f.id then
+    if hide ~= (f.hidden or false) then
+      local o = scenetree.findObjectById(f.id)
+      if o then o:setHidden(hide) end
+      f.hidden = hide
+    end
+  elseif not hide and f.deferred then
+    f.deferred = false
+    farQ[#farQ + 1] = key
+  end
+end
+
 local function dropTile(key)
   local t = tiles[key]
   if not t then return end
@@ -249,6 +300,7 @@ local function dropTile(key)
   if t.props then require('beamngEarth/trees').dropKey((key:gsub(':', ':p', 1))) end
   if t.park then require('beamngEarth/parking').dropKey(key) end
   tiles[key] = nil
+  syncFar(key)
 end
 
 -- Every road not of anchor aid goes (a new anchor: the server re-sends its tiles).
@@ -379,8 +431,7 @@ local function createWalk(walk, collide, shadow)
     castShadow = colType == 'Visible Mesh Final'
   end
   if not castShadow then
-    o:setField('isRenderShadowEnabled', 0, 'false')
-    o:setField('castShadows', 0, '0')
+    shadowctl.excludeObject(o, 'road_static')
   end
   o.canSave = false
   o:setPosition(vec3(walk.pos[1], walk.pos[2], walk.pos[3]))
@@ -396,11 +447,20 @@ end
 local function spawnWalk(q)
   local isRoad = q.what == 'road' or q.what == 'wire' or q.renderOnly   -- render-only meshes
   -- the buildings' and sidewalks' lean meshes are a collision detail (server cdae collision_only): never drawn
-  local collide = (q.what == 'bldcol' or q.what == 'walkcol') and 'Collision Mesh' or not isRoad
+  local isColOnly = (q.what == 'bldcol' or q.what == 'walkcol')
+  local collide = isColOnly and 'Collision Mesh' or not isRoad
   -- Only keep shadow casting enabled on near 3D building meshes (bld) and bridge decks (deck)
   local castShadow = (q.what:sub(1, 3) == 'bld' and q.what ~= 'bldcol')
     or q.what == 'deck'
-  return createWalk(q.walk, collide, castShadow)
+  local id = createWalk(q.walk, collide, castShadow)
+  if isColOnly and id then
+    local o = scenetree.findObjectById(id)
+    if o then
+      if o.setRenderEnabled then o:setRenderEnabled(false)
+      elseif o.setField then o:setField('isRenderEnabled', 0, 'false') end
+    end
+  end
+  return id
 end
 
 local function createChunk(chunk)
@@ -524,8 +584,12 @@ function M.onFarTile(msg, currentAnchor)
   local shape = sl and sl.path or data.shape or data.cdae
   local pos = type(data.pos) == 'table' and data.pos or inlinedPos
   if type(shape) == 'string' and shape ~= '' and type(pos) == 'table' then
-    far[key] = { anchor = msg.anchorId, shape = shape, pos = pos, slot = sl, tx = tx, ty = ty, rev = m.rev }
-    farQ[#farQ + 1] = key
+    local coveredByNear = tiles[key] ~= nil and tiles[key].bld ~= nil
+    far[key] = { anchor = msg.anchorId, shape = shape, pos = pos, slot = sl, tx = tx, ty = ty, rev = m.rev,
+      hidden = coveredByNear, deferred = coveredByNear }
+    if not coveredByNear then
+      farQ[#farQ + 1] = key
+    end
   else
     slotDrop(sl)
   end
@@ -543,25 +607,33 @@ function M.onFarDrop(msg)
 end
 
 -- A far tile is hidden while its square's road tile shows buildings (they are the same, colliding).
+-- Visibility sync is event-driven via syncFar(key) instead of scanning `far` every frame.
 local function updateFar(gov)
-  for key, f in pairs(far) do
-    if f.id then
-      local hide = tiles[key] ~= nil and tiles[key].bld ~= nil
-      if hide ~= (f.hidden or false) then
-        local o = scenetree.findObjectById(f.id)
-        if o then o:setHidden(hide) end
-        f.hidden = hide
-      end
-    end
-  end
-  while #farQ > 0 and #walkQ == 0 and gov:try('roadWalk') do
-    local key = table.remove(farQ, 1)
+  while farH <= #farQ and #walkQ == 0 do
+    local key = farQ[farH]
     local f = far[key]
-    if f and not f.id then
+    if not f or f.id then
+      farQ[farH] = nil; farH = farH + 1
+      if farH > #farQ then farH = 1; for k in pairs(farQ) do farQ[k] = nil end end
+    elseif tiles[key] ~= nil and tiles[key].bld ~= nil then
+      f.deferred, f.hidden = true, true
+      farQ[farH] = nil; farH = farH + 1
+      if farH > #farQ then farH = 1; for k in pairs(farQ) do farQ[k] = nil end end
+    else
+      if not gov:try('roadWalk') then break end
+      farQ[farH] = nil; farH = farH + 1
+      if farH > #farQ then farH = 1; for k in pairs(farQ) do farQ[k] = nil end end
       local t0 = now()
       loadMaterials()
       local ok, id = pcall(spawnFar, f)
-      if ok then f.id = id; slotMade(id, f.shape) else lastError = tostring(id) end
+      if ok then
+        f.id = id
+        f.hidden = false
+        slotMade(id, f.shape)
+        syncFar(key)
+      else
+        lastError = tostring(id)
+      end
       local dt = now() - t0
       gov:charge('roadWalk', dt)
       noteUnit('far', dt, f.shape)
@@ -630,8 +702,11 @@ function M.transform(xf, geodesy)
   end
   walkQ, createQ, parked = keepNew(walkQ), keepNew(createQ), keepNew(parked)
   local fq = {}
-  for _, k in ipairs(farQ) do if far[k] and not far[k].ghost then fq[#fq + 1] = k end end
-  farQ = fq
+  for i = farH, #farQ do
+    local k = farQ[i]
+    if k and far[k] and not far[k].ghost then fq[#fq + 1] = k end
+  end
+  farQ, farH = fq, 1
   if any then ghostSince = stopwatch.new(); sinceChange = stopwatch.new(); collisionDirty = true end
 end
 
@@ -780,6 +855,7 @@ function M.update(gov, currentAnchor, player, view)
           t[q.what] = id; collisionDirty = true; newColliders[#newColliders + 1] = { id, q }
           t.colAt = t.colAt or {}; t.colAt[q.what] = now()
         end
+        if q.what == 'bld' then syncFar(q.key) end
       else lastError = tostring(id) end
       local dt = now() - t0
       gov:charge('roadWalk', dt)
@@ -810,8 +886,8 @@ function M.update(gov, currentAnchor, player, view)
     end
   end
   local timeSinceLastReload = sinceReload() / 1000
-  local colDirty = (collisionDirty and timeSinceLastReload > M.RELOAD_EVERY_S)
-      or (deletesDirty and timeSinceLastReload > M.RELOAD_DELETES_S)
+  local colDirty = (collisionDirty and timeSinceLastReload >= M.RELOAD_EVERY_S)
+      or (deletesDirty and timeSinceLastReload >= M.RELOAD_DELETES_S)
   local horizonM = M.RELOAD_HORIZON_RATIO * collideR
   local traveledHorizon = collisionDirty and (traveledSq > horizonM * horizonM)
   local urgentStructure = collisionDirty and (holdActive or hasUrgentStructure(px, py, math.max(M.DECK_URGENT_M, M.DECK_URGENT_S * speed)))
@@ -1039,7 +1115,7 @@ end
 -- next throttled slot.
 function M.requestCollision() collisionDirty = true end
 
-function M.hasWork() return #createQ > 0 or #deleteQ > 0 or #walkQ > 0 or #farQ > 0 or collisionDirty end
+function M.hasWork() return #createQ > 0 or #deleteQ > 0 or #walkQ > 0 or farH <= #farQ or collisionDirty end
 
 -- Server hello.prewarm: a tiny shape listing every material the server's shapes use, loaded once when it connects
 -- (server/prewarm.py): a material's first shape in a session set it up (a tunnel's first tile 65 ms, later ones ~2 ms),
@@ -1059,6 +1135,8 @@ prewarmNow = function()
   local t = stopwatch.new()
   local ok, id = pcall(createWalk, { shape = path, pos = { 0, 0, -5000 } }, false)
   if not ok then lastError = tostring(id); return end
+  local po = id and scenetree.findObjectById(id)
+  if po and po.setHidden then po:setHidden(true) end
   prewarmId, prewarmPath = id, path
   local dt = t()
   noteUnit('prewarm', dt, path)
@@ -1090,7 +1168,7 @@ function M.clear()
     if f.id then deleteQ[#deleteQ + 1] = f.id end
     slotDrop(f.slot)
   end
-  far, farQ = {}, {}
+  far, farQ, farH = {}, {}, 1
   createQ, held, newColliders = {}, {}, {}
   for _, id in ipairs(deleteQ) do
     local o = scenetree.findObjectById(id)
@@ -1114,7 +1192,7 @@ function M.reset()
   for n, d in pairs(slotDropped) do slotsGone[#slotsGone + 1] = { n, d[1], d[2] } end
   objSlot, slotLive, slotDropped = {}, {}, {}
   tiles, createQ, deleteQ, walkQ, anchorId, loadedMaterials = {}, {}, {}, {}, nil, false
-  far, farQ = {}, {}
+  far, farQ, farH = {}, {}, 1
   lastReloadX, lastReloadY = nil, nil
   collisionDirty, deletesDirty = false, false
   unitStats, unitLog = {}, {}

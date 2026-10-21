@@ -1,0 +1,40 @@
+STATUS_UPDATE: Reading prior shadow research and target Lua source files (10%)
+STATUS_UPDATE: Probing live BeamNG 0.40 engine shadow control surfaces via MCP (25%)
+STATUS_UPDATE: Exporting VariableRegistry and inspecting ShadowMapManager, LightShadowMap, RenderViewManager, and SOTM flags (40%)
+STATUS_UPDATE: Reading engine Lua scripts (cameraUpdate.lua) and editor field tables via read-only MCP probe (50%)
+STATUS_UPDATE: Verifying play state and running short reversible A/B measurements on global shadow knobs (60%)
+root agent idle; waiting up to 30m0s for 1 background task(s)
+STATUS_UPDATE: Waiting for live A/B global shadow probe (`ab_probe.py`) to finish (~25s remaining) (65%)
+
+Running the reversible global A/B shadow probes via `ab_probe.py`; waiting for completion notification.
+STATUS_UPDATE: Investigating cause of 18-20ms RenderShadows spikes observed during A/B probe (70%)
+STATUS_UPDATE: Running clean steady-state A/B measurements across all global shadow & LOD knobs (75%)
+STATUS_UPDATE: Waiting for steady-state A/B probe (`ab_probe_steady.py`) to complete (~25s remaining) (78%)
+
+Running steady-state A/B shadow probes across all global knobs; waiting for completion notification.
+STATUS_UPDATE: Writing shadowctl.lua and test_shadowctl.lua in output directory (82%)
+STATUS_UPDATE: Creating modified copies and generating git-apply-ready diffs for trees.lua, farfield.lua, roads.lua, core.lua, shadowctl.lua, and test_shadowctl.lua (90%)
+STATUS_UPDATE: Writing comprehensive proposal.md with live engine measurement tables and ranked proposals (96%)
+Completed **TASK-P10-A — Engine Shadow Control Surface Discovery & Dead-Toggle Replacement**. All deliverables and verified `git apply`-ready patches have been written to [runs/optimization_logs/phase10/p10a_engine_api/proposal.md](file:///C:/Users/hoppj/SynologyDrive/01_Projets/Projet_BeamEarth/BeamNG.Earth/runs/optimization_logs/phase10/p10a_engine_api/proposal.md).
+
+### Summary of Live Engine Findings & Measurements
+1. **Steady State vs. Streaming Burst `RenderShadows` Telemetry**:
+   - In pure steady state (`92,346` live Forest items, `581` far tiles, `316` road/building objects, zero active mutations), `RenderShadows` CPU is **mean `0.41–0.52 ms`** (`median 0.40–0.48 ms`).
+   - During active tree/tile streaming bursts (while [trees.lua](file:///C:/Users/hoppj/SynologyDrive/01_Projets/Projet_BeamEarth/BeamNG.Earth/mod/beamng_earth/lua/ge/extensions/beamngEarth/trees.lua) mutates `20` items/frame across distant `Forest` tiles), `RenderShadows` spikes to **mean `8.10 ms`, median `10.75 ms`, p95 `18.58 ms`, max `20.28 ms`** as dirty `ForestCell` batches rebuild lazily during the shadow pass.
+   - Tightening `PSSMLightShadowMap.sdsmMaxDistanceScale` (`0.45 -> 0.15..0.22`) during active streaming bursts reduced `RenderShadows` from **mean `8.10 ms` / median `10.75 ms` / p95 `18.58 ms`** down to **mean `1.43 ms` / median `1.06 ms` / p95 `1.25 ms` ($\Delta -6.66\text{ ms}$ mean, $\Delta -9.69\text{ ms}$ median, $\Delta -17.33\text{ ms}$ p95)**.
+2. **Per-Object & Per-Material Shadow Leaks Discovered Live**:
+   - **`114` `bldfar` horizon building `TSStatic`s** in `bngEarthRoads` use `bne_bld_facade` (`castShadows = "1"`) because `o:setField('isRenderShadowEnabled', 0, 'false')` and `o:setField('castShadows', 0, '0')` in [roads.lua](file:///C:/Users/hoppj/SynologyDrive/01_Projets/Projet_BeamEarth/BeamNG.Earth/mod/beamng_earth/lua/ge/extensions/beamngEarth/roads.lua#L382-L383) are silent dynamic-field no-ops. Verified live via `TSStatic:getFieldsForEditor()` that `TSStatic` supports per-instance material target renaming via its C++ `skin` field (`o:setField('skin', 0, 'bne_bld_=bne_noshad_')`) to bind cloned `castShadows = '0'` materials before `registerObject`.
+   - **Stock road/sidewalk materials** loaded by [roads.lua](file:///C:/Users/hoppj/SynologyDrive/01_Projets/Projet_BeamEarth/BeamNG.Earth/mod/beamng_earth/lua/ge/extensions/beamngEarth/roads.lua#L26-L31) (`curbs`, `sidewalk1`, `tactile_indicator`, `m_dirt_road`, `italy_cobblestone`) had `castShadows = "1"` on `18` sidewalk meshes and `49` road meshes.
+   - **`25` empty pooled `bngEarthForest_*` objects** were sitting visible (`hidden = 0`) in `MissionGroup`, causing `100` wasted global-bounds `Forest::prepRenderImage()` dispatches per frame across the 4 cascades.
+   - **Non-solid `bngEarthTree_*_n` datablocks** (already used by [trees.lua](file:///C:/Users/hoppj/SynologyDrive/01_Projets/Projet_BeamEarth/BeamNG.Earth/mod/beamng_earth/lua/ge/extensions/beamngEarth/trees.lua#L246-L265) for all trees beyond `SOLID_M = 90..125 m`) can be set to `shadowNullDetailSize = '500'` while solid near-car `bngEarthTree_*` datablocks remain at `'35'`, culling $>125\text{ m}$ trees from shadow cascades with zero extra item churn.
+
+### Generated Deliverables (`runs/optimization_logs/phase10/p10a_engine_api/`)
+- [proposal.md](file:///C:/Users/hoppj/SynologyDrive/01_Projets/Projet_BeamEarth/BeamNG.Earth/runs/optimization_logs/phase10/p10a_engine_api/proposal.md)
+- [shadowctl.lua.diff](file:///C:/Users/hoppj/SynologyDrive/01_Projets/Projet_BeamEarth/BeamNG.Earth/runs/optimization_logs/phase10/p10a_engine_api/shadowctl.lua.diff) & [new_files/.../shadowctl.lua](file:///C:/Users/hoppj/SynologyDrive/01_Projets/Projet_BeamEarth/BeamNG.Earth/runs/optimization_logs/phase10/p10a_engine_api/new_files/mod/beamng_earth/lua/ge/extensions/beamngEarth/shadowctl.lua)
+- [test_shadowctl.lua.diff](file:///C:/Users/hoppj/SynologyDrive/01_Projets/Projet_BeamEarth/BeamNG.Earth/runs/optimization_logs/phase10/p10a_engine_api/test_shadowctl.lua.diff) & [new_files/.../test_shadowctl.lua](file:///C:/Users/hoppj/SynologyDrive/01_Projets/Projet_BeamEarth/BeamNG.Earth/runs/optimization_logs/phase10/p10a_engine_api/new_files/mod/tests/test_shadowctl.lua)
+- [trees.lua.diff](file:///C:/Users/hoppj/SynologyDrive/01_Projets/Projet_BeamEarth/BeamNG.Earth/runs/optimization_logs/phase10/p10a_engine_api/trees.lua.diff)
+- [farfield.lua.diff](file:///C:/Users/hoppj/SynologyDrive/01_Projets/Projet_BeamEarth/BeamNG.Earth/runs/optimization_logs/phase10/p10a_engine_api/farfield.lua.diff)
+- [roads.lua.diff](file:///C:/Users/hoppj/SynologyDrive/01_Projets/Projet_BeamEarth/BeamNG.Earth/runs/optimization_logs/phase10/p10a_engine_api/roads.lua.diff)
+- [core.lua.diff](file:///C:/Users/hoppj/SynologyDrive/01_Projets/Projet_BeamEarth/BeamNG.Earth/runs/optimization_logs/phase10/p10a_engine_api/core.lua.diff)
+
+STATUS_UPDATE: DONE (100%)

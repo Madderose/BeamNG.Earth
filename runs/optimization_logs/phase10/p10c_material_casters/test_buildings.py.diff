@@ -1,0 +1,36 @@
+diff --git a/server/tests/test_buildings.py b/server/tests/test_buildings.py
+index 12fe0b8..5136fa2 100644
+--- a/server/tests/test_buildings.py
++++ b/server/tests/test_buildings.py
+@@ -380,18 +380,27 @@ class SplitTest(unittest.TestCase):
+         mats_path = (Path(__file__).resolve().parents[2] / "mod" / "beamng_earth" / "levels" / "beamng_earth"
+                      / "art" / "shapes" / "beamngEarth" / "buildings.materials.json")
+         mats = json.loads(mats_path.read_text(encoding="utf-8"))
+-        for non_shadow in ("bne_bld_glass", "bne_wire", "bne_sidewalk_brick"):
++        for non_shadow in ("bne_bld_glass", "bne_bld_marble", "bne_bld_far", "bne_wire", "bne_sidewalk_brick"):
+             self.assertIn(non_shadow, mats)
+             self.assertIs(mats[non_shadow].get("castShadows"), False, non_shadow)
++        tun_path = mats_path.parent / "tunnel.materials.json"
++        tun_mats = json.loads(tun_path.read_text(encoding="utf-8"))
++        for non_shadow in ("bne_tunnel_light", "bne_tunnel_soil"):
++            self.assertIn(non_shadow, tun_mats)
++            self.assertIs(tun_mats[non_shadow].get("castShadows"), False, non_shadow)
+         # A house with plain walls uses bne_bld_glass for laid-over windows in the full mesh and omits them in lite
+         spec = next(bld.plan(rect(k * 40, 20, 12, 9), {"class": "house"}, 0, 39.2, -76.9)
+                     for k in range(40) if bld.plan(rect(k * 40, 20, 12, 9), {"class": "house"}, 0, 39.2, -76.9).wall)
+-        _, _, T_full, M_full, mats_full, _ = bld.build([(spec, 0.0, 0.0)], lite=False)
+-        _, _, T_lite, M_lite, mats_lite, _ = bld.build([(spec, 0.0, 0.0)], lite=True)
++        _, _, T_full, M_full, mats_full, C_full = bld.build([(spec, 0.0, 0.0)], lite=False)
++        _, UV_lite, T_lite, M_lite, mats_lite, C_lite = bld.build([(spec, 0.0, 0.0)], lite=True)
++        _, _, _, _, mats_far, _ = bld.build([(spec, 0.0, 0.0)], lite=True, far=True)
+         self.assertIn(mats_full.index(bld.GLASS), set(M_full.tolist()))
+         self.assertLess(len(T_lite), len(T_full), "lite mesh omits laid-over glass window quads")
+-        self.assertEqual(len(mats_lite), 1, "lite mesh merges materials into a single primitive")
++        self.assertEqual(mats_lite, (bld.FACADE,), "near lite LOD uses bne_bld_facade")
++        self.assertEqual(mats_far, (bld.FAR_MAT,), "far horizon tiles use bne_bld_far (castShadows=false)")
+         self.assertTrue((M_lite == 0).all())
++        # Plain walls and roof triangles in lite mode are remapped to the solid plaster patch (v >= 0.99)
++        self.assertTrue((UV_lite[:, 1] >= 0.99).all(), "plain walls and roof avoid window-sheet bands in lite mode")
+ 
+ 
+ class MeshTest(unittest.TestCase):

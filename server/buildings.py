@@ -73,6 +73,7 @@ MARBLE = "bne_bld_marble"   # cut white marble (the stock m_marble_cut): Baltimo
 BRICK_WALL = "bne_bld_brick"    # plain red brick (the stock brick_plain): a garage's skin
 CONCRETE = "bne_bridge_concrete"  # plain concrete (tunnel.materials.json): a precast garage's skin
 GLASS = "bne_bld_glass"     # sash windows laid over plain walls (no shadow casting to avoid shadow acne)
+FAR_MAT = "bne_bld_far"     # distant horizon buildings (bldfar, 640-1600 m): single-primitive, castShadows=false
 MATERIALS = (FACADE, SHOP, OFFICE, ROOF_FLAT, ROOF_SLATE, ROOF_SHINGLE, SIDING, STUCCO, ROOF_METAL, PANEL, METALWALL,
              STONE, MARBLE, BRICK_WALL, CONCRETE, GLASS)
 LOOKS = {
@@ -1559,10 +1560,11 @@ def _build_one(m, spec, gmin, gmax, lite=False):
         _signs(m, spec, ring, z_top, mat_idx)
 
 
-def build(specs_and_ground, lite=False):
+def build(specs_and_ground, lite=False, far=False):
     """The tile's mesh from [(Spec, ground z min, ground z max)] with rings in the tile's local frame:
     (positions, uvs, tris, tri material indices, MATERIALS) or None if empty. lite (far tiles): no
-    cornices, whole walls instead of one quad per bay."""
+    cornices, whole walls instead of one quad per bay. far=True uses FAR_MAT (`bne_bld_far`,
+    castShadows=false) so horizon building tiles never cast shadows."""
     m = Mesh()
     for spec, gmin, gmax in specs_and_ground:
         _build_one(m, spec, gmin, gmax, lite)
@@ -1573,7 +1575,8 @@ def build(specs_and_ground, lite=False):
         # Collapse all coarse distant geometry into a single material primitive (`bne_bld_facade`)
         # so the engine submits 1 drawcall per tile for detail50 / bldfar instead of up to 16.
         M = np.zeros(len(T), dtype=np.int32)
-    return P, UV, T, M, (MATERIALS[:1] if lite else MATERIALS), C
+    mats = (FAR_MAT,) if (lite and far) else (MATERIALS[:1] if lite else MATERIALS)
+    return P, UV, T, M, mats, C
 
 
 def _steel_frame(m, spec, gmin, mat, lite=False, legs_only=False):
@@ -2628,7 +2631,7 @@ def far_tile(frame, tx, ty, md, ground, out_dir, vfs_dir, aid):
                            bridges_xy=bridge_lines(frame, [c.layers.get("roads") for c in cds], x0, y0),
                            water_xy=water_rings(frame, [c.layers.get("water") for c in cds], x0, y0),
                            ml_roads_xy=road_lines(frame, [c.layers.get("roads") for c in cds], x0, y0))
-    mesh = build(items, lite=True)
+    mesh = build(items, lite=True, far=True)
     data = {"v": 1}
     if mesh is not None:
         shape = f"bldfar_{aid}_{tx}_{ty}.cdae"

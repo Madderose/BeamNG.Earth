@@ -131,10 +131,15 @@ files['/t/wc.json'] = '{ chunks = { }, walk = { shape = "/t/walks_2_6_6.cdae", p
   'walkcol = { shape = "/t/walkcol_2_6_6.cdae", pos = { 0, 0, 0 } } }'
 roads.onTile({ anchorId = 2, key = '6_6', path = '/t/wc.json', n = 0 }, 2)
 roads.update(gov, 2)
-local kinds = {}
-for _, o in ipairs(statics()) do kinds[o.fields.shapeName] = o.fields.collisionType end
+local kinds, renderOff = {}, {}
+for _, o in ipairs(statics()) do
+  kinds[o.fields.shapeName] = o.fields.collisionType
+  renderOff[o.fields.shapeName] = (o.renderEnabled == false or o.fields.isRenderEnabled == 'false')
+end
 T.check(kinds['/t/walks_2_6_6.cdae'] == 'None' and kinds['/t/walkcol_2_6_6.cdae'] == 'Collision Mesh',
   'walkcol collides, the drawn sidewalks only render')
+T.check(renderOff['/t/walkcol_2_6_6.cdae'] == true and not renderOff['/t/walks_2_6_6.cdae'],
+  'collision-only walkcol mesh disables rendering so shadow cascades skip it')
 roads.onDrop({ anchorId = 2, key = '6_6' })
 roads.update(gov, 2)
 T.check(#statics() == 0, 'walkcol dropped with its tile')
@@ -296,6 +301,61 @@ do
   T.check(roads.radiusToward(p, -100, 50, 1400, east) == 1400, 'its own tile: the full reach')
   T.check(roads.radiusToward(p, -1500, 0, 1400, nil) == 1400, 'slow (no direction): all round')
   T.check(roads.collideRadius(100) == 1400 and roads.collideRadius(500) == roads.COLLIDE_M[2], 'reach: 14 s of driving, capped')
+end
+
+-- event-driven bldfar sync & deferred covered bldfar spawn
+do
+  roads.reset()
+  gov.allow, gov.tries = nil, 0
+  roads.onFarTile({ anchorId = 4, key = '0_0', shape = '/t/bf_0_0.cdae', pos = { 0, 0, 0 } }, 4)
+  roads.update(gov, 4)
+  local bf = statics()[1]
+  T.check(bf and not bf.hidden, 'uncovered bldfar spawned and visible')
+  files['/t/nb.json'] = '{ chunks = { }, bld = { shape = "/t/bld_4_0_0.cdae", pos = { 0, 0, 0 } }, ' ..
+    'bldcol = { shape = "/t/bldcol_4_0_0.cdae", pos = { 0, 0, 0 } } }'
+  roads.onTile({ anchorId = 4, key = '0_0', path = '/t/nb.json', n = 0 }, 4)
+  roads.update(gov, 4); roads.update(gov, 4)
+  T.check(bf.hidden == true, 'bldfar hidden immediately via syncFar when near bld spawns')
+  -- a covered bldfar arriving while near bld is already live is deferred (not spawned until near tile drops)
+  roads.onFarTile({ anchorId = 4, key = '0_0', shape = '/t/bf_0_0_v2.cdae', pos = { 0, 0, 0 } }, 4)
+  roads.update(gov, 4)
+  local hasV2 = false
+  for _, o in ipairs(statics()) do if o.fields.shapeName == '/t/bf_0_0_v2.cdae' then hasV2 = true end end
+  T.check(not hasV2, 'covered bldfar defers TSStatic creation while near bld is shown')
+  roads.onDrop({ anchorId = 4, key = '0_0' })
+  roads.update(gov, 4); roads.update(gov, 4); roads.update(gov, 4)
+  for _, o in ipairs(statics()) do if o.fields.shapeName == '/t/bf_0_0_v2.cdae' and not o.hidden then hasV2 = true end end
+  T.check(hasV2, 'deferred bldfar spawns and unhides once covering near tile drops')
+  roads.reset()
+end
+
+-- R6: M.NO_SHADOW applied once per level load and only reloads changed materials
+do
+  roads.reset()
+  local mCurbs = createObject('Material'); mCurbs:registerObject('curbs'); mCurbs:setField('castShadows', 0, '1')
+  local mLine = createObject('Material'); mLine:registerObject('line_white'); mLine:setField('castShadows', 0, '0')
+  S.calls.reload_Material = 0
+  S.calls.flush_Material = 0
+  S.calls.loadJsonMaterialsFile = 0
+  roads.onTile({ anchorId = 5, key = '0_0', path = '/t/a.json', n = 2 }, 5)
+  roads.update(gov, 5)
+  T.check(mCurbs:getField('castShadows', 0) == '0' and mLine:getField('castShadows', 0) == '0',
+    'NO_SHADOW sets castShadows=0 on stock road/sidewalk materials')
+  T.check(S.calls.reload_Material == 1 and S.calls.flush_Material == 1,
+    'NO_SHADOW only flushes/reloads materials whose castShadows changed')
+  local jsonLoads = S.calls.loadJsonMaterialsFile
+  -- Subsequent tiles in the same level load do not re-apply loadMaterials()
+  roads.onTile({ anchorId = 5, key = '1_0', path = '/t/b.json', n = 1 }, 5)
+  roads.update(gov, 5)
+  T.check(S.calls.loadJsonMaterialsFile == jsonLoads and S.calls.reload_Material == 1,
+    'NO_SHADOW applied once per level load, not per tile')
+  -- Even after a level reset, already-updated Material objects are not reloaded again
+  roads.reset()
+  roads.onTile({ anchorId = 6, key = '0_0', path = '/t/b.json', n = 1 }, 6)
+  roads.update(gov, 6)
+  T.check(S.calls.reload_Material == 1, 'idempotent across level reload when castShadows is already 0')
+  mCurbs:delete(); mLine:delete()
+  roads.reset()
 end
 
 T.done('test_roads')

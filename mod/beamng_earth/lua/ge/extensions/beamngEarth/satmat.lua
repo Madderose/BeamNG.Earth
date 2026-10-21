@@ -113,6 +113,7 @@ function M.create(name, texture, detail)
   local fallback = false
   if m then
     if texture then m:setField('colorMap', 0, texture) end
+    m:setField('castShadows', 0, '0')
   else
     m = createObject('Material')
     m:setField('mapTo', 0, name)

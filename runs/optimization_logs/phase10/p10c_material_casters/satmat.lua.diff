@@ -1,0 +1,12 @@
+diff --git a/mod/beamng_earth/lua/ge/extensions/beamngEarth/satmat.lua b/mod/beamng_earth/lua/ge/extensions/beamngEarth/satmat.lua
+index 1e23225..93d07d3 100644
+--- a/mod/beamng_earth/lua/ge/extensions/beamngEarth/satmat.lua
++++ b/mod/beamng_earth/lua/ge/extensions/beamngEarth/satmat.lua
+@@ -113,6 +113,7 @@ function M.create(name, texture, detail)
+   local fallback = false
+   if m then
+     if texture then m:setField('colorMap', 0, texture) end
++    m:setField('castShadows', 0, '0')
+   else
+     m = createObject('Material')
+     m:setField('mapTo', 0, name)

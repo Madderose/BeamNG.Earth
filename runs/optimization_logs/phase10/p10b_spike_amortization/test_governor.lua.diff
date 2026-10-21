@@ -1,0 +1,68 @@
+diff --git a/mod/tests/test_governor.lua b/mod/tests/test_governor.lua
+index 7573a4c..f9e5bb8 100644
+--- a/mod/tests/test_governor.lua
++++ b/mod/tests/test_governor.lua
+@@ -227,4 +227,63 @@ do
+   T.check(g.tokens >= -governor.ENGINE_MAX_DEBT_MS, "the debt is capped")
+   T.check(g:chargeEngine(1.5) == 0, 'a normal tick is free')
+ end
++
++------------------------------------------------------------------------------------------
++-- P10-B: closed-loop RenderShadows + FileWatchers debt, per-kind deferredEst EMA,
++-- scene-structure mutual exclusion + L-H-L calm frame spacing, burst-mode hysteresis, and maxFrameSpent cap
++do
++  local t = 0
++  local g = governor.new({ clock = function() return t end })
++  for _ = 1, 120 do t = t + 10; g:beginFrame(true, 10.0) end
++  -- 1. Learn shadowBase on idle frames
++  g.prevFrameUnits = 0
++  g:chargeEngine(0.3, 0.4, 0.0)
++  T.near(g.shadowBase, 0.4, 1e-6, 'shadowBase initialized on calm non-streaming frame')
++
++  -- 2. Run a cdae unit, then report a 9.4 ms RenderShadows spike on the next frame
++  T.check(g:try('cdae'), 'cdae allowed before spike')
++  g:charge('cdae', 2.2)
++  -- Co-scheduling different scene-structure kind in the same frame is blocked:
++  T.check(not g:try('treeBatch') and not g:try('reveal'), 'never co-schedule two scene-structure kinds in one frame')
++  -- Next frame: L-H-L cooldown after >= 1.8 ms structural spend + RenderShadows debt
++  t = t + 18
++  g:beginFrame(true, 18.0)
++  T.check(g.structCooldown == 1, 'L-H-L calm frame scheduled after heavy structural frame')
++  T.check(not g:try('cdae'), 'structural unit blocked on L-H-L calm frame')
++  local debt = g:chargeEngine(0.5, 9.4, 2.5)
++  T.check(debt > 7.0 and g.tokens < 0, 'RenderShadows 9.4 ms + FileWatchers 2.5 ms charged as engine debt (' .. debt .. ')')
++  T.check((g.deferredEst.cdae or 0) > 0.5, 'deferredEst.cdae learned from RenderShadows spike (' .. tostring(g.deferredEst.cdae) .. ')')
++  T.check(g:effectiveEst('cdae') > g.est.cdae, 'effectiveEst includes learned deferred cost')
++
++  -- 3. No starvation: budget recovers once calm frames pay off the debt and work completes within N frames
++  local completed = 0
++  local framesToComplete = 0
++  for f = 1, 120 do
++    t = t + 10
++    g:beginFrame(true, 10.0)
++    g:chargeEngine(0.3, 0.4, 0.0)
++    if g:try('cdae') then
++      g:charge('cdae', 2.0)
++      completed = completed + 1
++      if completed >= 10 then framesToComplete = f; break end
++    end
++  end
++  T.check(completed == 10 and framesToComplete <= 100, 'no starvation: 10 units complete after spike within ' .. framesToComplete .. ' frames')
++  T.check(g.stats.maxFrameSpent <= governor.LOADING_TARGET_MS + 1e-9,
++    'maxFrameSpent capped <= 8.0 ms (' .. g.stats.maxFrameSpent .. ')')
++
++  -- 4. Burst detector hysteresis
++  local gb = governor.new({ clock = function() return t end })
++  gb:noteQueue(2)
++  T.check(not gb.burst, 'calm queue: not in burst mode')
++  gb:noteQueue(12) -- growth rate +10 >= BURST_ENTER_RATE (8)
++  T.check(gb.burst, 'queue jump +10 enters burst mode')
++  T.check(gb:targetNow() <= governor.BURST_TARGET_MS, 'burst mode lowers target to BURST_TARGET_MS')
++  for i = 1, governor.BURST_HYST_FRAMES - 1 do
++    gb:noteQueue(4)
++    T.check(gb.burst, 'hysteresis holds burst mode on calm frame ' .. i)
++  end
++  gb:noteQueue(4)
++  T.check(not gb.burst, 'exits burst mode after BURST_HYST_FRAMES calm frames')
++end
+ T.done('test_governor')

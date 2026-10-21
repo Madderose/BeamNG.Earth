@@ -64,6 +64,12 @@ M.NO_COLLIDE = { shrub = true, desert_shrub = true, door = true, wallsign_logist
 -- (at least one shape), and bushes (half of all items, one shape alone 34k) show near the player only.
 M.SHAPE_ITEMS_PER_FRAME = 600
 M.MICRO_SHAPE_ITEMS = 600
+-- Cap of distinct Forest SceneObjects mutated per frame in governed mode: each mutated Forest marks its
+-- ForestCell quadtree dirty and rebuilds imposter/mesh vertex batches on the next RenderShadows pass.
+-- Batching all rows of 1-2 Forests per frame instead of touching 5-15 Forests avoids O(N_forests) batch rebuild spikes.
+M.MAX_FORESTS_PER_FRAME = 2
+M.SOLID_SHADOW_NULL_PX = 35
+M.NONSOLID_SHADOW_NULL_PX = 150
 -- The engine tells shapes apart by their path, so a tile's items use one of SHAPE_VARIANTS spellings of each shape's
 -- path ('dir/./name', 'dir/././name', ...: the same file, a shape of its own), which splits the big populations (one
 -- beech ~7.7k items: a frame touching it cost ~4-9 ms). A variant's first items cost one ~12 ms frame (its load).
@@ -195,9 +201,19 @@ local pop = {}          -- shape -> its items in the level
 local ready = false
 M.made, M.removed, M.errors = 0, 0, 0
 
-local pool = {}          -- ids of empty Forests to reuse
+local pool = {}          -- ids of empty Forests to reuse (kept hidden while pooled)
+local forestHidden = {}  -- forestId -> true while hidden in pool
 local forestCount = 0
 M.forests = 0
+
+local function setForestHidden(id, f, hidden)
+  local isHidden = (forestHidden[id] == true)
+  if isHidden == hidden then return end
+  forestHidden[id] = hidden or nil
+  if not f then f = scenetree.findObjectById(id) end
+  if not f then return end
+  if f.setHidden then f:setHidden(hidden) else f.hidden = hidden end
+end
 
 -- Pure: the n-th pool Forest's name.
 function M.forestName(n)
@@ -218,14 +234,19 @@ local function forest(t)
     if scenetree.MissionGroup then scenetree.MissionGroup:addObject(f) end
     M.forests = forestCount
   end
-  t.forestId = f:getID()
+  local id = f:getID()
+  setForestHidden(id, f, false)
+  t.forestId = id
   return f
 end
 
--- An emptied tile's Forest back to the pool.
+-- An emptied tile's Forest is hidden and returned to the pool.
 local function releaseForest(t)
-  if t.forestId then pool[#pool + 1] = t.forestId end
+  local id = t.forestId
+  if not id then return end
   t.forestId = nil
+  setForestHidden(id, nil, true)
+  pool[#pool + 1] = id
 end
 
 local function setup()
@@ -256,7 +277,8 @@ local function itemType(shape, solid)
     d:setField('shapeFile', 0, shape .. '.dae')
     d:setField('collidable', 0, solid and '1' or '0')
     d:setField('windScale', 0, '0.4'); d:setField('branchAmp', 0, '0.1'); d:setField('detailAmp', 0, '0.2')
-    d:setField('shadowNullDetailSize', 0, '35')
+    local shadowNullPx = solid and (M.SOLID_SHADOW_NULL_PX or 35) or (M.NONSOLID_SHADOW_NULL_PX or 150)
+    d:setField('shadowNullDetailSize', 0, tostring(shadowNullPx))
     d:registerObject(name)
     if Sim and Sim.getDataBlockSet then Sim.getDataBlockSet():addObject(d) end
   end
@@ -396,12 +418,56 @@ local scratchMat = nil
 local scratchEuler = nil
 local scratchPos = nil
 
--- This frame's shapes: may an item of this shape change now? (see SHAPE_ITEMS_PER_FRAME)
+-- This frame's shapes and distinct Forests: may an item of this shape/Forest change now?
 local touched, touchedItems, touchedCount = {}, 0, 0
+local touchedForests, touchedForestCount = {}, 0
 local function resetTouched()
   M.lastShapeItems = touchedItems        -- the previous frame's (diagnostics)
+  M.lastForestsTouched = 0
   for k in pairs(touched) do touched[k] = nil end
-  touchedItems, touchedCount = 0, 0
+  for k in pairs(touchedForests) do touchedForests[k] = nil end
+  touchedItems, touchedCount, touchedForestCount = 0, 0, 0
+end
+
+local function allowForest(t, maxForests, bypassCap)
+  if bypassCap then return true end
+  if touchedForests[t] or (t.forestId and touchedForests[t.forestId]) then return true end
+  if maxForests and touchedForestCount >= maxForests then return false end
+  return true
+end
+
+local function noteForestTouched(t)
+  if not touchedForests[t] and not (t.forestId and touchedForests[t.forestId]) then
+    touchedForestCount = touchedForestCount + 1
+    M.lastForestsTouched = touchedForestCount
+  end
+  touchedForests[t] = true
+  if t.forestId then touchedForests[t.forestId] = true end
+end
+
+local function tileForestData(t, fd)
+  if not fd then
+    local fObj = forest(t)
+    noteForestTouched(t)
+    fd = fObj:getData()
+  end
+  return fd
+end
+
+local shadowctl = nil
+local shadowctlResolved = false
+local function notifyShadowBurst()
+  local sc = shadowctl
+  if not sc then
+    sc = package.loaded['beamngEarth/shadowctl']
+    if not sc and not shadowctlResolved then
+      shadowctlResolved = true
+      local ok, mod = pcall(require, 'beamngEarth/shadowctl')
+      if ok and type(mod) == 'table' then sc = mod end
+    end
+    shadowctl = sc
+  end
+  if sc and sc.noteBurst then sc.noteBurst() end
 end
 
 local function allow(shape)
@@ -715,10 +781,10 @@ local function acquireDropEntry(idx, key, t, solid, isOrphan)
   return e
 end
 
-local function acquireOrderEntry(idx, key, dist, prio, want, band, near, demote, sortKey)
+local function acquireOrderEntry(idx, key, dist, prio, want, band, near, demote, sortKey, nearSolid)
   local e = orderPool[idx]
   if not e then e = {}; orderPool[idx] = e end
-  e[1], e[2], e[3], e[4], e[5], e[6], e[7], e[8] = key, dist, prio, want, band, near, demote, sortKey or dist
+  e[1], e[2], e[3], e[4], e[5], e[6], e[7], e[8], e[9] = key, dist, prio, want, band, near, demote, sortKey or dist, nearSolid or false
   return e
 end
 
@@ -745,9 +811,10 @@ end
 -- the camera and the car while its solidity (near) stays around the car.
 local frameN = 0
 function M.update(anchorId, player, view, gov)
-  if type(view) == 'table' and (view.try ~= nil or view.charge ~= nil or view.chargeEngine ~= nil or view.take ~= nil or view.tokens ~= nil or view.frame ~= nil) and gov == nil then
+  if type(view) == 'table' and (view.try ~= nil or view.charge ~= nil or view.chargeEngine ~= nil or view.take ~= nil or view.tokens ~= nil or view.frame ~= nil or view.burst ~= nil or view.urgent ~= nil) and gov == nil then
     gov, view = view, nil
   end
+  M.lastForestsTouched = 0
   if not next(tiles) and #orphanDrops == 0 then
     workPending = false
     return
@@ -755,7 +822,7 @@ function M.update(anchorId, player, view, gov)
   if not setup() then return end
 
   local governed = (gov ~= nil)
-  local budget, maxRows, maxDemoteRows, maxWallMs
+  local budget, maxRows, maxDemoteRows, maxWallMs, maxForests
   if governed then
     -- Yield on heavy frames, terrain commit quiet windows, or frames where roads/farfield already ran a unit
     if gov.blocked or gov.heavyPending or (gov.isHeavyFrame and gov:isHeavyFrame())
@@ -772,6 +839,7 @@ function M.update(anchorId, player, view, gov)
     maxRows = M.ROWS_PER_FRAME
     maxDemoteRows = M.MICRO_DEMOTE_ROWS_PER_FRAME
     maxWallMs = M.MAX_WALL_MS
+    maxForests = (gov.burst and not gov.urgent and 1) or M.MAX_FORESTS_PER_FRAME or 2
   else
     -- Offline unit test mode (mod/tests/test_trees.lua calls trees.update(aid, player) with gov == nil)
     frameN = frameN + 1
@@ -781,6 +849,7 @@ function M.update(anchorId, player, view, gov)
     maxRows = math.max(M.ROWS_PER_FRAME, M.LEGACY_ROWS_PER_FRAME)
     maxDemoteRows = 1e9
     maxWallMs = 1e9
+    maxForests = M.MAX_FORESTS_UNW or nil
   end
 
   local startBudget = budget
@@ -798,6 +867,9 @@ function M.update(anchorId, player, view, gov)
 
   local function finish()
     local nowMs = treeClock()
+    if touchedForestCount > 0 then
+      notifyShadowBurst()
+    end
     if solidAdded then
       collisionPending = true
       lastSolidAddAt = nowMs
@@ -863,36 +935,42 @@ function M.update(anchorId, player, view, gov)
       for i = nDrops + 1, #dropsScratch do dropsScratch[i] = nil end
       if nDrops == 0 then return end
       table.sort(dropsScratch, sortDrops)
-      local perTile = governed and math.max(math.ceil(limit / nDrops), 8) or math.max(math.ceil(limit / nDrops), 64)
+      -- Batch all rows of one dropped Forest together (up to `limit`) instead of slicing across all nDrops Forests
+      local perTile = governed and limit or math.max(math.ceil(limit / nDrops), 64)
       local progressed = false
       for idx = 1, nDrops do
         local d = dropsScratch[idx]
         local key, t = d.key, d.t
-        local f = t.forestId and scenetree.findObjectById(t.forestId)
-        local fd = f and f:getData()
-        local tileLimit = perTile
-        for i, it in pairs(t.made) do
-          if tileLimit <= 0 or limit <= 0 or budget <= 0 or overWallBudget() then
-            if overWallBudget() then budget = 0 end
-            break
-          end
-          local sh = t.madeShape[i]
-          if not sh or allow(sh) then
-            if fd then removeItem(fd, it, sh) end
-            t.made[i], t.solid[i], t.madeShape[i] = nil, nil, nil
-            tileLimit = tileLimit - 1
-            limit = limit - 1
-            budget = budget - 1
-            progressed = true
-          end
-        end
-        if next(t.made) == nil then
-          releaseForest(t)
-          if not d.isOrphan then
-            tiles[key] = nil
-          end
-        else
+        if not allowForest(t, maxForests, false) then
           hasMoreWork = true
+        else
+          local f = t.forestId and scenetree.findObjectById(t.forestId)
+          local fd = f and f:getData()
+          local tileLimit = perTile
+          for i, it in pairs(t.made) do
+            if tileLimit <= 0 or limit <= 0 or budget <= 0 or overWallBudget() then
+              if overWallBudget() then budget = 0 end
+              break
+            end
+            local sh = t.madeShape[i]
+            if not sh or allow(sh) then
+              noteForestTouched(t)
+              if fd then removeItem(fd, it, sh) end
+              t.made[i], t.solid[i], t.madeShape[i] = nil, nil, nil
+              tileLimit = tileLimit - 1
+              limit = limit - 1
+              budget = budget - 1
+              progressed = true
+            end
+          end
+          if next(t.made) == nil then
+            releaseForest(t)
+            if not d.isOrphan then
+              tiles[key] = nil
+            end
+          else
+            hasMoreWork = true
+          end
         end
         if limit <= 0 or budget <= 0 or overWallBudget() then
           hasMoreWork = true
@@ -936,55 +1014,44 @@ function M.update(anchorId, player, view, gov)
   local nOrder = 0
   local nearRing = M.RINGS[1] and M.RINGS[1][1] or 300
   for key, t in pairs(tiles) do
-    if t.anchor ~= anchorId or t.drop then goto continue end     -- still being emptied
-    local dCar = boxDist(player, t)
-    local dist = view and math.min(boxDist(view, t), dCar) or dCar
-    local want = tileThreshold(dist, t)
-    local band = groupBand(t, dist)
-    local near = dCar <= M.SOLID_M or (t.near and dCar <= M.SOLID_M + M.SOLID_HYST_M) or false
-    local demote = (t.near or next(t.solid) ~= nil) and not near
-    local shadowMaxM = (M.RINGS[1] and M.RINGS[1][1]) or 300
-    local shadow = dist <= shadowMaxM
-    if t.shadow ~= shadow and t.forestId then
-      local forestObj = scenetree.findObjectById(t.forestId)
-      if forestObj then
-        if dist > shadowMaxM then
-          forestObj:setField('isRenderShadowEnabled', 0, 'false')
-        else
-          forestObj:setField('isRenderShadowEnabled', 0, 'true')
-        end
-      end
-      t.shadow = shadow
-    end
-    if want ~= t.shown or band ~= t.band or near ~= t.near or demote or t.pending then
-      local prio = 3
-      local sortKey = dist
-      if demote then
-        prio = 0
-      elseif dist <= nearRing then
-        prio = 1
-        if hasHeading then
+    if t.anchor == anchorId and not t.drop then     -- not still being emptied
+      local dCar = boxDist(player, t)
+      local dist = view and math.min(boxDist(view, t), dCar) or dCar
+      local want = tileThreshold(dist, t)
+      local band = groupBand(t, dist)
+      local nearSolid = dCar <= M.SOLID_M
+      local near = nearSolid or (t.near and dCar <= M.SOLID_M + M.SOLID_HYST_M) or false
+      local demote = (t.near or next(t.solid) ~= nil) and not near
+      -- Note: Forest has no C++ isRenderShadowEnabled field (shadow culling is handled by TSForestItemData.shadowNullDetailSize)
+      if want ~= t.shown or band ~= t.band or near ~= t.near or demote or t.pending then
+        local prio = 3
+        local sortKey = dist
+        if demote then
+          prio = 0
+        elseif dist <= nearRing then
+          prio = 1
+          if hasHeading then
+            local rx, ry = t.cx - player.x, t.cy - player.y
+            local sPar = rx * ux + ry * uy
+            local dPerp = math.abs(rx * uy - ry * ux)
+            if sPar >= -60 and sPar <= corridorLen and dPerp <= 160 then
+              sortKey = dPerp * 0.5 + math.max(0, sPar) * 0.25
+            else
+              sortKey = dist + 200
+            end
+          end
+        elseif want < (t.shown or 0) or (t.band and band < t.band) or t.thinning then
+          prio = 2
+        elseif hasHeading then
           local rx, ry = t.cx - player.x, t.cy - player.y
-          local sPar = rx * ux + ry * uy
-          local dPerp = math.abs(rx * uy - ry * ux)
-          if sPar >= -60 and sPar <= corridorLen and dPerp <= 160 then
-            sortKey = dPerp * 0.5 + math.max(0, sPar) * 0.25
-          else
-            sortKey = dist + 200
+          if (rx * ux + ry * uy) < -60 then
+            prio = 4
           end
         end
-      elseif want < (t.shown or 0) or (t.band and band < t.band) or t.thinning then
-        prio = 2
-      elseif hasHeading then
-        local rx, ry = t.cx - player.x, t.cy - player.y
-        if (rx * ux + ry * uy) < -60 then
-          prio = 4
-        end
+        nOrder = nOrder + 1
+        orderScratch[nOrder] = acquireOrderEntry(nOrder, key, dist, prio, want, band, near, demote, sortKey, nearSolid)
       end
-      nOrder = nOrder + 1
-      orderScratch[nOrder] = acquireOrderEntry(nOrder, key, dist, prio, want, band, near, demote, sortKey)
     end
-    ::continue::
   end
   for i = nOrder + 1, #orderScratch do orderScratch[i] = nil end
   if nOrder > 1 then
@@ -994,99 +1061,92 @@ function M.update(anchorId, player, view, gov)
   for idx = 1, nOrder do
     local o = orderScratch[idx]
     local t = tiles[o[1]]
-    local dist, want, band, near, demote = o[2], o[4], o[5], o[6], o[7]
+    local dist, want, band, near, demote, nearSolid = o[2], o[4], o[5], o[6], o[7], o[9]
     if t and (want ~= t.shown or band ~= t.band or near ~= t.near or demote or t.pending) then
       local rowLimit = demote and maxDemoteRows or maxRows
       if rowsScanned > rowLimit or budget <= 0 or overWallBudget() then
         hasMoreWork = true
         break
       end
-      local sameTarget = (want == t.shown and band == t.band and near == t.near)
-      local wasThinning = want < (t.shown or 0) or (t.band and band < t.band) or (sameTarget and t.thinning)
-      local startRow = (sameTarget and t.pending and t.nextRow) or 1
-      local nextPending = nil
-      t.pending = false
-      local fd = nil                          -- the tile's Forest data, made when it first needs an item
-      local function data() fd = fd or forest(t):getData(); return fd end
-      local bin = t.bin
-      local nTileRows = bin and math.floor(#bin / VBIN_STRIDE) or (t.rows and #t.rows or 0)
-      for i = startRow, nTileRows do
-        if governed and (rowsScanned >= rowLimit or (rowsScanned % 32 == 0 and overWallBudget())) then
-          if not nextPending then nextPending = i end
+      if not allowForest(t, maxForests, nearSolid) then
+        hasMoreWork = true
+      else
+        local sameTarget = (want == t.shown and band == t.band and near == t.near)
+        local wasThinning = want < (t.shown or 0) or (t.band and band < t.band) or (sameTarget and t.thinning)
+        local startRow = (sameTarget and t.pending and t.nextRow) or 1
+        local nextPending = nil
+        t.pending = false
+        local fd = nil                          -- the tile's Forest data, made when it first needs an item
+        local bin = t.bin
+        local nTileRows = bin and math.floor(#bin / VBIN_STRIDE) or (t.rows and #t.rows or 0)
+        for i = startRow, nTileRows do
+          if governed and (rowsScanned >= rowLimit or (rowsScanned % 32 == 0 and overWallBudget())) then
+            if not nextPending then nextPending = i end
+            t.pending = true
+            if overWallBudget() then budget = 0 end
+            break
+          end
+          rowsScanned = rowsScanned + 1
+          local row = bin and decodeBinRow(bin, i) or t.rows[i]
+          local r = row[8] or 0
+          local g = (t.groups or GROUPS)[(row[1] or 0) + 1]
+          local cap = g and M.GROUP_MAX_M[g]
+          if cap and dist > cap then r = 2 end     -- this group is not shown this far out
+          -- an item something else stands in for (navgraph.lua's switchable signal heads)
+          if g and M.suppress and M.suppress(g, row[2], row[3]) then r = 2 end
+          local solid = near and not M.NO_COLLIDE[g or '']
+          if r < want and (not t.made[i] or (t.solid[i] == true) ~= solid) then
+            local sh, sc = shapeOf(t, i, row)
+            if budget <= 0 or overWallBudget() then
+              if not nextPending then nextPending = i end
+              t.pending = true
+              budget = 0
+              break
+            end
+            if allow(sh) and (not t.made[i] or allow(t.madeShape[i] or sh)) then
+              fd = tileForestData(t, fd)
+              if t.made[i] then removeItem(fd, t.made[i], t.madeShape[i]) end  -- solid <-> not
+              t.made[i] = makeItem(fd, row, sh, sc, solid)
+              t.solid[i] = (t.made[i] and solid) or nil      -- true or nil
+              t.madeShape[i] = t.made[i] and sh or nil
+              if solid and t.made[i] then solidAdded = true end
+              budget = budget - 1
+            else
+              if not nextPending then nextPending = i end
+              t.pending = true                               -- another frame (this one's shapes are full)
+            end
+          elseif r >= want and t.made[i] then
+            if budget <= 0 or overWallBudget() then
+              if not nextPending then nextPending = i end
+              t.pending = true
+              budget = 0
+              break
+            end
+            if allow(t.madeShape[i] or '') then
+              fd = tileForestData(t, fd)
+              removeItem(fd, t.made[i], t.madeShape[i])
+              t.made[i], t.solid[i], t.madeShape[i] = nil, nil, nil
+              budget = budget - 1
+            else
+              if not nextPending then nextPending = i end
+              t.pending = true
+            end
+          end
+        end
+        if not near and next(t.solid) ~= nil and not t.pending then
           t.pending = true
-          if overWallBudget() then budget = 0 end
-          break
+          nextPending = 1
         end
-        rowsScanned = rowsScanned + 1
-        local row = bin and decodeBinRow(bin, i) or t.rows[i]
-        local r = row[8] or 0
-        local g = (t.groups or GROUPS)[(row[1] or 0) + 1]
-        local cap = g and M.GROUP_MAX_M[g]
-        if cap and dist > cap then r = 2 end     -- this group is not shown this far out
-        -- an item something else stands in for (navgraph.lua's switchable signal heads)
-        if g and M.suppress and M.suppress(g, row[2], row[3]) then r = 2 end
-        local solid = near and not M.NO_COLLIDE[g or '']
-        if r < want and (not t.made[i] or (t.solid[i] == true) ~= solid) then
-          local sh, sc = shapeOf(t, i, row)
-          if budget <= 0 or overWallBudget() then
-            if not nextPending then nextPending = i end
-            t.pending = true
-            budget = 0
-            break
-          end
-          if allow(sh) and (not t.made[i] or allow(t.madeShape[i] or sh)) then
-            if t.made[i] then removeItem(data(), t.made[i], t.madeShape[i]) end  -- solid <-> not
-            t.made[i] = makeItem(data(), row, sh, sc, solid)
-            t.solid[i] = (t.made[i] and solid) or nil      -- true or nil
-            t.madeShape[i] = t.made[i] and sh or nil
-            if solid and t.made[i] then solidAdded = true end
-            budget = budget - 1
-          else
-            if not nextPending then nextPending = i end
-            t.pending = true                               -- another frame (this one's shapes are full)
-          end
-        elseif r >= want and t.made[i] then
-          if budget <= 0 or overWallBudget() then
-            if not nextPending then nextPending = i end
-            t.pending = true
-            budget = 0
-            break
-          end
-          if allow(t.madeShape[i] or '') then
-            removeItem(data(), t.made[i], t.madeShape[i])
-            t.made[i], t.solid[i], t.madeShape[i] = nil, nil, nil
-            budget = budget - 1
-          else
-            if not nextPending then nextPending = i end
-            t.pending = true
-          end
+        if t.pending then hasMoreWork = true end
+        if next(t.made) == nil then
+          releaseForest(t)
         end
+        t.nextRow = t.pending and nextPending or nil
+        t.thinning = (t.pending and wasThinning) or nil
+        t.shown = want
+        t.band = band
+        t.near = near
       end
-      if not near and next(t.solid) ~= nil and not t.pending then
-        t.pending = true
-        nextPending = 1
-      end
-      if t.pending then hasMoreWork = true end
-      if next(t.made) == nil then
-        releaseForest(t)
-      elseif t.forestId then
-        local forestObj = scenetree.findObjectById(t.forestId)
-        if forestObj then
-          local shadowMaxM = (M.RINGS[1] and M.RINGS[1][1]) or 300
-          if dist > shadowMaxM then
-            forestObj:setField('isRenderShadowEnabled', 0, 'false')
-            t.shadow = false
-          else
-            forestObj:setField('isRenderShadowEnabled', 0, 'true')
-            t.shadow = true
-          end
-        end
-      end
-      t.nextRow = t.pending and nextPending or nil
-      t.thinning = (t.pending and wasThinning) or nil
-      t.shown = want
-      t.band = band
-      t.near = near
     end
   end
   if budget > 0 and not overWallBudget() then drainDrops(budget) end
@@ -1117,6 +1177,7 @@ function M.clear()
   end
   tiles = {}
   pop = {}
+  frameN = 0
   workPending = false
   collisionPending, firstSolidAddAt = false, nil
   if hadSolid then
@@ -1127,8 +1188,9 @@ end
 
 -- Level end: the level deletes its objects itself.
 function M.reset()
-  tiles, types, ready, pool, forestCount, pop = {}, {}, false, {}, 0, {}
+  tiles, types, ready, pool, forestHidden, forestCount, pop = {}, {}, false, {}, {}, 0, {}
   orphanDrops = {}
+  frameN = 0
   workPending = false
   collisionPending, firstSolidAddAt = false, nil
 end

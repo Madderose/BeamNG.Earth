@@ -801,3 +801,99 @@ All requested test suites (plus `test_farfield.py`) passed with zero failures:
 - `python tools/parallel_tests.py -j 12`: **281 tests passed in 29.18s** (100% PASS, 0 failures).
 - Mod synced to BeamNG user directory: `mods/unpacked/beamng_earth` via `install.py --no-venv --yes`.
 - Harmonization branch: `perf/phase9-harmonization-1.5.4`.
+
+---
+
+## Phase 10: RenderShadows Streaming-Burst Stutter — Proposal Round
+
+**Orchestrator**: Antigravity (Claude Opus 5.5 High)  
+**Execution Sub-Agents**: 4 parallel AGY Argon 4 Medium (`gemini-4-argon-medium`, effort=medium) via `tools/orchestrate_phase10.py`  
+**Mode**: PROPOSAL ONLY: workers write `proposal.md` + `.diff` patches to `runs/optimization_logs/phase10/<task>/`; no source edits until the orchestrator review and user approval.  
+**Shared briefing**: [`scratch/phase10_shared_briefing.md`](scratch/phase10_shared_briefing.md)  
+**Trigger**: `PerfCapture_2026-10-21_12-04-03.bngperfgraph.json`: RenderShadows median 0.41 ms but p99 9.1 / max 17.0 ms; primary culprit in 64/88 spike frames; spikes coincide with server file bursts (107 files at 12:03:56-57, 51 at 12:03:59-04:00) together with Lua 6-10 ms and FileWatchers 5-9 ms.  
+**Live engine findings (12:11 MCP probes)**: `isRenderShadowEnabled` / `castShadows` are NOT fields on `Forest`/`TSStatic` (all per-object shadow toggles in trees/farfield/roads are no-ops); `TSForestItemData.shadowNullDetailSize` is real (=35); 149 Forest objects (23 empty but visible), ~800 visible TSStatics.
+
+| Task ID | Component / Area | Files Allocated | Sub-Agent Model | Goal | Execution Status |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| **TASK-P10-A** | **Engine Shadow API Discovery & Dead-Toggle Replacement** | new `shadowctl.lua`, no-op lines in `trees.lua`/`farfield.lua`/`roads.lua`, PSSM block in `core.lua` | `gemini-4-argon-medium` | Live-probe (read-only + reversible global A/B) every real shadow knob; replace no-op toggles with effective mechanisms. | **COMPLETED (exit 0, 21 min, proposal=yes, 6 diffs)** |
+| **TASK-P10-B** | **Streaming-Burst Spike Amortization** | `governor.lua`, `core.lua` update order, `trees.lua` mutation loop, `farfield.lua` import/reveal pacing | `gemini-4-argon-medium` | Lag analysis of spikes; closed-loop engine-debt feedback, distinct-Forest-per-frame cap, burst mode, no co-scheduled structural work. | **COMPLETED (exit 0, 11 min, proposal=yes, 7 diffs)** |
+| **TASK-P10-C** | **Material & Server-Mesh Caster Reduction** | `*.materials.json`, `satmat.lua`, `roads.lua` material choice, `server/buildings.py`, `cdae.py`, `roadmesh.py`, `furniture.py`, `sidewalks.py` | `gemini-4-argon-medium` | Material castShadows inventory and fixes; single-primitive building low LOD / shadow-friendly detail level. | **COMPLETED (exit 0, 17 min, proposal=yes, 6 diffs)** |
+| **TASK-P10-D** | **Scene-Graph Object Count & Forest Consolidation** | `trees.lua` forest pool, `farfield.lua` spares, `roads.lua` far/bldfar mgmt | `gemini-4-argon-medium` | Hide empty pooled Forests, hybrid super-tile Forests, TSStatic count caps, event-driven updateFar. | **COMPLETED (exit 0, 22 min, proposal=yes, 6 diffs)** |
+| **TASK-P10-REVIEW** | **Orchestrator Consolidation** | all proposals | Orchestrator | Cross-check proposals, resolve overlaps, rank, produce consolidated proposal for user approval. | **COMPLETED — awaiting user approval (Wave 1)** |
+
+> `[2026-10-21 12:17:07]` **TASK-P10-A**: RUNNING (PID 21212)
+> `[2026-10-21 12:17:07]` **TASK-P10-B**: RUNNING (PID 53848)
+> `[2026-10-21 12:17:07]` **TASK-P10-C**: RUNNING (PID 3912)
+> `[2026-10-21 12:17:07]` **TASK-P10-D**: RUNNING (PID 26668)
+> `[12:22:07]` Heartbeat:
+>   * **TASK-P10-A**: Exporting VariableRegistry and inspecting ShadowMapManager, LightShadowMap, RenderViewMana
+>   * **TASK-P10-B**: Preparing modified file copies and generating diffs and unit tests (75%)
+>   * **TASK-P10-C**: running (0 log lines)
+>   * **TASK-P10-D**: Analyzing scene-graph count model and evaluating Forest & TSStatic consolidation patches (
+> `[12:27:07]` Heartbeat:
+>   * **TASK-P10-A**: Investigating cause of 18-20ms RenderShadows spikes observed during A/B probe (70%)
+>   * **TASK-P10-B**: Generating git diff patches and writing proposal.md (92%)
+>   * **TASK-P10-C**: running (0 log lines)
+>   * **TASK-P10-D**: Applying patches to work/trees.lua, work/farfield.lua, and work
+
+> `[2026-10-21 12:28:27]` **TASK-P10-B**: COMPLETED (exit 0, 11 min, proposal=yes, 7 diffs)
+> `[12:32:07]` Heartbeat:
+>   * **TASK-P10-A**: Waiting for steady-state A/B probe (`ab_probe_steady.py`) to complete (~25s remaining) (78
+>   * **TASK-P10-C**: running (0 log lines)
+>   * **TASK-P10-D**: Generating and verifying diffs via git apply --check (85%)
+
+> `[2026-10-21 12:34:17]` **TASK-P10-C**: COMPLETED (exit 0, 17 min, proposal=yes, 6 diffs)
+> `[12:37:07]` Heartbeat:
+>   * **TASK-P10-A**: Writing comprehensive proposal.md with live engine measurement tables and ranked proposals
+>   * **TASK-P10-D**: 
+
+> `[2026-10-21 12:37:37]` **TASK-P10-A**: COMPLETED (exit 0, 21 min, proposal=yes, 6 diffs)
+> `[2026-10-21 12:38:57]` **TASK-P10-D**: COMPLETED (exit 0, 22 min, proposal=yes, 6 diffs)
+> `[2026-10-21 12:38:57]` All Phase 10 workers finished. Orchestrator consolidation pending.
+> `[2026-10-21 12:43:00]` **TASK-P10-REVIEW**: COMPLETED. Integrity check: 0/274 source files changed by workers (`baseline_hashes.csv`). Combined apply in throwaway worktree (order C→A→D→B): 24/25 diffs apply; only `p10b/trees.lua.diff` conflicts with A's dead-toggle hunks (rebase needed). `server.tests.test_buildings` 56/56 pass; all materials JSON valid. Lua tests NOT run (no `vendor/luajit/luajit.exe`).
+
+### Phase 10 Review Outcome
+
+- **Wave 1 (proposed)**: C materials/`bne_bld_far`/`roads.lua NO_SHADOW` · A dead-toggle removal + slim `shadowctl.lua` (burst-gated `sdsmMaxDistanceScale` 0.45→0.15, ramped, setting-gated) · D2 hide pooled empty Forests · D3 collider `setRenderEnabled(false)` + event-driven updateFar · B governor with fixes · per-type `shadowNullDetailSize` (solid 35 / non-solid 150).
+- **Blocking review fixes**: R1 urgent must override burst in `Gov:targetNow()` and be exempt from structural exclusion · R2 drop `sweepEmptyForests`/`syncTreeDatablocks` hot-path scans · R3 shadow profile gated on structural work/`gov.burst`, hold ≥1 s, ramp ≥0.5 s · R4 materials over runtime `skin` remap · R5 rebase B trees hunks on A · R6 verify stock-material castShadows changes · R7 install luajit.
+- **Wave 2 (after measurement)**: D1 super-tile Forests · BLD_LOD_PX 2700→3600 + lite remap · spare parking 64→16 · `sdsmFitEnabled` in bursts · bldfar radius 1600→1200 m · server write pacing in `staging.py` (FileWatchers spikes).
+- **Pass criteria**: RenderShadows p99 < 3 ms · no burst frame > 16.7 ms · `maxFrameSpent` ≤ 8 ms · exactMiss/underLevel unchanged at 90 mph · no visible shadow pumping.
+
+---
+
+## Phase 10 Wave 1: Implementation (user-approved 2026-10-21 12:54)
+
+**Branch**: `perf/phase10-shadows` (from `7b38604`) · **Orchestrator**: Antigravity · **Workers**: 4× AGY Argon 4 Medium via `python tools/orchestrate_phase10.py --wave 1`  
+**Mode**: in-place edits with strict disjoint file ownership; contract in [`scratch/phase10w1_shared_briefing.md`](scratch/phase10w1_shared_briefing.md). Performance capture while driving: **done by the user**.  
+**Setup (orchestrator)**: 24/25 worker diffs applied (B `trees.lua` skipped → W3 rebases); LuaJIT 2.1 installed (winget) and vendored to `vendor/luajit/` (locally git-excluded). Pre-applied state backup: `scratch/p10w1_applied_state.patch`.  
+**Baseline at HEAD (first time Lua suites ran here)**: 15 pre-existing Lua failures in 8 suites (`scratch/p10w1_baseline_lua_failures.txt`); `test_sky` only fails under `parallel_tests.py` (cwd = repo root, suite expects `mod/tests`). After applying diffs: +10 new failures (governor, roads, farfield_spares, shadowctl, trees crash) → assigned to owners.  
+**Wave-2 items found inside applied diffs (to strip)**: D1 super-tile Forests (trees.lua), D4 spare parking 64→16 (farfield.lua), C `BLD_LOD_PX` 3600 + lite UV/albedo remap (buildings.py).
+
+| Task ID | Component / Area | Files Allocated | Sub-Agent Model | Goal | Execution Status |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| **TASK-P10W1-GOV** | **Governor** | `governor.lua`, `test_governor.lua` | `gemini-4-argon-medium` | R1: urgent > burst; urgent exempt from structural exclusion; transient burst (max duration + refractory); cached maxUnit, zero-alloc median. | **COMPLETED (exit 0, 11 min, report.md=yes, 0 diffs)** |
+| **TASK-P10W1-SHADOW** | **shadowctl + core call site** | `shadowctl.lua`, `test_shadowctl.lua`, `core.lua` (onPreRender call site only), `settings.lua` | `gemini-4-argon-medium` | R2/R4: drop scans, clones, skin remap; R3: trigger on structural work only, fast attack, hold ≥1 s, release ≥0.5 s; setting gate. | **COMPLETED (exit 0, 6 min, report.md=yes, 0 diffs)** |
+| **TASK-P10W1-TREES** | **trees.lua** | `trees.lua`, `test_trees.lua` | `gemini-4-argon-medium` | Strip D1 super-tiles, keep pooled hide; rebase B Forest cap (urgent/near-solid bypass); shadowNullDetailSize 35/150; single noteBurst per frame. | **COMPLETED (exit 0, 9 min, report.md=yes, 0 diffs)** |
+| **TASK-P10W1-ROADS** | **roads/farfield/materials/server** | `roads.lua`, `farfield.lua`, `satmat.lua`, `*.materials.json`, `server/buildings.py`, tests | `gemini-4-argon-medium` | Strip D4 + BLD_LOD/lite remap; R6 idempotent NO_SHADOW; far-tile cache bump; fix new test failures; urgent overrides burst reveal cap. | **COMPLETED (exit 0, 13 min, report.md=yes, 0 diffs)** |
+| **TASK-P10W1-INTEG** | **Integration** | all | Orchestrator | Full `parallel_tests.py -j 12 --lua`, diff review, commit, install for user drive test. | **COMPLETED (0 regressions, 321/327 passed)** |
+
+> `[2026-10-21 13:02:02]` **TASK-P10W1-GOV**: RUNNING (PID 788)
+> `[2026-10-21 13:02:02]` **TASK-P10W1-SHADOW**: RUNNING (PID 14156)
+> `[2026-10-21 13:02:02]` **TASK-P10W1-TREES**: RUNNING (PID 9300)
+> `[2026-10-21 13:02:02]` **TASK-P10W1-ROADS**: RUNNING (PID 1756)
+> `[13:07:02]` Heartbeat:
+>   * **TASK-P10W1-GOV**: Checking server/tests/modsim.py compatibility with governor.lua (45%)
+>   * **TASK-P10W1-SHADOW**: Verifying tests and git diff on owned files, then writing report.md (85%)
+>   * **TASK-P10W1-TREES**: Applying Wave 1 changes to trees.lua (removing super-tiles, adding Forest cap, per-type sh
+>   * **TASK-P10W1-ROADS**: Checking server codebase for bldfar mesh disk              
+
+> `[2026-10-21 13:07:52]` **TASK-P10W1-SHADOW**: COMPLETED (exit 0, 6 min, report.md=yes, 0 diffs)
+> `[2026-10-21 13:11:02]` **TASK-P10W1-TREES**: COMPLETED (exit 0, 9 min, report.md=yes, 0 diffs)
+> `[13:12:02]` Heartbeat:
+>   * **TASK-P10W1-GOV**: Writing Wave 1 report to runs/optimization_logs/phase10/wave1/w1_governor/
+>   * **TASK-P10W1-ROADS**: Updating farfield.lua, roads.lua, and server/buildings.py (50%)
+
+> `[2026-10-21 13:12:42]` **TASK-P10W1-GOV**: COMPLETED (exit 0, 11 min, report.md=yes, 0 diffs)
+> `[2026-10-21 13:14:42]` **TASK-P10W1-ROADS**: COMPLETED (exit 0, 13 min, report.md=yes, 0 diffs)
+> `[2026-10-21 13:14:42]` All Phase 10 workers finished.
+> `[2026-10-21 13:16:30]` **TASK-P10W1-INTEG**: COMPLETED. Full test runner: 327 tests (281 Python + 46 LuaJIT) in 32.7s: 321 passed, 6 failed (all 6 are pre-existing at HEAD 7b38604; 0 regressions, +2 suites fixed: test_roads and test_sky). Ready for user live driving capture.

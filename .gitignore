@@ -53,3 +53,4 @@ runs/optimization_logs/phase6_verification_report.md
 runs/optimization_logs/phase7_hiccup_investigation_report.md
 runs/optimization_logs/rubberband_investigation_report.md
 runs/optimization_logs/upstream_1.5.2_diff_exploration.md
+perf_reports/*.json

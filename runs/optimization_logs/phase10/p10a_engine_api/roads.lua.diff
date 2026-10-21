@@ -1,0 +1,14 @@
+diff --git a/mod/beamng_earth/lua/ge/extensions/beamngEarth/roads.lua b/mod/beamng_earth/lua/ge/extensions/beamngEarth/roads.lua
+index 97b865d..c00178d 100644
+--- a/mod/beamng_earth/lua/ge/extensions/beamngEarth/roads.lua
++++ b/mod/beamng_earth/lua/ge/extensions/beamngEarth/roads.lua
+@@ -379,8 +379,7 @@ local function createWalk(walk, collide, shadow)
+     castShadow = colType == 'Visible Mesh Final'
+   end
+   if not castShadow then
+-    o:setField('isRenderShadowEnabled', 0, 'false')
+-    o:setField('castShadows', 0, '0')
++    require('beamngEarth/shadowctl').excludeObject(o, 'road_static')
+   end
+   o.canSave = false
+   o:setPosition(vec3(walk.pos[1], walk.pos[2], walk.pos[3]))

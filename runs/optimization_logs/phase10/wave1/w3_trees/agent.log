@@ -1,0 +1,22 @@
+STATUS_UPDATE: Inspecting current diffs in trees.lua and test_trees.lua against HEAD (15%)
+STATUS_UPDATE: Running test_trees.lua before edits to observe current failures and crash (25%)
+STATUS_UPDATE: Applying Wave 1 changes to trees.lua (removing super-tiles, adding Forest cap, per-type shadowNullDetailSize, and shadowctl.noteBurst) (50%)
+STATUS_UPDATE: Updating test_trees.lua and running LuaJIT test suite (75%)
+STATUS_UPDATE: Verifying git diff of owned files and writing report.md (90%)
+Completed **TASK-P10W1-TREES** across [trees.lua](file:///C:/Users/hoppj/SynologyDrive/01_Projets/Projet_BeamEarth/BeamNG.Earth/mod/beamng_earth/lua/ge/extensions/beamngEarth/trees.lua) and [test_trees.lua](file:///C:/Users/hoppj/SynologyDrive/01_Projets/Projet_BeamEarth/BeamNG.Earth/mod/tests/test_trees.lua), and wrote the report to [report.md](file:///C:/Users/hoppj/SynologyDrive/01_Projets/Projet_BeamEarth/BeamNG.Earth/runs/optimization_logs/phase10/wave1/w3_trees/report.md).
+
+### Summary of Changes
+1. **Removed Wave 2 Super-Tile Consolidation & Kept Pooled-Forest Hiding**:
+   - Removed `superForests`, `forestUsers`, `M.SUPER_TILE`, `M.superKey`, `skey`, and `movedForestsScratch`, restoring per-tile `Forest` ownership in [`forest`](file:///C:/Users/hoppj/SynologyDrive/01_Projets/Projet_BeamEarth/BeamNG.Earth/mod/beamng_earth/lua/ge/extensions/beamngEarth/trees.lua#L223-L241), [`releaseForest`](file:///C:/Users/hoppj/SynologyDrive/01_Projets/Projet_BeamEarth/BeamNG.Earth/mod/beamng_earth/lua/ge/extensions/beamngEarth/trees.lua#L244-L250), [`M.onBin`](file:///C:/Users/hoppj/SynologyDrive/01_Projets/Projet_BeamEarth/BeamNG.Earth/mod/beamng_earth/lua/ge/extensions/beamngEarth/trees.lua#L510-L559), [`M.onRows`](file:///C:/Users/hoppj/SynologyDrive/01_Projets/Projet_BeamEarth/BeamNG.Earth/mod/beamng_earth/lua/ge/extensions/beamngEarth/trees.lua#L588-L614), and [`M.transform`](file:///C:/Users/hoppj/SynologyDrive/01_Projets/Projet_BeamEarth/BeamNG.Earth/mod/beamng_earth/lua/ge/extensions/beamngEarth/trees.lua#L695-L716).
+   - Tracked pooled `Forest` visibility state in `forestHidden` via [`setForestHidden`](file:///C:/Users/hoppj/SynologyDrive/01_Projets/Projet_BeamEarth/BeamNG.Earth/mod/beamng_earth/lua/ge/extensions/beamngEarth/trees.lua#L209-L216) so `setHidden` is called only when state actually changes (`false -> true` on `releaseForest`, `true -> false` when reused in `forest()`).
+2. **Rebased P10-B Distinct-Forest Cap (`M.MAX_FORESTS_PER_FRAME = 2`)**:
+   - Added [`resetTouched`](file:///C:/Users/hoppj/SynologyDrive/01_Projets/Projet_BeamEarth/BeamNG.Earth/mod/beamng_earth/lua/ge/extensions/beamngEarth/trees.lua#L424-L430), [`allowForest`](file:///C:/Users/hoppj/SynologyDrive/01_Projets/Projet_BeamEarth/BeamNG.Earth/mod/beamng_earth/lua/ge/extensions/beamngEarth/trees.lua#L432-L437), [`noteForestTouched`](file:///C:/Users/hoppj/SynologyDrive/01_Projets/Projet_BeamEarth/BeamNG.Earth/mod/beamng_earth/lua/ge/extensions/beamngEarth/trees.lua#L439-L446), and hoisted [`tileForestData`](file:///C:/Users/hoppj/SynologyDrive/01_Projets/Projet_BeamEarth/BeamNG.Earth/mod/beamng_earth/lua/ge/extensions/beamngEarth/trees.lua#L448-L455) (zero per-tile closure allocation).
+   - Configured `maxForests = (gov.burst and not gov.urgent and 1) or M.MAX_FORESTS_PER_FRAME or 2`, bypassed the cap for near-solid tiles (`dCar <= M.SOLID_M`), batched dropped `Forest` removals in `drainDrops`, and replaced `goto` statements with `if/else`.
+3. **Per-Type `shadowNullDetailSize` (R2)**:
+   - Set `M.SOLID_SHADOW_NULL_PX = 35` for solid datablocks and `M.NONSOLID_SHADOW_NULL_PX = 150` for non-solid (`_n`) datablocks in [`itemType`](file:///C:/Users/hoppj/SynologyDrive/01_Projets/Projet_BeamEarth/BeamNG.Earth/mod/beamng_earth/lua/ge/extensions/beamngEarth/trees.lua#L265-L285).
+4. **Shadow Burst Notification**:
+   - Replaced the per-tile `require('beamngEarth/shadowctl').onForestTileUpdated(...)` call with lazy-cached [`notifyShadowBurst`](file:///C:/Users/hoppj/SynologyDrive/01_Projets/Projet_BeamEarth/BeamNG.Earth/mod/beamng_earth/lua/ge/extensions/beamngEarth/trees.lua#L457-L469) (`shadowctl.noteBurst()`), invoked at most once per `M.update()` in `finish()` when `touchedForestCount > 0`.
+5. **Tests ([test_trees.lua](file:///C:/Users/hoppj/SynologyDrive/01_Projets/Projet_BeamEarth/BeamNG.Earth/mod/tests/test_trees.lua))**:
+   - `46 passed, 4 failed` (only the 4 pre-existing baseline failures in `scratch/p10w1_baseline_lua_failures.txt`).
+
+STATUS_UPDATE: DONE (100%)

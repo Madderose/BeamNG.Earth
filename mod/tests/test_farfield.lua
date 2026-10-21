@@ -866,4 +866,61 @@ do
   step(free, nil, 100)
 end
 
+------------------------------------------------------------------------------------------
+-- P10-B: governed reveal cap (REVEALS_PER_FRAME = 2, 1 in burst mode unless gov.urgent) and no
+-- co-scheduling of reveal + import in the same governed frame
+do
+  farfield.setNearVisual('terrain')
+  farfield.switchAnchor(70, false, { cx = 0, cy = 0 })
+  -- Preload 6 tiles with free governor so their groups are ready to reveal
+  for i = 1, 6 do
+    farfield.onTile(tile(70, 0, i + 10, 10))
+  end
+  step(free, camSouth)
+  for i = 1, 6 do
+    farfield.onSwap(swap(70, 700 + i, { key(0, i + 10, 10) }))
+  end
+  -- Also queue a 7th tile that still needs importing
+  farfield.onTile(tile(70, 0, 20, 10))
+
+  local gv = governor.new({ clock = clock })
+  for _ = 1, 80 do now = now + 10; gv:beginFrame(true, 10.0) end
+
+  -- 1) Normal governed frame (burst=false): reveals at most REVEALS_PER_FRAME = 2 groups, no import in same frame
+  now = now + 10
+  gv:beginFrame(true, 10.0)
+  gv.burst, gv.urgent = false, false
+  local importsBefore = farfield.stats().imports
+  farfield.update(gv, DT, camSouth)
+  T.check(farfield.stats().groups == 4, 'normal governed frame reveals at most REVEALS_PER_FRAME = 2 swap groups (4 of 6 still waiting)')
+  T.check(farfield.stats().imports == importsBefore, 'no tile import in a governed frame that revealed swap groups')
+
+  -- 2) Burst mode (burst=true, urgent=false): reveals at most 1 group per frame (after 1 L-H-L cooldown frame)
+  now = now + 10; gv:beginFrame(true, 10.0)
+  now = now + 10; gv:beginFrame(true, 10.0)
+  gv.burst, gv.urgent = true, false
+  farfield.update(gv, DT, camSouth)
+  T.check(farfield.stats().groups == 3, 'burst mode reveals at most 1 waiting swap group per frame (3 of 6 still waiting)')
+  T.check(farfield.stats().imports == importsBefore, 'no tile import in a burst frame that revealed a swap group')
+
+  -- 3) Urgent overrides burst (burst=true, urgent=true): reveals up to REVEALS_PER_FRAME = 2 groups
+  now = now + 10; gv:beginFrame(true, 10.0)
+  now = now + 10; gv:beginFrame(true, 10.0)
+  gv.burst, gv.urgent = true, true
+  farfield.update(gv, DT, camSouth)
+  T.check(farfield.stats().groups == 1, 'gov.urgent overrides gov.burst, allowing REVEALS_PER_FRAME = 2 reveals (1 of 6 still waiting)')
+
+  -- Drain remaining reveal and import over subsequent frames (no starvation)
+  gv.burst, gv.urgent = false, false
+  for _ = 1, 30 do
+    now = now + 10
+    gv:beginFrame(farfield.hasWork(), 10.0)
+    farfield.update(gv, DT, camSouth)
+  end
+  T.check(farfield.stats().groups == 0 and farfield._pending(key(0, 20, 10)).loaded,
+    'all waiting swap groups revealed and queued tile imported within 30 frames')
+  farfield.switchAnchor(71, false, { cx = 0, cy = 0 })
+  step(free, nil, 50)
+end
+
 T.done('test_farfield')

@@ -1,0 +1,23 @@
+STATUS_UPDATE: Reading briefing and inspecting trees.lua, farfield.lua, roads.lua, and unit tests (10%)
+STATUS_UPDATE: Reading server tile radius configurations (vegetation.py, roads.py, buildings.py, farfield.py) for the count model (25%)
+STATUS_UPDATE: Analyzing scene-graph count model and evaluating Forest & TSStatic consolidation patches (40%)
+STATUS_UPDATE: Checking SceneObject render vs collision flags in terrain.lua and core.lua (55%)
+STATUS_UPDATE: Copying target files to output workspace for patch creation (65%)
+STATUS_UPDATE: Applying Forest pool hiding and 2x2 super-tile consolidation to work/trees.lua (70%)
+STATUS_UPDATE: Applying patches to work/trees.lua, work/farfield.lua, and work/roads.lua (75%)
+STATUS_UPDATE: Writing patch generator script and generating unified diffs for all 6 files (80%)
+STATUS_UPDATE: Generating and verifying diffs via git apply --check (85%)
+STATUS_UPDATE: Writing proposal.md with full scene-graph count model, ranked proposals, and shadow traversal estimates (92%)
+`TASK-P10-D` is complete. All deliverables have been written to [runs/optimization_logs/phase10/p10d_scenegraph_forests/](file:///C:/Users/hoppj/SynologyDrive/01_Projets/Projet_BeamEarth/BeamNG.Earth/runs/optimization_logs/phase10/p10d_scenegraph_forests/) without modifying any tracked repository files, and all 6 unified diffs pass `git apply --check`.
+
+### Summary of Deliverables
+- **Proposal & Scene-Graph Count Model**: [proposal.md](file:///C:/Users/hoppj/SynologyDrive/01_Projets/Projet_BeamEarth/BeamNG.Earth/runs/optimization_logs/phase10/p10d_scenegraph_forests/proposal.md) (`182` lines)
+  - Reconciles the exact analytical count model against live probe telemetry (`149` visible `Forest`s = `54` active `veg_tile`s $\le 900\text{ m}$ + `52` road-furniture `p<tx>_<ty>` `Forest`s + `20` receding/draining `Forest`s + `23` empty pooled `Forest`s never hidden by [`releaseForest`](file:///C:/Users/hoppj/SynologyDrive/01_Projets/Projet_BeamEarth/BeamNG.Earth/mod/beamng_earth/lua/ge/extensions/beamngEarth/trees.lua#L226-L229); `804` visible `TSStatic`s = `438` `farfield` + `205` near road/building + `40` `bldcol`/`walkcol` colliders with `isRenderEnabled = true` + `120` `bldfar` + `1` `prewarm`; `117` hidden `TSStatic`s).
+  - Reduces visible `Forest` SceneObjects from **`149` to `~24` (`-83.9%`)**, visible/renderable `TSStatic`s from **`804` to `763` (`-41` collider/prewarm meshes)**, parked `farfield` spares from **`64` to `16` (`-75%`)**, and per-frame shadow cascade object visits from **`1,088` to `625` (`-42.6%` standalone; `~140` or `-87.1%` combined with P10-A)**.
+- **Verified Unified Diffs**:
+  - [trees.lua.diff](file:///C:/Users/hoppj/SynologyDrive/01_Projets/Projet_BeamEarth/BeamNG.Earth/runs/optimization_logs/phase10/p10d_scenegraph_forests/trees.lua.diff) — `2×2` super-tile `Forest` consolidation (`M.SUPER_TILE = 2`, `M.superKey`) uniting `veg_tile` and `p<tx>_<ty>` road props, `setHidden(true)` on pool release / `setHidden(false)` on reuse, and deduplicated `M.transform` rebase pose updates.
+  - [farfield.lua.diff](file:///C:/Users/hoppj/SynologyDrive/01_Projets/Projet_BeamEarth/BeamNG.Earth/runs/optimization_logs/phase10/p10d_scenegraph_forests/farfield.lua.diff) — Tightens `SPARE_MAX` (`64 -> 16`) and `SPARE_S` (`30 -> 12`) and enforces `SPARE_MAX` immediately in [`park`](file:///C:/Users/hoppj/SynologyDrive/01_Projets/Projet_BeamEarth/BeamNG.Earth/mod/beamng_earth/lua/ge/extensions/beamngEarth/farfield.lua#L512-L530).
+  - [roads.lua.diff](file:///C:/Users/hoppj/SynologyDrive/01_Projets/Projet_BeamEarth/BeamNG.Earth/runs/optimization_logs/phase10/p10d_scenegraph_forests/roads.lua.diff) — Disables render traversal (`setRenderEnabled(false)`) on collision-only `bldcol`/`walkcol` `TSStatic`s, hides the `prewarm` `TSStatic`, replaces per-frame `pairs(far)` scanning in [`updateFar`](file:///C:/Users/hoppj/SynologyDrive/01_Projets/Projet_BeamEarth/BeamNG.Earth/mod/beamng_earth/lua/ge/extensions/beamngEarth/roads.lua#L546-L570) with event-driven `syncFar(key)` and $O(1)$ queue indexing, and defers covered `bldfar` spawns.
+  - [test_trees.lua.diff](file:///C:/Users/hoppj/SynologyDrive/01_Projets/Projet_BeamEarth/BeamNG.Earth/runs/optimization_logs/phase10/p10d_scenegraph_forests/test_trees.lua.diff), [test_farfield_spares.lua.diff](file:///C:/Users/hoppj/SynologyDrive/01_Projets/Projet_BeamEarth/BeamNG.Earth/runs/optimization_logs/phase10/p10d_scenegraph_forests/test_farfield_spares.lua.diff), [test_roads.lua.diff](file:///C:/Users/hoppj/SynologyDrive/01_Projets/Projet_BeamEarth/BeamNG.Earth/runs/optimization_logs/phase10/p10d_scenegraph_forests/test_roads.lua.diff) — Unit test coverage for all new behaviors.
+
+STATUS_UPDATE: DONE (100%)

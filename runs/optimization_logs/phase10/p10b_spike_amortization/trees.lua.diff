@@ -1,0 +1,213 @@
+diff --git a/mod/beamng_earth/lua/ge/extensions/beamngEarth/trees.lua b/mod/beamng_earth/lua/ge/extensions/beamngEarth/trees.lua
+index 3c20cff..6adc32f 100644
+--- a/mod/beamng_earth/lua/ge/extensions/beamngEarth/trees.lua
++++ b/mod/beamng_earth/lua/ge/extensions/beamngEarth/trees.lua
+@@ -64,6 +64,10 @@ M.NO_COLLIDE = { shrub = true, desert_shrub = true, door = true, wallsign_logist
+ -- (at least one shape), and bushes (half of all items, one shape alone 34k) show near the player only.
+ M.SHAPE_ITEMS_PER_FRAME = 600
+ M.MICRO_SHAPE_ITEMS = 600
++-- Cap of distinct Forest SceneObjects mutated per frame in governed mode: each mutated Forest marks its
++-- ForestCell quadtree dirty and rebuilds imposter/mesh vertex batches on the next RenderShadows pass.
++-- Batching all rows of 1-2 Forests per frame instead of touching 5-15 Forests avoids O(N_forests) batch rebuild spikes.
++M.MAX_FORESTS_PER_FRAME = 2
+ -- The engine tells shapes apart by their path, so a tile's items use one of SHAPE_VARIANTS spellings of each shape's
+ -- path ('dir/./name', 'dir/././name', ...: the same file, a shape of its own), which splits the big populations (one
+ -- beech ~7.7k items: a frame touching it cost ~4-9 ms). A variant's first items cost one ~12 ms frame (its load).
+@@ -396,12 +400,30 @@ local scratchMat = nil
+ local scratchEuler = nil
+ local scratchPos = nil
+ 
+--- This frame's shapes: may an item of this shape change now? (see SHAPE_ITEMS_PER_FRAME)
++-- This frame's shapes and distinct Forests: may an item of this shape/Forest change now?
+ local touched, touchedItems, touchedCount = {}, 0, 0
++local touchedForests, touchedForestCount = {}, 0
+ local function resetTouched()
+   M.lastShapeItems = touchedItems        -- the previous frame's (diagnostics)
++  M.lastForestsTouched = touchedForestCount
+   for k in pairs(touched) do touched[k] = nil end
+-  touchedItems, touchedCount = 0, 0
++  for k in pairs(touchedForests) do touchedForests[k] = nil end
++  touchedItems, touchedCount, touchedForestCount = 0, 0, 0
++end
++
++local function allowForest(t, maxForests)
++  local fk = t.forestId or t
++  if touchedForests[fk] then return true end
++  if maxForests and touchedForestCount >= maxForests then return false end
++  return true
++end
++
++local function noteForestTouched(t)
++  local fk = t.forestId or t
++  if not touchedForests[fk] then
++    touchedForests[fk] = true
++    touchedForestCount = touchedForestCount + 1
++  end
+ end
+ 
+ local function allow(shape)
+@@ -755,7 +777,7 @@ function M.update(anchorId, player, view, gov)
+   if not setup() then return end
+ 
+   local governed = (gov ~= nil)
+-  local budget, maxRows, maxDemoteRows, maxWallMs
++  local budget, maxRows, maxDemoteRows, maxWallMs, maxForests
+   if governed then
+     -- Yield on heavy frames, terrain commit quiet windows, or frames where roads/farfield already ran a unit
+     if gov.blocked or gov.heavyPending or (gov.isHeavyFrame and gov:isHeavyFrame())
+@@ -772,6 +794,7 @@ function M.update(anchorId, player, view, gov)
+     maxRows = M.ROWS_PER_FRAME
+     maxDemoteRows = M.MICRO_DEMOTE_ROWS_PER_FRAME
+     maxWallMs = M.MAX_WALL_MS
++    maxForests = (gov.burst and 1) or M.MAX_FORESTS_PER_FRAME or 2
+   else
+     -- Offline unit test mode (mod/tests/test_trees.lua calls trees.update(aid, player) with gov == nil)
+     frameN = frameN + 1
+@@ -781,6 +804,7 @@ function M.update(anchorId, player, view, gov)
+     maxRows = math.max(M.ROWS_PER_FRAME, M.LEGACY_ROWS_PER_FRAME)
+     maxDemoteRows = 1e9
+     maxWallMs = 1e9
++    maxForests = M.MAX_FORESTS_UNW or nil
+   end
+ 
+   local startBudget = budget
+@@ -863,36 +887,42 @@ function M.update(anchorId, player, view, gov)
+       for i = nDrops + 1, #dropsScratch do dropsScratch[i] = nil end
+       if nDrops == 0 then return end
+       table.sort(dropsScratch, sortDrops)
+-      local perTile = governed and math.max(math.ceil(limit / nDrops), 8) or math.max(math.ceil(limit / nDrops), 64)
++      -- Batch all rows of one dropped Forest together (up to `limit`) instead of slicing across all nDrops Forests
++      local perTile = governed and limit or math.max(math.ceil(limit / nDrops), 64)
+       local progressed = false
+       for idx = 1, nDrops do
+         local d = dropsScratch[idx]
+         local key, t = d.key, d.t
+-        local f = t.forestId and scenetree.findObjectById(t.forestId)
+-        local fd = f and f:getData()
+-        local tileLimit = perTile
+-        for i, it in pairs(t.made) do
+-          if tileLimit <= 0 or limit <= 0 or budget <= 0 or overWallBudget() then
+-            if overWallBudget() then budget = 0 end
+-            break
+-          end
+-          local sh = t.madeShape[i]
+-          if not sh or allow(sh) then
+-            if fd then removeItem(fd, it, sh) end
+-            t.made[i], t.solid[i], t.madeShape[i] = nil, nil, nil
+-            tileLimit = tileLimit - 1
+-            limit = limit - 1
+-            budget = budget - 1
+-            progressed = true
++        if not allowForest(t, maxForests) then
++          hasMoreWork = true
++        else
++          local f = t.forestId and scenetree.findObjectById(t.forestId)
++          local fd = f and f:getData()
++          local tileLimit = perTile
++          for i, it in pairs(t.made) do
++            if tileLimit <= 0 or limit <= 0 or budget <= 0 or overWallBudget() then
++              if overWallBudget() then budget = 0 end
++              break
++            end
++            local sh = t.madeShape[i]
++            if not sh or allow(sh) then
++              noteForestTouched(t)
++              if fd then removeItem(fd, it, sh) end
++              t.made[i], t.solid[i], t.madeShape[i] = nil, nil, nil
++              tileLimit = tileLimit - 1
++              limit = limit - 1
++              budget = budget - 1
++              progressed = true
++            end
+           end
+-        end
+-        if next(t.made) == nil then
+-          releaseForest(t)
+-          if not d.isOrphan then
+-            tiles[key] = nil
++          if next(t.made) == nil then
++            releaseForest(t)
++            if not d.isOrphan then
++              tiles[key] = nil
++            end
++          else
++            hasMoreWork = true
+           end
+-        else
+-          hasMoreWork = true
+         end
+         if limit <= 0 or budget <= 0 or overWallBudget() then
+           hasMoreWork = true
+@@ -943,19 +973,7 @@ function M.update(anchorId, player, view, gov)
+     local band = groupBand(t, dist)
+     local near = dCar <= M.SOLID_M or (t.near and dCar <= M.SOLID_M + M.SOLID_HYST_M) or false
+     local demote = (t.near or next(t.solid) ~= nil) and not near
+-    local shadowMaxM = (M.RINGS[1] and M.RINGS[1][1]) or 300
+-    local shadow = dist <= shadowMaxM
+-    if t.shadow ~= shadow and t.forestId then
+-      local forestObj = scenetree.findObjectById(t.forestId)
+-      if forestObj then
+-        if dist > shadowMaxM then
+-          forestObj:setField('isRenderShadowEnabled', 0, 'false')
+-        else
+-          forestObj:setField('isRenderShadowEnabled', 0, 'true')
+-        end
+-      end
+-      t.shadow = shadow
+-    end
++    -- Note: Forest has no C++ isRenderShadowEnabled field (shadow culling is handled by TSForestItemData.shadowNullDetailSize)
+     if want ~= t.shown or band ~= t.band or near ~= t.near or demote or t.pending then
+       local prio = 3
+       local sortKey = dist
+@@ -1001,13 +1019,24 @@ function M.update(anchorId, player, view, gov)
+         hasMoreWork = true
+         break
+       end
++      if not allowForest(t, maxForests) then
++        hasMoreWork = true
++        goto next_tile
++      end
+       local sameTarget = (want == t.shown and band == t.band and near == t.near)
+       local wasThinning = want < (t.shown or 0) or (t.band and band < t.band) or (sameTarget and t.thinning)
+       local startRow = (sameTarget and t.pending and t.nextRow) or 1
+       local nextPending = nil
+       t.pending = false
+       local fd = nil                          -- the tile's Forest data, made when it first needs an item
+-      local function data() fd = fd or forest(t):getData(); return fd end
++      local function data()
++        if not fd then
++          local fObj = forest(t)
++          noteForestTouched(t)
++          fd = fObj:getData()
++        end
++        return fd
++      end
+       local bin = t.bin
+       local nTileRows = bin and math.floor(#bin / VBIN_STRIDE) or (t.rows and #t.rows or 0)
+       for i = startRow, nTileRows do
+@@ -1069,24 +1098,13 @@ function M.update(anchorId, player, view, gov)
+       if t.pending then hasMoreWork = true end
+       if next(t.made) == nil then
+         releaseForest(t)
+-      elseif t.forestId then
+-        local forestObj = scenetree.findObjectById(t.forestId)
+-        if forestObj then
+-          local shadowMaxM = (M.RINGS[1] and M.RINGS[1][1]) or 300
+-          if dist > shadowMaxM then
+-            forestObj:setField('isRenderShadowEnabled', 0, 'false')
+-            t.shadow = false
+-          else
+-            forestObj:setField('isRenderShadowEnabled', 0, 'true')
+-            t.shadow = true
+-          end
+-        end
+       end
+       t.nextRow = t.pending and nextPending or nil
+       t.thinning = (t.pending and wasThinning) or nil
+       t.shown = want
+       t.band = band
+       t.near = near
++      ::next_tile::
+     end
+   end
+   if budget > 0 and not overWallBudget() then drainDrops(budget) end

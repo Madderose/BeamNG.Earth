@@ -380,18 +380,33 @@ class SplitTest(unittest.TestCase):
         mats_path = (Path(__file__).resolve().parents[2] / "mod" / "beamng_earth" / "levels" / "beamng_earth"
                      / "art" / "shapes" / "beamngEarth" / "buildings.materials.json")
         mats = json.loads(mats_path.read_text(encoding="utf-8"))
-        for non_shadow in ("bne_bld_glass", "bne_wire", "bne_sidewalk_brick"):
+        for non_shadow in ("bne_bld_glass", "bne_bld_marble", "bne_bld_far", "bne_wire", "bne_sidewalk_brick"):
             self.assertIn(non_shadow, mats)
             self.assertIs(mats[non_shadow].get("castShadows"), False, non_shadow)
+        tun_path = mats_path.parent / "tunnel.materials.json"
+        tun_mats = json.loads(tun_path.read_text(encoding="utf-8"))
+        for non_shadow in ("bne_tunnel_light", "bne_tunnel_soil"):
+            self.assertIn(non_shadow, tun_mats)
+            self.assertIs(tun_mats[non_shadow].get("castShadows"), False, non_shadow)
         # A house with plain walls uses bne_bld_glass for laid-over windows in the full mesh and omits them in lite
         spec = next(bld.plan(rect(k * 40, 20, 12, 9), {"class": "house"}, 0, 39.2, -76.9)
                     for k in range(40) if bld.plan(rect(k * 40, 20, 12, 9), {"class": "house"}, 0, 39.2, -76.9).wall)
         _, _, T_full, M_full, mats_full, _ = bld.build([(spec, 0.0, 0.0)], lite=False)
         _, _, T_lite, M_lite, mats_lite, _ = bld.build([(spec, 0.0, 0.0)], lite=True)
+        far_mesh = bld.build([(spec, 0.0, 0.0)], lite=True, far=True)
+        _, _, T_far, M_far, mats_far, _ = far_mesh
         self.assertIn(mats_full.index(bld.GLASS), set(M_full.tolist()))
         self.assertLess(len(T_lite), len(T_full), "lite mesh omits laid-over glass window quads")
-        self.assertEqual(len(mats_lite), 1, "lite mesh merges materials into a single primitive")
+        self.assertEqual(mats_lite, (bld.FACADE,), "near lite LOD uses bne_bld_facade")
+        self.assertEqual(mats_far, ("bne_bld_far",), "far horizon tiles use bne_bld_far (castShadows=false)")
         self.assertTrue((M_lite == 0).all())
+        self.assertTrue((M_far == 0).all())
+        self.assertEqual(bld.BLD_LOD_PX, 2700.0)
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "bldfar.cdae"
+            bld.write(str(p), far_mesh)
+            shape = cdae.decode(p.read_bytes())
+            self.assertEqual([m["name"] for m in shape["materials"]], ["bne_bld_far"])
 
 
 class MeshTest(unittest.TestCase):

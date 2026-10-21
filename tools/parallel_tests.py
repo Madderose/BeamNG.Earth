@@ -185,8 +185,8 @@ def _run_lua_test(lua_file: str) -> tuple[str, bool, float, str]:
     t0 = time.perf_counter()
     try:
         p = subprocess.run(
-            [luajit, str(MOD_TESTS_DIR / lua_file)],
-            cwd=str(ROOT),
+            [luajit, lua_file],
+            cwd=str(MOD_TESTS_DIR),
             capture_output=True,
             text=True,
             timeout=60,

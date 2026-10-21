@@ -63,6 +63,7 @@ local navgraph = require('beamngEarth/navgraph')
 local postfx = require('beamngEarth/postfx')       -- no far depth-of-field blur in our level
 local gps = require('beamngEarth/gps')               -- the game's GPS route to a place picked on the world map
 local seasonlook = require('beamngEarth/seasonlook')   -- the trees' leaves in the season (hello.season) -- the AI road graph for the stock traffic and AI (map.reset)
+local shadowctl = require('beamngEarth/shadowctl')
 
 local LEVEL_ID = 'beamng_earth'
 local MOD_VERSION = '0.4.0'
@@ -1366,13 +1367,15 @@ function M.hitches()
   return out
 end
 
--- The previous frame's engine tick (ms), 0 without the metrics.
+-- The previous frame's engine tick, shadow pass, and file watcher costs (ms), 0 without the metrics.
 local tickMetrics = {}
-local function engineTickMs()
+local function enginePerfMs()
   local dbg = Engine and Engine.Debug
-  if not (dbg and dbg.getLastPerformanceMetrics) then return 0 end
-  if not pcall(dbg.getLastPerformanceMetrics, tickMetrics) then return 0 end
-  return tonumber(tickMetrics.Ticking) or 0
+  if not (dbg and dbg.getLastPerformanceMetrics) then return 0, 0, 0 end
+  if not pcall(dbg.getLastPerformanceMetrics, tickMetrics) then return 0, 0, 0 end
+  return tonumber(tickMetrics.Ticking) or 0,
+         tonumber(tickMetrics.RenderShadows) or 0,
+         tonumber(tickMetrics.FileWatchers) or 0
 end
 
 
@@ -1480,7 +1483,7 @@ local function onUpdate(dtReal, dtSim)
     farfield.hasWork() or roads.hasWork() or (trees.hasWork and trees.hasWork(st.anchorId, pl) or false) or (dataHead <= dataTail),
     pl and pl.speed
   )
-  gov:chargeEngine(engineTickMs())     -- what the engine spent on last frame's new tiles (governor.lua)
+  gov:chargeEngine(enginePerfMs())     -- what the engine spent on last frame's new tiles & shadows (governor.lua)
   for _, msg in ipairs(net.update(dtReal)) do
     local mtype = msg and msg.type
     if LANE1_TYPES[mtype] and not LANE0_TYPES[mtype] then
@@ -1508,6 +1511,12 @@ local function onUpdate(dtReal, dtSim)
       local ok, err = pcall(onMessage, msg)
       if not ok then log('E', 'beamngEarth', 'message ' .. tostring(msg.type) .. ' failed: ' .. tostring(err)) end
     until dataHead > dataTail or (drained >= 64 and hitchClock() >= ipcDeadline)
+  end
+  if gov.noteQueue then
+    local fCnt = farfield.counters and farfield.counters()
+    local fq = (fCnt and fCnt.queued) or 0
+    local ipcQ = math.max(0, dataTail - dataHead + 1)
+    gov:noteQueue(fq + ipcQ)
   end
   t = mark('net', t)
   if not scenetree.MissionGroup then return end -- no level loaded
@@ -1591,17 +1600,7 @@ end
 -- visible. Hook order relative to core_camera does not matter here; this only measures.
 local function onPreRender(dtReal, dtSim)
   local pl = st and st.player
-  if PSSMLightShadowMap then
-    if PSSMLightShadowMap.lastSplitCastersEnabled ~= false then
-      PSSMLightShadowMap.lastSplitCastersEnabled = false
-    end
-    -- Velocity-adaptive shadow scaling:
-    -- At <= 20 m/s (<= 72 km/h): scale = 0.45
-    -- At >= 60 m/s (>= 216 km/h): scale = 0.25 (halves cascade world area -> 4x fewer objects to cull)
-    local spd = (pl and pl.speed) or 0
-    local t = math.min(1.0, math.max(0.0, (spd - 20.0) / 40.0))
-    PSSMLightShadowMap.sdsmMaxDistanceScale = 0.45 - 0.20 * t
-  end
+  shadowctl.applyGlobalProfile((pl and pl.speed) or 0, gov, dtReal)
   local probe = st.lagProbe
   if not probe then return end
   if moveVisible(probe) then

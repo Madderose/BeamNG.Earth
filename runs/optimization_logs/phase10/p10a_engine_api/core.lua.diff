@@ -1,0 +1,23 @@
+diff --git a/mod/beamng_earth/lua/ge/extensions/beamngEarth/core.lua b/mod/beamng_earth/lua/ge/extensions/beamngEarth/core.lua
+index 8610920..8b9db33 100644
+--- a/mod/beamng_earth/lua/ge/extensions/beamngEarth/core.lua
++++ b/mod/beamng_earth/lua/ge/extensions/beamngEarth/core.lua
+@@ -1591,17 +1591,7 @@ end
+ -- visible. Hook order relative to core_camera does not matter here; this only measures.
+ local function onPreRender(dtReal, dtSim)
+   local pl = st and st.player
+-  if PSSMLightShadowMap then
+-    if PSSMLightShadowMap.lastSplitCastersEnabled ~= false then
+-      PSSMLightShadowMap.lastSplitCastersEnabled = false
+-    end
+-    -- Velocity-adaptive shadow scaling:
+-    -- At <= 20 m/s (<= 72 km/h): scale = 0.45
+-    -- At >= 60 m/s (>= 216 km/h): scale = 0.25 (halves cascade world area -> 4x fewer objects to cull)
+-    local spd = (pl and pl.speed) or 0
+-    local t = math.min(1.0, math.max(0.0, (spd - 20.0) / 40.0))
+-    PSSMLightShadowMap.sdsmMaxDistanceScale = 0.45 - 0.20 * t
+-  end
++  require('beamngEarth/shadowctl').applyGlobalProfile((pl and pl.speed) or 0, gov, dtReal)
+   local probe = st.lagProbe
+   if not probe then return end
+   if moveVisible(probe) then

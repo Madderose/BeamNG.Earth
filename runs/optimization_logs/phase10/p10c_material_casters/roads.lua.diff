@@ -1,0 +1,31 @@
+diff --git a/mod/beamng_earth/lua/ge/extensions/beamngEarth/roads.lua b/mod/beamng_earth/lua/ge/extensions/beamngEarth/roads.lua
+index 97b865d..dcbef71 100644
+--- a/mod/beamng_earth/lua/ge/extensions/beamngEarth/roads.lua
++++ b/mod/beamng_earth/lua/ge/extensions/beamngEarth/roads.lua
+@@ -140,6 +140,13 @@ end
+ -- many more translucent objects in view (buildings' windows, signals) they vanished. Opaque asphalt is
+ -- drawn first, always, and the translucent lines, crossings and gutters over it.
+ M.OPAQUE = { 'road_asphalt_2lane', 'italy_cobblestone' }
++-- Ground-hugging road ribbons, markings, drains, and raised sidewalks/curbs should never cast shadows
++-- into PSSM cascades (per-object shadow flags on TSStatic are no-ops in BeamNG 0.40; Material.castShadows is real).
++M.NO_SHADOW = {
++  'road_asphalt_2lane', 'italy_cobblestone', 'm_dirt_road', 'sidewalk_concrete',
++  'm_metal_grid_drain', 'gutter1', 'line_white', 'line_yellow', 'line_dashed_long', 'crossing_white',
++  'curbs', 'sidewalk1', 'tactile_indicator',
++}
+ 
+ local function loadMaterials()
+   if loadedMaterials then return end
+@@ -152,6 +159,12 @@ local function loadMaterials()
+   end
+   local pad = scenetree.findObject('tactile_indicator')    -- curb ramp pads: US truncated domes are yellow
+   if pad then pcall(function() pad:setField('baseColorFactor', 0, '0.95 0.78 0.18 1'); pad:flush(); pad:reload() end) end
++  for _, name in ipairs(M.NO_SHADOW) do
++    local m = scenetree.findObject(name)
++    if m then
++      pcall(function() m:setField('castShadows', 0, '0'); m:flush(); m:reload() end)
++    end
++  end
+   loadedMaterials = true
+ end
+ 

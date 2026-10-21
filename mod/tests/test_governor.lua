@@ -53,10 +53,17 @@ do
   T.near(g.b, 2.0, 1e-9, 'b reaches the 2 ms target and stays')
   T.check(firstUnit and firstUnit > 5, 'no "at least one per frame": the first 3 ms unit waits for tokens (frame ' .. tostring(firstUnit) .. ')')
   T.check(maxOver <= 1e-9, 'per-frame spend <= b + maxUnit')
-  -- sustained rate ~ b: 100 frames at b = 2 -> ~67 units of 3 ms
+  -- Why 1.5 ms/frame instead of 2.0 ms/frame for 3 ms 'cdae' units (P10-B L-H-L spacing):
+  -- At b = 2.0 ms and cdae cost = 3.0 ms, frameCap = b + maxUnit = 5.0 ms fits at most 1 unit (3 ms)
+  -- per active frame; because cdae is in SCENE_STRUCT_KINDS and 3.0 ms >= STRUCT_COOLDOWN_MS (1.8 ms),
+  -- each active frame is followed by 1 L-H-L calm frame (structCooldown = 1), so 50 of 100 frames run
+  -- 1 unit -> 50 * 3 ms / 100 = 1.5 ms/frame. Non-structural kinds (e.g. 'retex') still spend ~ b (2.0 ms).
   local total = 0
   for _ = 1, 100 do local s = frame(g, { cost = 3 }); total = total + s end
-  T.near(total / 100, 2.0, 0.1, 'sustained streaming spend ~ b per frame')
+  T.near(total / 100, 1.5, 0.1, 'sustained structural streaming spend with L-H-L 1-frame cooldown ~ 1.5 ms per frame')
+  local totalNonStruct = 0
+  for _ = 1, 100 do local s = frame(g, { kind = 'retex', cost = 3 }); totalNonStruct = totalNonStruct + s end
+  T.near(totalNonStruct / 100, 2.0, 0.1, 'sustained non-structural streaming spend ~ b per frame')
   for _ = 1, 10 do frame(g, { hasWork = false }) end
   T.near(g.b, 1.5, 1e-9, 'idle: b ramps down 0.05 ms per frame')
   for _ = 1, 40 do frame(g, { hasWork = false }) end
@@ -226,5 +233,121 @@ do
   g:chargeEngine(1e6)
   T.check(g.tokens >= -governor.ENGINE_MAX_DEBT_MS, "the debt is capped")
   T.check(g:chargeEngine(1.5) == 0, 'a normal tick is free')
+end
+
+------------------------------------------------------------------------------------------
+-- P10-B: closed-loop RenderShadows + FileWatchers debt, per-kind deferredEst EMA,
+-- scene-structure mutual exclusion + L-H-L calm frame spacing, burst-mode hysteresis, and maxFrameSpent cap
+do
+  local t = 0
+  local g = governor.new({ clock = function() return t end })
+  for _ = 1, 120 do t = t + 10; g:beginFrame(true, 10.0) end
+  -- 1. Learn shadowBase on idle frames
+  g.prevFrameUnits = 0
+  g:chargeEngine(0.3, 0.4, 0.0)
+  T.near(g.shadowBase, 0.4, 1e-6, 'shadowBase initialized on calm non-streaming frame')
+
+  -- 2. Run a cdae unit, then report a 9.4 ms RenderShadows spike on the next frame
+  T.check(g:try('cdae'), 'cdae allowed before spike')
+  g:charge('cdae', 2.2)
+  -- Co-scheduling different scene-structure kind in the same frame is blocked:
+  T.check(not g:try('treeBatch') and not g:try('reveal'), 'never co-schedule two scene-structure kinds in one frame')
+  -- Next frame: L-H-L cooldown after >= 1.8 ms structural spend + RenderShadows debt
+  t = t + 18
+  g:beginFrame(true, 18.0)
+  T.check(g.structCooldown == 1, 'L-H-L calm frame scheduled after heavy structural frame')
+  T.check(not g:try('cdae'), 'structural unit blocked on L-H-L calm frame')
+  local debt = g:chargeEngine(0.5, 9.4, 2.5)
+  T.check(debt > 7.0 and g.tokens < 0, 'RenderShadows 9.4 ms + FileWatchers 2.5 ms charged as engine debt (' .. debt .. ')')
+  T.check((g.deferredEst.cdae or 0) > 0.5, 'deferredEst.cdae learned from RenderShadows spike (' .. tostring(g.deferredEst.cdae) .. ')')
+  T.check(g:effectiveEst('cdae') > g.est.cdae, 'effectiveEst includes learned deferred cost')
+
+  -- 3. No starvation: budget recovers once calm frames pay off the debt and work completes within N frames
+  local completed = 0
+  local framesToComplete = 0
+  for f = 1, 120 do
+    t = t + 10
+    g:beginFrame(true, 10.0)
+    g:chargeEngine(0.3, 0.4, 0.0)
+    if g:try('cdae') then
+      g:charge('cdae', 2.0)
+      completed = completed + 1
+      if completed >= 10 then framesToComplete = f; break end
+    end
+  end
+  T.check(completed == 10 and framesToComplete <= 100, 'no starvation: 10 units complete after spike within ' .. framesToComplete .. ' frames')
+  T.check(g.stats.maxFrameSpent <= governor.LOADING_TARGET_MS + 1e-9,
+    'maxFrameSpent capped <= 8.0 ms (' .. g.stats.maxFrameSpent .. ')')
+
+  -- 4. Burst detector hysteresis
+  local gb = governor.new({ clock = function() return t end })
+  gb:noteQueue(2)
+  T.check(not gb.burst, 'calm queue: not in burst mode')
+  gb:noteQueue(12) -- growth rate +10 >= BURST_ENTER_RATE (8)
+  T.check(gb.burst, 'queue jump +10 enters burst mode')
+  T.check(gb:targetNow() <= governor.BURST_TARGET_MS, 'burst mode lowers target to BURST_TARGET_MS')
+  for i = 1, governor.BURST_HYST_FRAMES - 1 do
+    gb:noteQueue(4)
+    T.check(gb.burst, 'hysteresis holds burst mode on calm frame ' .. i)
+  end
+  gb:noteQueue(4)
+  T.check(not gb.burst, 'exits burst mode after BURST_HYST_FRAMES calm frames')
+
+  -- 5. R1: urgent beats burst (loading > urgent > burst > normal), and structural kinds can run twice in one urgent frame
+  local gu = governor.new({ clock = function() return t end })
+  gu:setUrgent(true)
+  gu:noteQueue(20) -- sudden jump -> burst = true while urgent = true
+  T.check(gu.burst and gu.urgent, 'both burst and urgent active')
+  T.near(gu:targetNow(), governor.URGENT_TARGET_MS, 1e-9, 'R1: urgent + burst -> targetNow() == urgent target')
+  gu:setLoading(true)
+  T.near(gu:targetNow(), governor.LOADING_TARGET_MS, 1e-9, 'R1: loading beats urgent and burst')
+  gu:setLoading(false)
+  for _ = 1, 150 do t = t + 8; gu:beginFrame(true, 8.0, 40.0) end
+  T.check(gu:try('cdae'), 'urgent + burst: first structural unit allowed')
+  gu:charge('cdae', 2.5)
+  T.check(gu:try('roadWalk'), 'urgent + burst: second structural unit (distinct kind) allowed in same urgent frame')
+  gu:charge('roadWalk', 2.5)
+  T.check(gu.sceneStructCount == 2, 'sceneStructCount tracks both structural units charged in urgent frame')
+  t = t + 8
+  gu:beginFrame(true, 8.0, 40.0)
+  T.check(gu.structCooldown == 0, 'R1: beginFrame does not arm structCooldown while urgent')
+  T.check(gu:try('cdae'), 'urgent: consecutive frame also allows structural unit without L-H-L cooldown')
+
+  -- 6. Burst transient cap: cannot last longer than BURST_MAX_FRAMES; refractory blocks immediate re-entry
+  local gm = governor.new({ clock = function() return t end })
+  gm:noteQueue(20) -- rate +20 -> enters burst (frame 1 of burst)
+  T.check(gm.burst, 'burst entered on initial surge')
+  local activeBurstFrames = 1
+  for i = 1, governor.BURST_MAX_FRAMES + 10 do
+    gm:noteQueue(20 + i) -- continuously growing queue
+    if gm.burst then activeBurstFrames = activeBurstFrames + 1 end
+  end
+  T.check(activeBurstFrames == governor.BURST_MAX_FRAMES,
+    'burst cannot last longer than BURST_MAX_FRAMES (' .. activeBurstFrames .. ' == ' .. governor.BURST_MAX_FRAMES .. ')')
+  T.check(not gm.burst, 'burst is off after BURST_MAX_FRAMES')
+  -- Refractory period blocks immediate re-entry even on large rate spikes
+  local gm2 = governor.new({ clock = function() return t end })
+  gm2:noteQueue(20)
+  for _ = 1, governor.BURST_MAX_FRAMES do gm2:noteQueue(30) end
+  T.check(not gm2.burst and gm2.burstRefractory == governor.BURST_REFRACTORY_FRAMES,
+    'refractory armed to BURST_REFRACTORY_FRAMES upon hitting BURST_MAX_FRAMES')
+  for i = 1, governor.BURST_REFRACTORY_FRAMES do
+    gm2:noteQueue(30 + i * 10) -- +10 per frame >= BURST_ENTER_RATE, still blocked by refractory
+    T.check(not gm2.burst, 'refractory blocks burst re-entry on frame ' .. i)
+  end
+  gm2:noteQueue(1000) -- first frame after refractory expires
+  T.check(gm2.burst, 'burst can re-enter once refractory period finishes')
+
+  -- 7. A constantly high but NOT growing queue (q = 40 every frame) does not keep burst on
+  local gc = governor.new({ clock = function() return t end })
+  gc.prevQueued, gc.prevQueued2, gc.prevQueued3 = 40, 40, 40
+  gc:noteQueue(40)
+  T.check(not gc.burst, 'steady non-growing q = 40 does not enter burst')
+  -- Even if an initial arrival spike triggered burst at q = 40, flat q = 40 exits at BURST_MAX_FRAMES and stays off
+  local gc2 = governor.new({ clock = function() return t end })
+  for _ = 1, governor.BURST_MAX_FRAMES + governor.BURST_REFRACTORY_FRAMES + 30 do
+    gc2:noteQueue(40)
+  end
+  T.check(not gc2.burst, 'constantly high non-growing queue (q = 40 every frame) does not keep burst on')
 end
 T.done('test_governor')

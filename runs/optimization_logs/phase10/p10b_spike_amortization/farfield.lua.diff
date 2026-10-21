@@ -1,0 +1,59 @@
+diff --git a/mod/beamng_earth/lua/ge/extensions/beamngEarth/farfield.lua b/mod/beamng_earth/lua/ge/extensions/beamngEarth/farfield.lua
+index 264da55..523e8f3 100644
+--- a/mod/beamng_earth/lua/ge/extensions/beamngEarth/farfield.lua
++++ b/mod/beamng_earth/lua/ge/extensions/beamngEarth/farfield.lua
+@@ -119,6 +119,7 @@ M.MAX_LEVEL = 9         -- coarsest level (server farfield.MAX_LEVEL); the horiz
+                         -- are never under the player (they split within 328 km), so shownAt stops here
+ M.EXACT_OFF = 0.01      -- m; an exact tile further than this off its height (crossover) is a miss
+ M.RETEX_PER_FRAME = 2   -- far_retex material switches per frame at most (each also a governor unit)
++M.REVEALS_PER_FRAME = 2 -- swap groups revealed per frame at most during governed streaming (1 in burst mode)
+ 
+ local pending = {}      -- key -> unclaimed instance received but not yet claimed by a far_swap (current anchor)
+ local waitingInsts = {} -- inst -> inst for every unstarted instance (unclaimed in pending, or claimed by a waiting group)
+@@ -1437,9 +1438,11 @@ function M.update(gov, dt, cam, player)
+     end
+   end
+   local stop = false
++  local nRevealed = 0
++  local maxReveals = (gov.frame == nil or gov.loading) and huge or ((gov.burst and 1) or M.REVEALS_PER_FRAME or 2)
+   for _, g in ipairs(groups) do
+     if g.state == 'wait' then
+-      local blocked = stop or frozen
++      local blocked = stop or frozen or (nRevealed >= maxReveals)
+       if not blocked then
+         for _, k in ipairs(g.add) do if busy[k] then blocked = true; break end end
+       end
+@@ -1452,6 +1455,8 @@ function M.update(gov, dt, cam, player)
+           if startGroup(g, cam, player) then
+             gov:charge('reveal', now() - t1)
+             units = units + 1
++            nRevealed = nRevealed + 1
++            if nRevealed >= maxReveals then stop = true end
+           end -- else: waits for a crossover slot; its keys stay busy, other groups go on
+         else
+           stop = true -- out of budget: keep the order, try again next frame
+@@ -1493,8 +1498,11 @@ function M.update(gov, dt, cam, player)
+   -- 4. imports (hidden), group tiles first, prefetch only when nothing else waits. A tile with its
+   --    own imagery material gets the Material first, as a separate unit (satmat.lua); a re-sent key
+   --    or a sibling sharing the name re-uses it for free.
++  --    Yield imports on frames that already revealed a swap group (unless loading or free test gov) so
++  --    unhide + .cdae resource init never stack in the same frame's RenderShadows pass.
+   local imported = false
+-  while true do
++  local allowImports = (gov.frame == nil or gov.loading or nRevealed == 0)
++  while allowImports do
+     local inst = peekImport(cam, player)
+     if not inst then break end
+     if inst.material and not inst.mat and not inst.matFailed then
+@@ -1535,9 +1543,9 @@ function M.update(gov, dt, cam, player)
+   end
+ 
+   -- 4b. far_retex: material texture switches, a few per frame within the budget (never thrown out of
+-  --     the frame: a failing switch is counted and dropped)
++  --     the frame: a failing switch is counted and dropped). Yield when an import or reveal already ran.
+   local nRetex = 0
+-  while nRetex < M.RETEX_PER_FRAME and satmat.hasRetex() and gov:try('retex') do
++  while (not imported and nRevealed == 0) and nRetex < M.RETEX_PER_FRAME and satmat.hasRetex() and gov:try('retex') do
+     local t1 = now()
+     local ok, res = pcall(satmat.retexNext)
+     if not ok then
