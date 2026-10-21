@@ -739,3 +739,50 @@ All requested test suites (plus `test_farfield.py`) passed with zero failures:
 
 
 
+
+---
+
+## Phase 9: Upstream 1.5.4 Harmonization & High-Speed Streaming Pipeline Integration
+
+**Orchestrator**: AGY Argon 4 High (`gemini-4-argon-high`, effort=high)  
+**Upstream Base Target**: `TecnaGamer/BeamNG.Earth` @ `upstream/main` (`bd9c764`, `VERSION` = `1.5.4-beta`)  
+**Local Source Branch**: `Madderose/BeamNG.Earth` @ `perf/phase6-highspeed-streaming` (`15bdb0f`, `VERSION` = `1.5.3-experimental`)  
+**Merge Base**: `011d6b54e42407b2f3a6deaddc47305cf2325a47` (`011d6b5 Merge perf/high-speed: 1.5.3-beta`)  
+**Target Harmonized Version**: `1.5.4-experimental`  
+**Detailed Architecture Report**: [`runs/optimization_logs/phase9_merge_harmonization_report.md`](runs/optimization_logs/phase9_merge_harmonization_report.md)  
+**Status**: **HARMONIZATION PLAN & AUDIT COMPLETE — READY FOR EXECUTION**
+
+### 1. Divergence & Conflict Audit Matrix (`011d6b5...upstream/main` vs `011d6b5...HEAD`)
+
+| Category | File Count | Scope & Handling |
+| :--- | :---: | :--- |
+| **Hard Content Conflicts (Both Modified)** | **14** | Manual 3-way harmonization required (`VERSION`, `earthd.py`, `roads.py`, `sidewalks.py`, `staging.py`, `dem.py`, `heightmap.py`, `surface.py`, `vegetation.py`, `lib.rs`, `core.lua`, `roads.lua`, `trees.lua`, `test_staging.py`). |
+| **Auto-Merged 3-Way Overlaps** | **20** | Clean 3-way merge; require semantic verification (`blockworker.py`, `buildings.py`, `cdae.py`, `dae.py`, `farfield.py`, `grading.py`, `imagery.py`, `matslots.py`, `navgraph.py`, `terraincache.py`, `settings.lua`, `framing.lua`, `EarthMap.vue`, `buildings.materials.json`, `main.materials.json`, and 5 test suites). |
+| **Upstream-Only Additions/Updates** | **43** | Fast-forward adoption (`budget.py`, `pacer.py`, `placepreview.py`, `prewarm.py`, `randomplace.py`, `sampler.py`, `roadmesh.py`, `mapdata.py`, `streetwidth.py`, `seafloor.py`, `gravity.py`, `levelinfo.lua`, `places.lua`, `earthfast.pyd` v34, etc.). |
+| **Local-Only High-Speed Pipeline Files** | **57** | Preserved intact (`farfield.lua`, `governor.lua`, `follow.lua`, `terrain.lua`, `crossover.lua`, `dev.lua`, `satmat.lua`, `fast.py`, `furniture.py`, `routing.py`, `tools/parallel_tests.py`, `tools/road_bench.py`, etc.). |
+
+---
+
+### 2. File-by-File Merge Plan & Sub-Agent Execution Matrix
+
+| Task ID | Component / Area | Files Allocated | Base Privileged (`upstream/main` 1.5.4-beta) | High-Speed Pipeline Layered On Top (`HEAD`) | Execution Status |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| **TASK-P9-01** | **Staging, DEM, Surface & Native Kernels** | `VERSION`<br>`server/staging.py`<br>`server/dem.py`<br>`server/heightmap.py`<br>`server/surface.py`<br>`native/earthfast/src/lib.rs`<br>`server/tests/test_staging.py` | `staging.replace` (`_remade` GH #27), `staging.replace_cached` (`REPLACE_WAITS` GH #67), `dem.py` `.npy` `np.memmap` mirrors, `lib.rs` `VERSION=34` (`release`, `measure_row32`, `terrain_at`, `follow_tris`). | `VERSION = 1.5.4-experimental`, `mark_temporary`, `session_dir`, `master_for`, `stage_for`, `surface.build(..., write_masks=True)`, bounds/empty guards in `lib.rs`. | **PLANNED (Ready)** |
+| **TASK-P9-02** | **Server Orchestrator & Farfield Streaming** | `server/earthd.py`<br>`server/farfield.py`<br>`server/blockworker.py`<br>`server/grading.py`<br>`server/matslots.py` | `DETAIL_ROAD_LIFT=0.025`, `VIEW_AWAY_M=50` (`view_focus`), `road_pool` navgraph offload, `base_pool`, `far_pool`, `hm_here`, `q=anchor_q`, `prewarm`, `random_place`, `place_previews`, `budget`/`pacer`/`sampler`. | `_pick_road_pool()` round-robin across `road_pool` list + `warm_qs`, velocity capsule (`lead`) on `view_focus` (when `view_at is None`), `_delete_batch`, `TCP_NODELAY`, `_inline_tile_meta`, L0/L1 graded far tiles, `TER_SWAP` mask skip, 256px mesh block clamp, ping-pong `slot_<n>_<gen>.cdae`. | **PLANNED (Ready)** |
+| **TASK-P9-03** | **Roads, Sidewalks, Buildings & Vegetation** | `server/roads.py`<br>`server/roadmesh.py`<br>`server/sidewalks.py`<br>`server/buildings.py`<br>`server/vegetation.py` | `roadmesh.follow_ground` (`FOLLOW_TOL=0.02`), rural motorways (`SHOULDER_M=2.2`), tunnel portals (`_clear_portals`, `_shallow_full_low`), deck envelope (`DECK_ROAD_CLEAR=7.5`), GH #55 narrow median clamp (`rr`, `xp`), `vegetation.py` v13 (`BARREN_NEAR_M`, `ROCK_SLOPE`, `TILE_ROWS_MAX=6000`, `view=None`). | `roads.BUILD_PER_POSE=8`, `_conform_walks` (`back_z`, `dz_slab`, `SKIRT=1.2`), `sidewalk_stop` outer-edge fallback, `GLASS` shadow culling + single-primitive `lite=True` buildings, `.vbin` 16-byte binary tree packing (`pack_vbin`, `write_vbin`, `send_tile`). | **PLANNED (Ready)** |
+| **TASK-P9-04** | **Lua Extensions & Client Governor Pipeline** | `mod/.../core.lua`<br>`mod/.../roads.lua`<br>`mod/.../trees.lua`<br>`mod/.../farfield.lua`<br>`mod/.../governor.lua`<br>`mod/.../settings.lua` | `levelinfo`, `places`, `rebase.couplings()`, `startTeleport`, `roads.prewarm`, `M.viewAway()`, `dropTile` purge + `q.tile == tiles[q.key]` + 3D deck `playerIn` (GH #64), `trees.TILE_CAP` + `tileThreshold` (GH #66), controller map navigation (`BigMap`). | Two-lane IPC (`random_place_result` & `place_previews_ready` in `LANE0_TYPES`), adaptive pose cadence (`0.20s`), `heavyFrame` isolation, `collectgarbage('step', 30)`, SDSM shadow scaling, `castShadows=0` culling, travel-gated `reloadCollision`, `trees.update(anchorId, player, view, gov)` micro-chunking + `.vbin` support in `tileThreshold`, `M.ensureRoutes()`. | **PLANNED (Ready)** |
+| **TASK-P9-05** | **Protocol Agreement & Full Parallel Test Validation** | `server/tests/test_protocol_agreement.py`<br>`tools/parallel_tests.py` | `random_place`, `place_previews`, `random_place_result`, `place_previews_ready`, `hello.prewarm`, `places.lua` scan in `mod_sends()`. | `veg_tile` (`vbin_path`, `bin`), `bldfar_tile` inlined fields, generational `SHAPE_RE`, `matslots.file()`, active-anchor filter, full 12-worker validation (`python tools/parallel_tests.py -j 12`). | **PLANNED (Ready)** |
+
+---
+
+### 3. Critical Conflict Trap Checklist
+- [x] **Trap 1 (`earthd.py`)**: Wrap `self.road_pool` list access in `self._pick_road_pool()` so both `build_roads_tile` and upstream's new `build_navgraph` submit to a single-worker executor without raising `AttributeError: 'list' object has no attribute 'submit'`.
+- [x] **Trap 2 (`trees.lua` & `core.lua`)**: Unify `trees.update(anchorId, player, view, gov)` to accept both upstream's 3rd-arg `view` (`{x, y}`) and our 4th-arg `gov` (with duck-typing fallback when `gov` is passed as 3rd arg in unit tests).
+- [x] **Trap 3 (`roads.lua`)**: Include `tile = tiles[key]` on every `walkQ` entry (including `what = 'road'`) so upstream's GitHub #64 stale-tile guard (`q.tile ~= tiles[q.key]`) does not skip road surface meshes.
+- [x] **Trap 4 (`trees.lua`)**: Update upstream's `tileThreshold(d, t)` (`M.TILE_CAP`) to support binary `.vbin` tiles (`t.bin`, `t.nRows`, `decodeBinRow`) in addition to JSON `t.rows`.
+- [x] **Trap 5 (`earthd.py`)**: Keep `lvl <= 1` graded farfield tiles on the server's graded path rather than offloading ungraded meshes to `self.far_pool`.
+- [x] **Trap 6 (`earthd.py`)**: Gate velocity lookahead capsule `lead` on `self.view_at is None` so free-camera / world-map panning (>50m from car) streams isotropically around the camera.
+- [x] **Trap 7 (`lib.rs` / `earthfast.pyd`)**: Keep `VERSION = 34` and upstream's compiled `earthfast.pyd` / `earthfast.abi3.so` exporting `measure_row32`, `terrain_at`, and `follow_tris`.
+- [x] **Trap 8 (`staging.py`)**: Provide both `replace()` (with `_remade` warning + `mark_temporary`) and `replace_cached()` (with `REPLACE_WAITS` retry loop) alongside `master_for` / `stage_for`.
+- [x] **Trap 9 (`test_protocol_agreement.py`)**: Merge both upstream's `random_place` / `place_previews` / `prewarm` schemas and our `.vbin` / inlined `bldfar_tile` / generational slot schemas.
+- [x] **Trap 10 (`core.lua`)**: Register `random_place_result` and `place_previews_ready` in `LANE0_TYPES` for immediate IPC dispatch.
