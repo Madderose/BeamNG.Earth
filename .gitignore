@@ -30,3 +30,11 @@ dist/
 native/earthfast/target/
 build/
 native/serverlist/target/
+
+# Local caches, benchmark runs, and profiling artifacts
+cache/
+runs/
+scratch/
+perf_reports/
+prof_*.txt
+tools/monitor.ps1
