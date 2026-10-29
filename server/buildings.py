@@ -337,7 +337,7 @@ def oriented_box(p):
 class Spec:
     """What is built for one footprint (decided by plan())."""
     __slots__ = ("ring", "floors", "floor_h", "height", "roof", "roof_mat", "facade", "band", "shop", "plain", "min_h", "wall", "door", "windows", "front", "steeple", "stoop",
-                 "sign", "porch", "cls", "seed", "deck", "pitch", "portal", "gring", "roof_rgb")
+                 "sign", "porch", "cls", "seed", "deck", "pitch", "portal", "gring", "roof_rgb", "seed_id")
 
     def __init__(self, **kw):
         for k in self.__slots__:
@@ -2546,24 +2546,28 @@ def tile_buildings(frame, x0, y0, x1, y1, layers, elev, water=None, part_layers=
             ring = clean_ring(np.stack([e - x0, n - y0], 1))
             if ring is None or _area2(ring) / 2 < MIN_AREA_M2:
                 continue
-            is_ml = "src_dataset" in a and str(a["src_dataset"][i]) not in ("OpenStreetMap", "IGN_BDTOPO")
+            src_ds = str(a["src_dataset"][i]) if "src_dataset" in a else ""
+            is_ign = src_ds == "IGN_BDTOPO" or str(key or "").startswith("~ign:")
+            is_ml = "src_dataset" in a and src_ds not in ("OpenStreetMap", "IGN_BDTOPO")
             if is_ml and _ml_false(ring, bridges_xy, water_xy, ml_roads_xy if ml_roads_xy is not None else roads_xy):
                 continue
             mh = at.get("min_height")
             mh = float(mh) if mh is not None and np.isfinite(mh) and mh > 0 else 0.0
             if mh <= 0.5 and roads_xy:
                 rt_ = road_through(ring, roads_xy)
-                if rt_ >= ROAD_THROUGH_M or road_across(ring, roads_xy):
+                if not is_ign and (rt_ >= ROAD_THROUGH_M or road_across(ring, roads_xy)):
                     mh = OVER_ROAD_CLEAR_M
-                    h = at.get("height")
-                    if h is None or not np.isfinite(h) or h < mh + 3.0:
+                    orig_h = at.get("height")
+                    at = dict(at, orig_height=orig_h, synth_mh=True)
+                    if orig_h is None or not np.isfinite(orig_h) or orig_h < mh + 3.0:
                         at = dict(at, height=mh + 3.0)      # keeps its top; at least a slab's worth over the clearance
                 elif rt_ >= 0.5:
                     ring, lift_ = _clear_road(ring, roads_xy)
-                    if lift_:
+                    if lift_ and not is_ign:
                         mh = OVER_ROAD_CLEAR_M
-                        h = at.get("height")
-                        if h is None or not np.isfinite(h) or h < mh + 3.0:
+                        orig_h = at.get("height")
+                        at = dict(at, orig_height=orig_h, synth_mh=True)
+                        if orig_h is None or not np.isfinite(orig_h) or orig_h < mh + 3.0:
                             at = dict(at, height=mh + 3.0)
                 else:
                     ring, _ = _clear_road(ring, roads_xy, clear_m=2.5, only_clip=True)
@@ -2628,15 +2632,22 @@ def tile_buildings(frame, x0, y0, x1, y1, layers, elev, water=None, part_layers=
         up_all[ok] = np.asarray(frame.geodetic_to_enu(la_all[ok], lo_all[ok], g_all[ok])[2], np.float64)
     out = []
     for k, (ring, at, sh, look, mh) in enumerate(zip(rings, attrs, shared, looks, mins)):
+        i0, i1 = (ends[k - 1] if k else 0), ends[k]
+        if not ok[i0:i1].all():
+            continue
+        g = up_all[i0:i1].copy()
+        gmin, gmax = float(g.min()), float(g.max())
+        if at.get("synth_mh") and (gmax - gmin > 4.0):
+            mh = 0.0
+            if "orig_height" in at:
+                at = dict(at, height=at["orig_height"])
         if mh > 0.5 and at.get("height") is not None and np.isfinite(at["height"]) and look is None:
             at = dict(at, height=max(2.5, float(at["height"]) - mh))     # a building's own height range
         spec = plan(ring, at, int(sh) if look is None else 0, clat, clon, look, town, dense, west_town, alpine)
         spec.min_h = mh
         spec.portal = bool(at.get("portal"))
-        i0, i1 = (ends[k - 1] if k else 0), ends[k]
-        if not ok[i0:i1].all():
-            continue
-        g = up_all[i0:i1].copy()
+        if at.get("seed_id"):
+            spec.seed_id = at["seed_id"]
         if at.get("ml") and ways_xy is not None and _ml_steep(ring, g, ways_xy):
             continue
         if water is not None:

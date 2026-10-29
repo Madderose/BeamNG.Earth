@@ -26,6 +26,7 @@ from dataclasses import dataclass
 import numpy as np
 
 import fast
+from PIL import Image, ImageDraw
 
 import mapcells
 import pacer
@@ -33,7 +34,7 @@ import staging
 
 log = logging.getLogger("earthd.vegetation")
 
-VERSION = 18          # (the cached cells hold their groups: 14 for the regional rules of GitHub #110; 16: the roads'
+VERSION = 19          # (the cached cells hold their groups: 14 for the regional rules of GitHub #110; 16: the roads'
                       # drawn widths and sidewalks kept clear; 17: BC's lidar canopy heights, mapdata's canopy layer 2;
                       # 18: the rounded junction corners kept clear, roadcorners.py; Provence lavender rows & flower spikes)
 TREE_MIN_M = 3.0
@@ -393,16 +394,24 @@ class Vegetation:
                 is_tree[keep]
         # squares, pedestrian areas, parking lots, plus Overture & IGN French agricultural parcels and hedgerows
         paved = np.zeros(h.shape, bool)
+        res_mask = np.zeros(h.shape, bool)
         lu = None
         try:
             cl = self.md.cell((mapcells.ZOOM, x, y), layers=("land_use", "infrastructure"))
             lu, inf = cl.layers.get("land_use"), cl.layers.get("infrastructure")
-            if lu is not None and len(lu) and lu.attrs.get("subtype") is not None:
-                _mask_polys(lu, paved, chm, 0.0, select=lu.attrs["subtype"].astype(str) == "pedestrian")
+            if lu is not None and getattr(lu, "attrs", None) is not None:
+                if lu.attrs.get("subtype") is not None:
+                    _mask_polys(lu, paved, chm, 0.0, select=lu.attrs["subtype"].astype(str) == "pedestrian")
+                if lu.attrs.get("class") is not None:
+                    _mask_polys(lu, res_mask, chm, 0.0, select=lu.attrs["class"].astype(str) == "residential")
             if inf is not None and len(inf) and inf.attrs.get("class") is not None:
                 _mask_polys(inf, paved, chm, 0.0, select=inf.attrs["class"].astype(str) == "parking")
         except Exception as e:                  # not at hand: scattered as before
             log.debug("vegetation: land use of %s: %s", (x, y), e)
+        bld_parcel = np.zeros(h.shape, bool)
+        bld_feat = cd.layers.get("buildings")
+        if bld_feat is not None:
+            _mask_polys(bld_feat, bld_parcel, chm, 5.0)
         fr = None
         ign = getattr(self.md, "ign_fr", None)
         if ign is not None:
@@ -413,7 +422,8 @@ class Vegetation:
         hedge_mask = np.zeros(h.shape, bool)
         hedges = self._build_hedges(fr, cd, chm, hs, blocked, hedge_mask)
         crop_mask = np.zeros(h.shape, bool)
-        parcels = self._build_parcels(fr, lu, cd, chm, blocked, crop_mask)
+        parcel_blocked = blocked | road | paved | res_mask | bld_parcel
+        parcels = self._build_parcels(fr, lu, cd, chm, parcel_blocked, crop_mask)
         if (hedge_mask | crop_mask).any():
             keep_m = ~(hedge_mask[jj, ii] | crop_mask[jj, ii])
             jj, ii, th, tlon, tlat, lcls, is_tree = (
@@ -476,7 +486,7 @@ class Vegetation:
                 if L < 1.0:
                     continue
                 ux, uy = float(dx[k]) / L, float(dy[k]) / L
-                seg_yaw = math.degrees(math.atan2(uy, ux)) % 360.0
+                seg_yaw = float((-math.degrees(math.atan2(uy, ux))) % 360.0)
                 n_steps = max(1, int(math.floor(L / step_3857)))
                 ts = (np.arange(n_steps) + 0.5) * (L / n_steps)
                 px_list.append(hx[k] + ts * ux)
@@ -539,6 +549,8 @@ class Vegetation:
 
         # Gather (crop_type, FeatTable, select_bool) sources
         sources = []
+        has_fr_vineyard = False
+        has_fr_olive = False
         if fr is not None and len(fr.polys):
             crops = fr.polys.attrs.get("crop")
             if crops is not None:
@@ -546,12 +558,16 @@ class Vegetation:
                     sel = crops == cname
                     if sel.any():
                         sources.append((cname, fr.polys, sel))
+                        if cname == "vineyard":
+                            has_fr_vineyard = True
+                        elif cname == "olive":
+                            has_fr_olive = True
         if lu is not None and len(lu) and lu.attrs.get("class") is not None:
             lcls_str = lu.attrs["class"].astype(str)
             v_sel = lcls_str == "vineyard"
-            if v_sel.any():
+            if v_sel.any() and not has_fr_vineyard:
                 sources.append(("vineyard", lu, v_sel))
-            if med:
+            if med and not has_fr_olive:
                 o_sel = lcls_str == "orchard"
                 if o_sel.any():
                     sources.append(("olive", lu, o_sel))
@@ -581,15 +597,17 @@ class Vegetation:
                 sa_blk, sb_blk = 15.5 * m_scale, 7.2 * m_scale
                 da_sub = np.array([-5.17, 0.0, 5.17]) * m_scale
                 db_sub = np.array([-2.4, 0.0, 2.4]) * m_scale
-            elif cname == "lavender":
-                avail &= ~_dilate(~avail, 1)
-                sa_blk, sb_blk = 2.45 * m_scale, 2.72 * m_scale
-            elif cname == "olive":
-                avail &= ~_dilate(~avail, 1)
-                sa_blk, sb_blk = 7.5 * m_scale, 7.5 * m_scale
-            else:  # truffle
-                avail &= ~_dilate(~avail, 1)
-                sa_blk, sb_blk = 9.0 * m_scale, 9.0 * m_scale
+            else:
+                inner = None
+                if cname == "lavender":
+                    avail &= ~_dilate(~avail, 1)
+                    sa_blk, sb_blk = 2.45 * m_scale, 2.72 * m_scale
+                elif cname == "olive":
+                    avail &= ~_dilate(~avail, 1)
+                    sa_blk, sb_blk = 7.5 * m_scale, 7.5 * m_scale
+                else:  # truffle
+                    avail &= ~_dilate(~avail, 1)
+                    sa_blk, sb_blk = 9.0 * m_scale, 9.0 * m_scale
 
             for f_tab, sel in c_sources:
                 for fi in np.flatnonzero((f_tab.kind == 3) & sel):
@@ -606,6 +624,24 @@ class Vegetation:
                         r1 = min(n_r, int(math.ceil((chm.y0 - ry.min()) / chm.dy)) + 1)
                         if c1 <= c0 or r1 <= r0 or not avail[r0:r1, c0:c1].any():
                             continue
+                        # Rasterize parcel part polygon mask in r0:r1, c0:c1
+                        poly_c = (rx - chm.x0) / chm.dx - c0
+                        poly_r = (chm.y0 - ry) / chm.dy - r0
+                        im_mask = Image.new("1", (c1 - c0, r1 - r0), 0)
+                        draw = ImageDraw.Draw(im_mask)
+                        draw.polygon(list(zip(poly_c, poly_r)), fill=1)
+                        for hole in part[1:]:
+                            if len(hole) >= 3:
+                                hx, hy = _to3857(hole[:, 0], hole[:, 1])
+                                hc = (hx - chm.x0) / chm.dx - c0
+                                hr = (chm.y0 - hy) / chm.dy - r0
+                                draw.polygon(list(zip(hc, hr)), fill=0)
+                        part_poly_mask = np.asarray(im_mask, dtype=bool)
+
+                        sub_avail = avail[r0:r1, c0:c1]
+                        if not part_poly_mask.any() or sub_avail[part_poly_mask].mean() < 0.35:
+                            continue
+
                         ring_xy = np.column_stack([rx, ry])
                         try:
                             best = fast._ef.oriented_box_core(np.ascontiguousarray(ring_xy, np.float64))
@@ -618,7 +654,7 @@ class Vegetation:
                         else:
                             ux, uy, vx, vy = 1.0, 0.0, 0.0, 1.0
                             amin, amax, bmin, bmax = float(rx.min()), float(rx.max()), float(ry.min()), float(ry.max())
-                        yaw_deg = float(math.degrees(math.atan2(uy, ux)) % 360.0)
+                        yaw_deg = float((-math.degrees(math.atan2(uy, ux))) % 360.0)
                         aa = np.arange(amin, amax + 0.5 * sa_blk, sa_blk)
                         bb = np.arange(bmin, bmax + 0.5 * sb_blk, sb_blk)
                         if not len(aa) or not len(bb):
@@ -725,6 +761,10 @@ class Vegetation:
                                     (_hash01(gx, gy, 51) * 360.0).astype(np.float32),
                                     (0.88 + 0.24 * _hash01(gx, gy, 52)).astype(np.float32),
                                 ))
+                        # Mark the entire polygon area as claimed
+                        avail[r0:r1, c0:c1] &= ~part_poly_mask
+                        if inner is not None:
+                            inner[r0:r1, c0:c1] &= ~part_poly_mask
         return _concat_all(parts_out) if parts_out else _empty()
 
     def _edge(self, cd, lc, blocked, road, chm, hs):

@@ -481,3 +481,47 @@ class ProvenceIgnFrTest(unittest.TestCase):
         self.assertGreater(int(out[32, 32, 2]), int(out[32, 32, 1]) + 20)
         # Corner pixel (0, 0) is outside the lavender polygon -> unchanged
         np.testing.assert_array_equal(out[0, 0], rgb[0, 0])
+
+    def test_tavel_vineyard_parcel_orientation_and_buffers(self):
+        import ign_fr
+        import mapgeom
+        pkey = mapcells.cell_of(44.011, 4.701)  # Tavel
+        lon0, lat0, lon1, lat1 = pkey.bounds()
+        x0, y1 = veg._to3857(lon0, lat1)
+        x1, y0 = veg._to3857(lon1, lat0)
+        dx = (x1 - x0) / 512
+        chm = Raster(np.zeros((512, 512), np.uint8), x0, y1, dx, nodata=255)
+
+        def lonlat(r, c):
+            lo, la = veg._to4326(x0 + (c + 0.5) * dx, y1 - (r + 0.5) * dx)
+            return [float(lo), float(la)]
+
+        def rect_ring(r0, c0, r1, c1):
+            return [lonlat(r0, c0), lonlat(r0, c1), lonlat(r1, c1), lonlat(r1, c0), lonlat(r0, c0)]
+
+        # Parcel 1: Vineyard at [100, 100] to [200, 300]
+        # Parcel 2: Overlapping duplicate parcel at [110, 110] to [190, 290] (should be skipped due to overlap)
+        fr_dict = {
+            "polys": [
+                ["vineyard", [[rect_ring(100, 100, 200, 300)]]],
+                ["vineyard", [[rect_ring(110, 110, 190, 290)]]],
+            ],
+            "hedges": [],
+        }
+        fr_cell = ign_fr._cell_from_dict(fr_dict)
+        cd = SimpleNamespace(
+            bounds=pkey.bounds(),
+            layers={"canopy": chm, "landcover": Raster(None, 0, 0, 1), "buildings": None, "roads": None, "water": None},
+        )
+        md = SimpleNamespace(
+            release="t",
+            ign_fr=SimpleNamespace(cell=lambda k, bounds=None, kind="demand": fr_cell),
+            cell=lambda k, layers=None, kind="demand": cd,
+        )
+        it = veg.Vegetation(md, None).cell(pkey)
+        v_idx = np.flatnonzero(np.isin(it.group, [veg.G_VINEYARD, veg.G_VINEYARD_BLOCK]))
+        self.assertGreater(len(v_idx), 0)
+        # All vineyard items in this E-W rectangular parcel should have yaw 0.0 (or 180.0)
+        yaws = it.yaw[v_idx]
+        self.assertTrue(np.all(np.isclose(yaws, 0.0) | np.isclose(yaws, 180.0) | np.isclose(yaws, 360.0)))
+

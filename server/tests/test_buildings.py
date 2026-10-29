@@ -1198,3 +1198,66 @@ class IgnBdTopoAndAerialRoofTest(unittest.TestCase):
 
             P, UV, T, M, mats, C = bld.build([(s, 100.0, 100.5)])
             self.assertIn(bld.ROOF_TILE, mats, "uses 3D normal-mapped Mediterranean clay roof tile material")
+
+    def test_ign_bdtopo_over_road_clear_not_synthesized(self):
+        import geodesy
+        import mapgeom
+
+        frame = geodesy.EnuFrame(44.17, 5.14)
+        e = np.array([25.0, 75.0, 75.0, 25.0, 25.0])
+        n = np.array([25.0, 25.0, 75.0, 75.0, 25.0])
+        la, lo, _ = frame.enu_to_geodetic(e, n, 0.0)
+        ring_ll = np.stack([lo, la], 1)
+        road = np.array([[10.0, 50.0], [90.0, 50.0]])
+        
+        # 1) IGN BD TOPO building -> should NOT get OVER_ROAD_CLEAR_M (min_h remains 0.0)
+        feats_ign = mapgeom.Features(
+            layer="buildings",
+            ids=mapgeom.text_column(["ign_bld1"]),
+            kind=np.array([mapgeom.POLYGON], np.uint8),
+            part_off=np.array([0, 1], np.int64),
+            ring_off=np.array([0, 1], np.int64),
+            coord_off=np.array([0, len(ring_ll)], np.int64),
+            lonlat=ring_ll,
+            attrs={
+                "height": np.array([9.2], np.float32),
+                "num_floors": np.array([np.nan], np.float32),
+                "class": mapgeom.text_column(["industrial"]),
+                "src_dataset": mapgeom.text_column(["IGN_BDTOPO"]),
+            },
+        )
+        def ground(la, lo):
+            return np.full(len(la), 350.0)
+
+        items_ign = bld.tile_buildings(frame, 0, 0, 100, 100, [feats_ign], ground, roads_xy=[road])
+        self.assertEqual(len(items_ign), 1)
+        spec_ign, gmin, gmax = items_ign[0]
+        self.assertEqual(spec_ign.min_h, 0.0, "IGN BD TOPO building is not lifted as overpass")
+        self.assertAlmostEqual(spec_ign.height, 9.2, places=1)
+
+        # 2) Regular building on steep slope (>4m) with synthesized overpass -> reset to min_h=0.0
+        feats_osm = mapgeom.Features(
+            layer="buildings",
+            ids=mapgeom.text_column(["osm_bld1"]),
+            kind=np.array([mapgeom.POLYGON], np.uint8),
+            part_off=np.array([0, 1], np.int64),
+            ring_off=np.array([0, 1], np.int64),
+            coord_off=np.array([0, len(ring_ll)], np.int64),
+            lonlat=ring_ll,
+            attrs={
+                "height": np.array([12.0], np.float32),
+                "num_floors": np.array([np.nan], np.float32),
+                "class": mapgeom.text_column(["residential"]),
+                "src_dataset": mapgeom.text_column(["OpenStreetMap"]),
+            },
+        )
+        def steep_ground(la, lo):
+            # 10m height diff across footprint
+            e_samp, n_samp, _ = frame.geodetic_to_enu(la, lo, 0.0)
+            return 350.0 + (n_samp - 25.0) / 50.0 * 10.0
+
+        items_osm = bld.tile_buildings(frame, 0, 0, 100, 100, [feats_osm], steep_ground, roads_xy=[road])
+        self.assertEqual(len(items_osm), 1)
+        spec_osm, gmin, gmax = items_osm[0]
+        self.assertEqual(spec_osm.min_h, 0.0, "Steep hillside building resets synthesized overpass to 0.0")
+        self.assertAlmostEqual(spec_osm.height, 12.0, places=1)
