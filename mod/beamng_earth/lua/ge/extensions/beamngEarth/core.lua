@@ -422,6 +422,7 @@ local function activateWorld()
   local fixed = stg and stg.get and stg.get('viewDistanceMode') == 'fixed'
   if scenetree.theLevelInfo and not fixed then scenetree.theLevelInfo.visibleDistance = VISIBLE_DISTANCE end
   terrain.hideGroundPlanes()
+  if trees.adoptExistingForests then pcall(trees.adoptExistingForests) end
   applyHorizon()
   if M.shadowctl and M.shadowctl.apply then pcall(M.shadowctl.apply) end
 end
