@@ -28,7 +28,7 @@ import staging
 
 log = logging.getLogger("earthd.ign_fr")
 
-VERSION = 1
+VERSION = 2
 ON = os.environ.get("BNE_IGN_FR", "on") != "off"
 WFS_URL = "https://data.geopf.fr/wfs/ows"
 LANE = "ign_wfs"
@@ -424,6 +424,7 @@ class IgnFr:
         ok_count = 0
 
         # 1. RPG parcels (vineyards, lavender fields, olive groves, truffle oaks)
+        rpg_vineyards = 0
         try:
             rpg = self._wfs_get("RPG.LATEST:parcelles_graphiques", bbox_str, count=2000, kind=kind)
             ok_count += 1
@@ -433,6 +434,8 @@ class IgnFr:
                     parts = _extract_rings(feat.get("geometry"))
                     if parts:
                         polys.append([crop, parts])
+                        if crop == "vineyard":
+                            rpg_vineyards += 1
         except Exception as e:
             log.debug("ign_fr RPG %s: %s: %s", bbox_str, type(e).__name__, e)
 
@@ -459,6 +462,8 @@ class IgnFr:
                 props = feat.get("properties") or {}
                 nat = str(props.get("nature") or "").strip()
                 if nat == "Vigne":
+                    if rpg_vineyards > 0:
+                        continue  # RPG already provides fine-grained vineyard parcels
                     parts = _extract_rings(feat.get("geometry"))
                     if parts:
                         polys.append(["vineyard", parts])

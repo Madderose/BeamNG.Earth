@@ -34,7 +34,7 @@ import staging
 
 log = logging.getLogger("earthd.vegetation")
 
-VERSION = 19          # (the cached cells hold their groups: 14 for the regional rules of GitHub #110; 16: the roads'
+VERSION = 20          # (the cached cells hold their groups: 14 for the regional rules of GitHub #110; 16: the roads'
                       # drawn widths and sidewalks kept clear; 17: BC's lidar canopy heights, mapdata's canopy layer 2;
                       # 18: the rounded junction corners kept clear, roadcorners.py; Provence lavender rows & flower spikes)
 TREE_MIN_M = 3.0
@@ -486,7 +486,7 @@ class Vegetation:
                 if L < 1.0:
                     continue
                 ux, uy = float(dx[k]) / L, float(dy[k]) / L
-                seg_yaw = float((-math.degrees(math.atan2(uy, ux))) % 360.0)
+                seg_yaw = float(math.degrees(math.atan2(uy, ux)) % 360.0)
                 n_steps = max(1, int(math.floor(L / step_3857)))
                 ts = (np.arange(n_steps) + 0.5) * (L / n_steps)
                 px_list.append(hx[k] + ts * ux)
@@ -609,6 +609,7 @@ class Vegetation:
                     avail &= ~_dilate(~avail, 1)
                     sa_blk, sb_blk = 9.0 * m_scale, 9.0 * m_scale
 
+            all_parts = []
             for f_tab, sel in c_sources:
                 for fi in np.flatnonzero((f_tab.kind == 3) & sel):
                     for part in f_tab.parts(int(fi)):
@@ -618,153 +619,172 @@ class Vegetation:
                         rx, ry = _to3857(ring[:, 0], ring[:, 1])
                         if rx.max() < ex0 or rx.min() > ex1 or ry.max() < ey0 or ry.min() > ey1:
                             continue
-                        c0 = max(0, int(math.floor((rx.min() - chm.x0) / chm.dx)))
-                        c1 = min(n_c, int(math.ceil((rx.max() - chm.x0) / chm.dx)) + 1)
-                        r0 = max(0, int(math.floor((chm.y0 - ry.max()) / chm.dy)))
-                        r1 = min(n_r, int(math.ceil((chm.y0 - ry.min()) / chm.dy)) + 1)
-                        if c1 <= c0 or r1 <= r0 or not avail[r0:r1, c0:c1].any():
-                            continue
-                        # Rasterize parcel part polygon mask in r0:r1, c0:c1
-                        poly_c = (rx - chm.x0) / chm.dx - c0
-                        poly_r = (chm.y0 - ry) / chm.dy - r0
-                        im_mask = Image.new("1", (c1 - c0, r1 - r0), 0)
-                        draw = ImageDraw.Draw(im_mask)
-                        draw.polygon(list(zip(poly_c, poly_r)), fill=1)
-                        for hole in part[1:]:
-                            if len(hole) >= 3:
-                                hx, hy = _to3857(hole[:, 0], hole[:, 1])
-                                hc = (hx - chm.x0) / chm.dx - c0
-                                hr = (chm.y0 - hy) / chm.dy - r0
-                                draw.polygon(list(zip(hc, hr)), fill=0)
-                        part_poly_mask = np.asarray(im_mask, dtype=bool)
+                        area_est = float((rx.max() - rx.min()) * (ry.max() - ry.min()))
+                        all_parts.append((area_est, rx, ry, part))
+            all_parts.sort(key=lambda item: item[0])
 
-                        sub_avail = avail[r0:r1, c0:c1]
-                        if not part_poly_mask.any() or sub_avail[part_poly_mask].mean() < 0.35:
-                            continue
+            for _, rx, ry, part in all_parts:
+                c0 = max(0, int(math.floor((rx.min() - chm.x0) / chm.dx)))
+                c1 = min(n_c, int(math.ceil((rx.max() - chm.x0) / chm.dx)) + 1)
+                r0 = max(0, int(math.floor((chm.y0 - ry.max()) / chm.dy)))
+                r1 = min(n_r, int(math.ceil((chm.y0 - ry.min()) / chm.dy)) + 1)
+                if c1 <= c0 or r1 <= r0 or not avail[r0:r1, c0:c1].any():
+                    continue
+                # Rasterize parcel part polygon mask in r0:r1, c0:c1
+                poly_c = (rx - chm.x0) / chm.dx - c0
+                poly_r = (chm.y0 - ry) / chm.dy - r0
+                im_mask = Image.new("1", (c1 - c0, r1 - r0), 0)
+                draw = ImageDraw.Draw(im_mask)
+                draw.polygon(list(zip(poly_c, poly_r)), fill=1)
+                for hole in part[1:]:
+                    if len(hole) >= 3:
+                        hx, hy = _to3857(hole[:, 0], hole[:, 1])
+                        hc = (hx - chm.x0) / chm.dx - c0
+                        hr = (chm.y0 - hy) / chm.dy - r0
+                        draw.polygon(list(zip(hc, hr)), fill=0)
+                part_poly_mask = np.asarray(im_mask, dtype=bool)
 
-                        ring_xy = np.column_stack([rx, ry])
-                        try:
-                            best = fast._ef.oriented_box_core(np.ascontiguousarray(ring_xy, np.float64))
-                        except Exception:
-                            best = None
-                        if best is not None:
-                            ux, uy, vx, vy, amin, amax, bmin, bmax = best
-                            if (bmax - bmin) > (amax - amin):
-                                ux, uy, vx, vy, amin, amax, bmin, bmax = vx, vy, -ux, -uy, bmin, bmax, -amax, -amin
-                        else:
-                            ux, uy, vx, vy = 1.0, 0.0, 0.0, 1.0
-                            amin, amax, bmin, bmax = float(rx.min()), float(rx.max()), float(ry.min()), float(ry.max())
-                        yaw_deg = float((-math.degrees(math.atan2(uy, ux))) % 360.0)
-                        aa = np.arange(amin, amax + 0.5 * sa_blk, sa_blk)
-                        bb = np.arange(bmin, bmax + 0.5 * sb_blk, sb_blk)
-                        if not len(aa) or not len(bb):
-                            continue
-                        AA, BB = np.meshgrid(aa, bb)
-                        AA, BB = AA.ravel(), BB.ravel()
+                sub_avail = avail[r0:r1, c0:c1]
+                if not part_poly_mask.any() or sub_avail[part_poly_mask].mean() < 0.35:
+                    continue
 
-                        if cname == "vineyard":
-                            px = AA * ux + BB * vx
-                            py = AA * uy + BB * vy
-                            cc = np.floor((px - chm.x0) / chm.dx).astype(np.int64)
-                            rr = np.floor((chm.y0 - py) / chm.dy).astype(np.int64)
-                            in_box = (px >= ex0) & (px < ex1) & (py > ey0) & (py <= ey1) & (cc >= c0) & (cc < c1) & (rr >= r0) & (rr < r1)
-                            is_blk = np.zeros(len(px), bool)
-                            is_blk[in_box] = inner[rr[in_box], cc[in_box]]
-                            if is_blk.any():
-                                b_px, b_py, b_rr, b_cc = px[is_blk], py[is_blk], rr[is_blk], cc[is_blk]
-                                # Clear block footprints from avail so overlapping polygons don't double-fill
-                                rb_px = max(1, int(round(4.0 / chm.dx)))
-                                for dr_ in range(-rb_px, rb_px + 1):
-                                    for dc_ in range(-rb_px, rb_px + 1):
-                                        avail[np.clip(b_rr + dr_, 0, n_r - 1), np.clip(b_cc + dc_, 0, n_c - 1)] = False
-                                inner[r0:r1, c0:c1] &= avail[r0:r1, c0:c1]
-                                b_lon, b_lat = _to4326(b_px, b_py)
-                                gx = np.floor((b_px + 20037508.342789244) / chm.dx).astype(np.int64)
-                                gy = np.floor((20037508.342789244 - b_py) / chm.dy).astype(np.int64)
-                                nb = len(b_px)
-                                parts_out.append(Items(
-                                    b_lon, b_lat, np.full(nb, 1.86, np.float32), np.full(nb, 3.5, np.float32),
-                                    np.full(nb, KIND_BUSH, np.uint8), np.full(nb, G_VINEYARD_BLOCK, np.uint8),
-                                    (_hash01(gx, gy, 41) * 0.5).astype(np.float32),
-                                    np.full(nb, yaw_deg, np.float32),
-                                    (0.94 + 0.12 * _hash01(gx, gy, 42)).astype(np.float32),
-                                ))
-                            # Subdivide non-block cells into 3x3 single-row grape_vine segments
-                            rem = ~is_blk
-                            if rem.any():
-                                A_sub = (AA[rem, None, None] + da_sub[None, :, None] + np.zeros((1, 1, 3))).ravel()
-                                B_sub = (BB[rem, None, None] + np.zeros((1, 3, 1)) + db_sub[None, None, :]).ravel()
-                                spx = A_sub * ux + B_sub * vx
-                                spy = A_sub * uy + B_sub * vy
-                                scc = np.floor((spx - chm.x0) / chm.dx).astype(np.int64)
-                                srr = np.floor((chm.y0 - spy) / chm.dy).astype(np.int64)
-                                sok = (spx >= ex0) & (spx < ex1) & (spy > ey0) & (spy <= ey1) & (scc >= c0) & (scc < c1) & (srr >= r0) & (srr < r1)
-                                sok[sok] &= avail[srr[sok], scc[sok]]
-                                if sok.any():
-                                    spx, spy, srr, scc = spx[sok], spy[sok], srr[sok], scc[sok]
-                                    rs_px = max(1, int(round(1.8 / chm.dx)))
-                                    for dr_ in range(-rs_px, rs_px + 1):
-                                        for dc_ in range(-rs_px, rs_px + 1):
-                                            avail[np.clip(srr + dr_, 0, n_r - 1), np.clip(scc + dc_, 0, n_c - 1)] = False
-                                    slon, slat = _to4326(spx, spy)
-                                    gx = np.floor((spx + 20037508.342789244) / chm.dx).astype(np.int64)
-                                    gy = np.floor((20037508.342789244 - spy) / chm.dy).astype(np.int64)
-                                    ns = len(spx)
-                                    parts_out.append(Items(
-                                        slon, slat, np.full(ns, 1.71, np.float32), np.full(ns, 1.2, np.float32),
-                                        np.full(ns, KIND_BUSH, np.uint8), np.full(ns, G_VINEYARD, np.uint8),
-                                        (_hash01(gx, gy, 43) * 0.7).astype(np.float32),
-                                        np.full(ns, yaw_deg, np.float32),
-                                        (0.92 + 0.16 * _hash01(gx, gy, 44)).astype(np.float32),
-                                    ))
-                        else:
-                            px = AA * ux + BB * vx
-                            py = AA * uy + BB * vy
-                            if cname in ("olive", "truffle"):
-                                gx0 = np.floor((px + 20037508.342789244) / chm.dx).astype(np.int64)
-                                gy0 = np.floor((20037508.342789244 - py) / chm.dy).astype(np.int64)
-                                jit = 0.6 * m_scale
-                                px = px + (_hash01(gx0, gy0, 45) - 0.5) * 2.0 * jit
-                                py = py + (_hash01(gx0, gy0, 46) - 0.5) * 2.0 * jit
-                            cc = np.floor((px - chm.x0) / chm.dx).astype(np.int64)
-                            rr = np.floor((chm.y0 - py) / chm.dy).astype(np.int64)
-                            ok = (px >= ex0) & (px < ex1) & (py > ey0) & (py <= ey1) & (cc >= c0) & (cc < c1) & (rr >= r0) & (rr < r1)
-                            ok[ok] &= avail[rr[ok], cc[ok]]
-                            if not ok.any():
-                                continue
-                            px, py, rr, cc = px[ok], py[ok], rr[ok], cc[ok]
-                            if cname == "lavender":
-                                avail[rr, cc] = False
-                            else:
-                                for dr_ in (-1, 0, 1):
-                                    for dc_ in (-1, 0, 1):
-                                        avail[np.clip(rr + dr_, 0, n_r - 1), np.clip(cc + dc_, 0, n_c - 1)] = False
-                            lon, lat = _to4326(px, py)
-                            gx = np.floor((px + 20037508.342789244) / chm.dx).astype(np.int64)
-                            gy = np.floor((20037508.342789244 - py) / chm.dy).astype(np.int64)
-                            np_ = len(px)
-                            if cname == "lavender":
-                                h_lav = (0.66 + 0.14 * _hash01(gx, gy, 48)).astype(np.float32)
-                                parts_out.append(Items(
-                                    lon, lat, h_lav, np.full(np_, 1.25, np.float32),
-                                    np.full(np_, KIND_BUSH, np.uint8), np.full(np_, G_LAVENDER, np.uint8),
-                                    (_hash01(gx, gy, 47) * 0.6).astype(np.float32),
-                                    np.full(np_, yaw_deg, np.float32),
-                                    (0.92 + 0.16 * _hash01(gx, gy, 48)).astype(np.float32),
-                                ))
-                            else:
-                                h_tree = (3.6 + 1.5 * _hash01(gx, gy, 49)) if cname == "olive" else (7.8 + 2.4 * _hash01(gx, gy, 49))
-                                parts_out.append(Items(
-                                    lon, lat, h_tree.astype(np.float32), (0.15 * h_tree + 1.0).astype(np.float32),
-                                    np.full(np_, KIND_TREE, np.uint8), np.full(np_, G_OLIVE, np.uint8),
-                                    (_hash01(gx, gy, 50) * 0.5).astype(np.float32),
-                                    (_hash01(gx, gy, 51) * 360.0).astype(np.float32),
-                                    (0.88 + 0.24 * _hash01(gx, gy, 52)).astype(np.float32),
-                                ))
-                        # Mark the entire polygon area as claimed
-                        avail[r0:r1, c0:c1] &= ~part_poly_mask
+                part_avail = part_poly_mask & sub_avail
+                if cname == "vineyard":
+                    r_blk = max(2, int(round(6.5 / chm.dx)))
+                    part_inner = part_avail & ~_dilate(~part_poly_mask, r_blk)
+                    if inner is not None:
+                        part_inner &= inner[r0:r1, c0:c1]
+                else:
+                    part_inner = None
+
+                ring_xy = np.column_stack([rx, ry])
+                try:
+                    best = fast._ef.oriented_box_core(np.ascontiguousarray(ring_xy, np.float64))
+                except Exception:
+                    best = None
+                if best is not None:
+                    ux, uy, vx, vy, amin, amax, bmin, bmax = best
+                    if (bmax - bmin) > (amax - amin):
+                        ux, uy, vx, vy, amin, amax, bmin, bmax = vx, vy, -ux, -uy, bmin, bmax, -amax, -amin
+                else:
+                    ux, uy, vx, vy = 1.0, 0.0, 0.0, 1.0
+                    amin, amax, bmin, bmax = float(rx.min()), float(rx.max()), float(ry.min()), float(ry.max())
+                yaw_deg = float(math.degrees(math.atan2(uy, ux)) % 360.0)
+                aa = np.arange(amin, amax + 0.5 * sa_blk, sa_blk)
+                bb = np.arange(bmin, bmax + 0.5 * sb_blk, sb_blk)
+                if not len(aa) or not len(bb):
+                    continue
+                AA, BB = np.meshgrid(aa, bb)
+                AA, BB = AA.ravel(), BB.ravel()
+
+                if cname == "vineyard":
+                    px = AA * ux + BB * vx
+                    py = AA * uy + BB * vy
+                    cc = np.floor((px - chm.x0) / chm.dx).astype(np.int64)
+                    rr = np.floor((chm.y0 - py) / chm.dy).astype(np.int64)
+                    in_box = (px >= ex0) & (px < ex1) & (py > ey0) & (py <= ey1) & (cc >= c0) & (cc < c1) & (rr >= r0) & (rr < r1)
+                    is_blk = np.zeros(len(px), bool)
+                    if in_box.any():
+                        is_blk[in_box] = part_inner[rr[in_box] - r0, cc[in_box] - c0]
+                    if is_blk.any():
+                        b_px, b_py, b_rr, b_cc = px[is_blk], py[is_blk], rr[is_blk], cc[is_blk]
+                        # Clear block footprints from avail so overlapping polygons don't double-fill
+                        rb_px = max(1, int(round(4.0 / chm.dx)))
+                        for dr_ in range(-rb_px, rb_px + 1):
+                            for dc_ in range(-rb_px, rb_px + 1):
+                                avail[np.clip(b_rr + dr_, 0, n_r - 1), np.clip(b_cc + dc_, 0, n_c - 1)] = False
                         if inner is not None:
-                            inner[r0:r1, c0:c1] &= ~part_poly_mask
+                            inner[r0:r1, c0:c1] &= avail[r0:r1, c0:c1]
+                        part_avail &= avail[r0:r1, c0:c1]
+                        b_lon, b_lat = _to4326(b_px, b_py)
+                        gx = np.floor((b_px + 20037508.342789244) / chm.dx).astype(np.int64)
+                        gy = np.floor((20037508.342789244 - b_py) / chm.dy).astype(np.int64)
+                        nb = len(b_px)
+                        parts_out.append(Items(
+                            b_lon, b_lat, np.full(nb, 1.86, np.float32), np.full(nb, 3.5, np.float32),
+                            np.full(nb, KIND_BUSH, np.uint8), np.full(nb, G_VINEYARD_BLOCK, np.uint8),
+                            (_hash01(gx, gy, 41) * 0.5).astype(np.float32),
+                            np.full(nb, yaw_deg, np.float32),
+                            (0.94 + 0.12 * _hash01(gx, gy, 42)).astype(np.float32),
+                        ))
+                    # Subdivide non-block cells into 3x3 single-row grape_vine segments
+                    rem = ~is_blk
+                    if rem.any():
+                        A_sub = (AA[rem, None, None] + da_sub[None, :, None] + np.zeros((1, 1, 3))).ravel()
+                        B_sub = (BB[rem, None, None] + np.zeros((1, 3, 1)) + db_sub[None, None, :]).ravel()
+                        spx = A_sub * ux + B_sub * vx
+                        spy = A_sub * uy + B_sub * vy
+                        scc = np.floor((spx - chm.x0) / chm.dx).astype(np.int64)
+                        srr = np.floor((chm.y0 - spy) / chm.dy).astype(np.int64)
+                        sok = (spx >= ex0) & (spx < ex1) & (spy > ey0) & (spy <= ey1) & (scc >= c0) & (scc < c1) & (srr >= r0) & (srr < r1)
+                        if sok.any():
+                            sok[sok] &= part_avail[srr[sok] - r0, scc[sok] - c0]
+                        if sok.any():
+                            spx, spy, srr, scc = spx[sok], spy[sok], srr[sok], scc[sok]
+                            rs_px = max(1, int(round(1.8 / chm.dx)))
+                            for dr_ in range(-rs_px, rs_px + 1):
+                                for dc_ in range(-rs_px, rs_px + 1):
+                                    avail[np.clip(srr + dr_, 0, n_r - 1), np.clip(scc + dc_, 0, n_c - 1)] = False
+                            slon, slat = _to4326(spx, spy)
+                            gx = np.floor((spx + 20037508.342789244) / chm.dx).astype(np.int64)
+                            gy = np.floor((20037508.342789244 - spy) / chm.dy).astype(np.int64)
+                            ns = len(spx)
+                            parts_out.append(Items(
+                                slon, slat, np.full(ns, 1.71, np.float32), np.full(ns, 1.2, np.float32),
+                                np.full(ns, KIND_BUSH, np.uint8), np.full(ns, G_VINEYARD, np.uint8),
+                                (_hash01(gx, gy, 43) * 0.7).astype(np.float32),
+                                np.full(ns, yaw_deg, np.float32),
+                                (0.92 + 0.16 * _hash01(gx, gy, 44)).astype(np.float32),
+                            ))
+                else:
+                    px = AA * ux + BB * vx
+                    py = AA * uy + BB * vy
+                    if cname in ("olive", "truffle"):
+                        gx0 = np.floor((px + 20037508.342789244) / chm.dx).astype(np.int64)
+                        gy0 = np.floor((20037508.342789244 - py) / chm.dy).astype(np.int64)
+                        jit = 0.6 * m_scale
+                        px = px + (_hash01(gx0, gy0, 45) - 0.5) * 2.0 * jit
+                        py = py + (_hash01(gx0, gy0, 46) - 0.5) * 2.0 * jit
+                    cc = np.floor((px - chm.x0) / chm.dx).astype(np.int64)
+                    rr = np.floor((chm.y0 - py) / chm.dy).astype(np.int64)
+                    ok = (px >= ex0) & (px < ex1) & (py > ey0) & (py <= ey1) & (cc >= c0) & (cc < c1) & (rr >= r0) & (rr < r1)
+                    if ok.any():
+                        ok[ok] &= part_avail[rr[ok] - r0, cc[ok] - c0]
+                    if not ok.any():
+                        continue
+                    px, py, rr, cc = px[ok], py[ok], rr[ok], cc[ok]
+                    if cname == "lavender":
+                        avail[rr, cc] = False
+                    else:
+                        for dr_ in (-1, 0, 1):
+                            for dc_ in (-1, 0, 1):
+                                avail[np.clip(rr + dr_, 0, n_r - 1), np.clip(cc + dc_, 0, n_c - 1)] = False
+                    lon, lat = _to4326(px, py)
+                    gx = np.floor((px + 20037508.342789244) / chm.dx).astype(np.int64)
+                    gy = np.floor((20037508.342789244 - py) / chm.dy).astype(np.int64)
+                    np_ = len(px)
+                    if cname == "lavender":
+                        h_lav = (0.66 + 0.14 * _hash01(gx, gy, 48)).astype(np.float32)
+                        parts_out.append(Items(
+                            lon, lat, h_lav, np.full(np_, 1.25, np.float32),
+                            np.full(np_, KIND_BUSH, np.uint8), np.full(np_, G_LAVENDER, np.uint8),
+                            (_hash01(gx, gy, 47) * 0.6).astype(np.float32),
+                            np.full(np_, yaw_deg, np.float32),
+                            (0.92 + 0.16 * _hash01(gx, gy, 48)).astype(np.float32),
+                        ))
+                    else:
+                        h_tree = (3.6 + 1.5 * _hash01(gx, gy, 49)) if cname == "olive" else (7.8 + 2.4 * _hash01(gx, gy, 49))
+                        parts_out.append(Items(
+                            lon, lat, h_tree.astype(np.float32), (0.15 * h_tree + 1.0).astype(np.float32),
+                            np.full(np_, KIND_TREE, np.uint8), np.full(np_, G_OLIVE, np.uint8),
+                            (_hash01(gx, gy, 50) * 0.5).astype(np.float32),
+                            (_hash01(gx, gy, 51) * 360.0).astype(np.float32),
+                            (0.88 + 0.24 * _hash01(gx, gy, 52)).astype(np.float32),
+                        ))
+                # Mark the entire polygon area as claimed
+                avail[r0:r1, c0:c1] &= ~part_poly_mask
+                if inner is not None:
+                    inner[r0:r1, c0:c1] &= ~part_poly_mask
         return _concat_all(parts_out) if parts_out else _empty()
 
     def _edge(self, cd, lc, blocked, road, chm, hs):
