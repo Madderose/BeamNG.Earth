@@ -93,6 +93,7 @@ local collisionfoci = require('beamngEarth/collisionfoci') -- other vehicles' co
 local terrainpatch = require('beamngEarth/terrainpatch')   -- ground under the islands off the terrain block
 local farcars = require('beamngEarth/farcars')             -- far player cars saved, taken out and put back
 local fociBroken = false
+M.shadowctl = require('beamngEarth/shadowctl')
 -- The pose's foci: the last collision foci (collisionfoci.lua), rounded, at most 16 (earthd FOCI_MAX); nil when none.
 local function poseFoci()
   local f = collisionfoci.last
@@ -422,6 +423,7 @@ local function activateWorld()
   if scenetree.theLevelInfo and not fixed then scenetree.theLevelInfo.visibleDistance = VISIBLE_DISTANCE end
   terrain.hideGroundPlanes()
   applyHorizon()
+  if M.shadowctl and M.shadowctl.apply then pcall(M.shadowctl.apply) end
 end
 
 local function sendCommits(anchorId, cx, cy)
@@ -501,6 +503,7 @@ local function commitTeleport(msg)
   edgeguard.newFrame(st.guard)
   sendCommits(msg.anchorId, tr.cx, tr.cy)
   activateWorld()
+  if M.shadowctl and M.shadowctl.apply then pcall(M.shadowctl.apply) end
   st.skyTimer, st.poseTimer = SKY_INTERVAL, POSE_INTERVAL -- refresh both right away
   setStatus(string.format('Anchor #%s at %.5f, %.5f (teleport, %.0f ms)', tostring(msg.anchorId),
     msg.lat, msg.lon, sw()))
@@ -542,6 +545,7 @@ local function finishRebase()
   edgeguard.newFrame(st.guard)
   sendCommits(msg.anchorId, tr.cx, tr.cy)
   activateWorld()
+  if M.shadowctl and M.shadowctl.apply then pcall(M.shadowctl.apply) end
   st.skyTimer, st.poseTimer = SKY_INTERVAL, POSE_INTERVAL
   st.lastRebaseMs, st.lastRebaseWait = rb.phase1Ms + sw(), rb.waited
   st.rebaseCount = st.rebaseCount + 1
@@ -1979,6 +1983,18 @@ local function onUpdate(dtReal, dtSim)
     -- teleport the far field's hundreds of tiles took it frame after frame and the road meshes under the car
     -- came after it had passed (Brasov, Sinaia 2026-10-15: the car drove bare ground)
     roads.update(gov, st.anchorId, st.player, M.viewAway())
+    if gov.allowUrgent then
+      local function urgentRemaining()
+        local count = 0
+        if trees.urgentCount then count = count + (trees.urgentCount() or 0) end
+        if roads.urgentCount then count = count + (roads.urgentCount() or 0) end
+        return count
+      end
+      if gov:allowUrgent(urgentRemaining) then
+        if roads.stepUrgent then roads.stepUrgent() end
+        if trees.stepUrgent then trees.stepUrgent() end
+      end
+    end
     gasstations.update(gov)
     t = mark('roads', t)
     farfield.update(gov, (gov.w1 or dtReal * 1000) / 1000, st.cam, st.player)
@@ -2025,6 +2041,10 @@ end
 -- After physics, before rendering (main.lua:819-824): measure when a rebase's vehicle move became
 -- visible. Hook order relative to core_camera does not matter here; this only measures.
 local function onPreRender(dtReal, dtSim)
+  local pl = st and st.player
+  if M.shadowctl and M.shadowctl.applyGlobalProfile then
+    pcall(M.shadowctl.applyGlobalProfile, (pl and pl.speed) or 0, gov, dtReal)
+  end
   local probe = st.lagProbe
   if not probe then return end
   if moveVisible(probe) then
@@ -2120,6 +2140,7 @@ local function onClientPreStartMission(levelPath)
 end
 
 local function onClientEndMission()
+  if M.shadowctl and M.shadowctl.restore then pcall(M.shadowctl.restore) end
   notePlayerPos(true)
   hudapps.unhookCityZone()
   hudapps.unhookMinimapNorth()
@@ -2153,6 +2174,8 @@ end
 
 local function onExtensionLoaded()
   log('I', 'beamngEarth', 'beamngEarth_core loaded')
+  collectgarbage('setpause', 120)
+  collectgarbage('setstepmul', 200)
   groundcover.enginePatch(false)    -- a flag a crashed game left: stock until our level starts
   -- the level select's spawn points: the saved places (levelinfo.lua), from the main menu on
   pcall(places.list)
@@ -2177,6 +2200,7 @@ end
 M.onFilesChanged = onFilesChanged
 
 local function onExtensionUnloaded()
+  if M.shadowctl and M.shadowctl.restore then pcall(M.shadowctl.restore) end
   hudapps.unhookCityZone()
   hudapps.unhookMinimapNorth()
   groundcover.enginePatch(false)

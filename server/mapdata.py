@@ -259,6 +259,8 @@ class MapData:
         self.lane_tags = railtags.LaneTags(cache_dir, self.fetcher) if railtags.LANES_ON else None   # (markings.py)
         import highwaysigns             # (exit, overhead and mile-marker signs: railtags.SignTags, signstream.py)
         self.highway_signs = highwaysigns.Source(self) if railtags.SIGNS_ON else None
+        import ign_fr                   # (French IGN RPG parcels & BD TOPO hedgerows for Provence/France)
+        self.ign_fr = ign_fr.IgnFr(cache_dir, self.fetcher) if ign_fr.ON else None
         self.dem = None                 # (gradesep's ground: the server's dem.Dem, set by its owner, else its own)
         self._locks = {}
         self._lock = threading.Lock()
@@ -305,6 +307,20 @@ class MapData:
             feats.__dict__["_lanes_built"] = built
         except Exception as e:      # (no lane data: the markings' guesses)
             log.debug("lanetags join %s: %s: %s", key, type(e).__name__, e)
+
+    def _fr_buildings(self, key, layer, feats, frame, kind="demand"):
+        """Enrich Overture buildings in France with IGN BDTOPO_V3:batiment heights, storeys, roof/wall materials,
+        and unmatched rural French buildings (ign_fr.py), once per decoded cell layer."""
+        ig = getattr(self, "ign_fr", None)
+        if ig is None or layer != "buildings" or feats is None:
+            return feats
+        if feats.__dict__.get("_ign_bld_joined"):
+            return feats
+        try:
+            return ig.join_buildings(feats, key, frame=frame, kind=kind)
+        except Exception as e:
+            log.debug("ign_fr buildings join %s: %s: %s", key, type(e).__name__, e)
+            return feats
 
     def versions(self):
         rails = getattr(self, "rail_tags", None)
@@ -610,11 +626,16 @@ class MapData:
             revisit.fault()                 # (a build that goes on without it is not kept)
             raise err
         for layer in layers:                # assembled in the caller's order, whatever finished first
+            ign_kind = kind if tuple(layers) == ("buildings", "building_parts", "roads", "infrastructure", "water") else "cached"
             if layer in mem:                # decoded before: shared (cell layers are never changed after loading)
-                cd.layers[layer], prov, _ = mem[layer]
+                cd.layers[layer], prov, nbytes_ = mem[layer]
                 dt, hit = 0.0, True
                 self._rails(key, layer, cd.layers[layer])
                 self._lanes(key, layer, cd.layers[layer])
+                new_f = self._fr_buildings(key, layer, cd.layers[layer], frame, ign_kind)
+                if new_f is not cd.layers[layer]:
+                    cd.layers[layer] = new_f
+                    self._remember((str(key), layer), (new_f, prov, nbytes_))
             else:
                 arrays, hit, dt = results[layer]
                 arrays = dict(arrays)
@@ -632,6 +653,7 @@ class MapData:
                     self._lanes(key, layer, cd.layers[layer])
                     if layer == "buildings":    # (a "building" of a whole city's size: left out, GitHub #413)
                         cd.layers[layer] = mapgeom.drop_huge(cd.layers[layer], BUILDING_MAX_M2)
+                    cd.layers[layer] = self._fr_buildings(key, layer, cd.layers[layer], frame, ign_kind)
                     if layer == "roads":        # (the bridges the map lacks, found when its ranges are first asked)
                         cd.layers[layer].__dict__["_bnge_gradesep"] = gradesep.hook(self, key)
                     cd.layers[layer].__dict__["_bnge_cell"] = (str(key), layer, json.dumps(self.versions(),
