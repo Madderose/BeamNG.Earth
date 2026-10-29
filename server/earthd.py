@@ -3282,6 +3282,7 @@ class Connection:
             self.credits.close()
             for t in list(self.tasks):
                 t.cancel()
+            await asyncio.gather(self.streamer, *self.tasks, return_exceptions=True)
             self.writer.close()
             log.info("client disconnected %s", self.peer)
 
@@ -3590,7 +3591,7 @@ class Connection:
         self.s.hm_sent.append(key)
         # groundZ is None when (0, 0) lies outside the block (a resync around a distant player)
         gz = info["groundZ"]
-        if place is not None and (not provisional or gz is None):
+        if place is not None:
             # (a provisional block's groundZ is at the place already: ground_z_at carves the sea floor, which waits on
             # the water cells: 30 s of a fresh place's teleport, 2026-10-25)
             gz = await asyncio.get_running_loop().run_in_executor(self.s.ui_pool, self.s.ground_z_at, anchor, *place)
@@ -4415,111 +4416,115 @@ class Connection:
         """Build the needed tiles by priority, send them, emit swap groups as they complete;
         one task per connection."""
         waker = None
-        while True:
-            # Clear before reading the state, so an update from here on wakes us again.
-            self.wake.clear()
-            anchor = self.s.anchors.get(self.active)
-            # While a physics block builds in this process, one far tile at a time: they share the interpreter
-            # (GIL), and three far workers made a block build 3-10x slower (landcover 1.4 s vs 0.1 s), too slow
-            # to follow a car at 58 m/s (2026-10-12). The far tile finishing next refills the workers.
-            workers = HM_BUSY_TILE_WORKERS if self.s.hm_here else self.s.tile_workers
-            # plus the helpers' slots (compute sharing): their tiles cost this process only the files (26 ms a
-            # tile); kept to the local workers, a Steam Deck sent 2 at a time to 12 idle helper workers (2026-10-22)
-            workers += self.s.remote_slots()
-            while anchor is not None and not self.teleport_pending and len(self.inflight) < workers:
-                t = self._next_tile()
-                if t is None:
-                    break
-                self.inflight[(anchor.id, t.key)] = (self.s.tile(anchor, t), t)
-            if anchor is not None and self.s.imagery is not None and not self.teleport_pending:
-                # a tile at most every PREFETCH_AGAIN_S (a prefetch skips sources short of request tokens): the
-                # loop wakes on every tile done and every message from the game, and asking again for the same 40
-                # tiles each time kept the event loop busy (~22 s of a teleport on a Steam Deck, 2026-10-20)
-                now = time.monotonic()
-                if len(self.prefetched) > PREFETCHED_MAX:
-                    self.prefetched.clear()
-                for t in self.queue[self.qi:self.qi + IMAGERY_PREFETCH]:
-                    ck = (anchor.id, t.key)
-                    if ck not in self.s.tiles and now - self.prefetched.get(ck, -1e9) >= PREFETCH_AGAIN_S:
-                        self.prefetched[ck] = now
-                        self.s.prefetch_imagery(anchor, t)
-            if anchor is not None:
-                self.emit_groups()
-                self.flush_old()
-            if (not self.inflight and self.dirty and anchor is not None
-                    and len(self.groups) == len(self._blocked())):
-                self.dirty = False
-                n = sum(1 for k in self.desired if (anchor.id, k) in self.shown)
-                self.send({"type": "far_done", "anchorId": anchor.id, "count": n})
-                self.s.load_boost(False, "far field done")
-                self.status(f"Far field ready ({n} tiles)")
-                bs = sorted(self.s.build_stats)
-                log.info("anchor %d far field done: %d tiles (%d sent, %d swaps in %.2f s; build median %.1f ms)",
-                         anchor.id, n, self.batch[1], self.batch[2], time.perf_counter() - self.batch[0],
-                         1000 * bs[len(bs) // 2] if bs else 0.0)
-                log.info("tile build ms (geometry+write / texture) and KB (shape / texture) by level: %s",
-                         self.s.level_summary())
-                if getattr(self.s.far_pool, "stats", None) is not None and self.batch[1] >= 50:   # (a full one)
-                    g = getattr(self.s.far_pool, "group", None)
-                    log.info("compute sharing: %s; group %s", self.s.far_pool.stats,
-                             g["ids"] if g else "none")
-                if self.s.imagery is not None:
-                    log.info("imagery: %s", self.s.imagery.summary())
-                    if self.s.imagery_worker or self.s.base_worker:
-                        log.info("imagery in the worker processes: %d far textures (%d after a fetch here), "
-                                 "%d base photos", self.s.imagery_worker, self.s.refetched, self.s.base_worker)
-                if self.s.retex_stats["started"]:
-                    log.info("live retexture: %s, %d waiting", self.s.retex_stats, len(self.s.retex_todo))
-                if not any(ck[0] != anchor.id for ck in self.shown):
-                    self.s.schedule_prune(anchor.id)
-            await self.writer.drain()
-            if waker is None:
-                waker = asyncio.ensure_future(self.wake.wait())
-            futs = [f for f, _ in self.inflight.values()]
-            done, _ = await asyncio.wait(futs + [waker], return_when=asyncio.FIRST_COMPLETED)
-            if waker in done:
-                waker = None
-            for ck in [ck for ck, (f, _) in self.inflight.items() if f.done()]:
-                fut, t = self.inflight.pop(ck)
-                if fut.cancelled():
-                    continue
-                if fut.exception() is not None:
-                    log.error("far tile %s of anchor %d failed: %r", t.key, ck[0], fut.exception(),
-                              exc_info=fut.exception() if t.key not in self.failed else None)   # (its first)
-                    self.failed.add(t.key)
-                    continue
-                if ck[0] != self.active or t.key not in self.desired or ck in self.shown or t.key in self.sent:
-                    continue            # superseded meanwhile; the file stays cached
-                # the server's latest record: a live retexture may have finished since this build
-                info = self.s.tiles.get(ck, fut.result())
-                if info.material is not None and not self.s.matslots.owns(ck, info.material):
-                    info = self.s.reslot(ck, info)      # its material name went to another tile meanwhile
-                self.sent[t.key] = t
-                if info.stale:          # a region turned ready since: re-rendered live, then far_retex
-                    self.s.retex_request(ck)
-                self.batch[1] += 1
-                m = {"type": "far_tile", "anchorId": ck[0], "key": t.key, "level": t.level,
-                     "shape": f"{self.s.vfs_dir}/{info.shape or self.s.tile_name(*ck)}",
-                     "pos": [round(v, 3) for v in info.pos], "err": round(info.err, 3),
-                     "skirt": round(info.skirt, 2), "state": "group"}
-                if info.sink is not None:
-                    m["sink"] = round(info.sink, 2)
-                if info.shape is not None and info.shape.startswith("slot_"):  # pooled (matslots.py)
-                    m["slotSerial"] = serial = next(self.s.slot_serial)
-                    self.slot_holds[matslotsmod.MatSlots.number(info.material)] = serial
-                if info.material is not None:   # protocol 4: the tile's own imagery material
-                    m["material"] = info.material
-                    m["texture"] = f"{self.s.vfs_dir}/{info.texture}"
-                    m["detail"] = True          # the shape has UV1 (world-locked detail map)
-                    if self.s.layout.format >= 4:   # M1: texture px, the mod's governor unit kind
-                        m["tex"] = self.s.tex_size(t.level)
-                self.send(m)
-                if self.batch[1] % 50 == 0:
-                    left = sum(1 for g in self.groups for k in g[0] if k not in self.sent)
-                    # this change's tiles (sent / sent + still to send), not the whole far field
-                    self.status(f"Far field loading: {self.batch[1]}/{left + self.batch[1]} tiles")
+        try:
+            while True:
+                # Clear before reading the state, so an update from here on wakes us again.
+                self.wake.clear()
+                anchor = self.s.anchors.get(self.active)
+                # While a physics block builds in this process, one far tile at a time: they share the interpreter
+                # (GIL), and three far workers made a block build 3-10x slower (landcover 1.4 s vs 0.1 s), too slow
+                # to follow a car at 58 m/s (2026-10-12). The far tile finishing next refills the workers.
+                workers = HM_BUSY_TILE_WORKERS if self.s.hm_here else self.s.tile_workers
+                # plus the helpers' slots (compute sharing): their tiles cost this process only the files (26 ms a
+                # tile); kept to the local workers, a Steam Deck sent 2 at a time to 12 idle helper workers (2026-10-22)
+                workers += self.s.remote_slots()
+                while anchor is not None and not self.teleport_pending and len(self.inflight) < workers:
+                    t = self._next_tile()
+                    if t is None:
+                        break
+                    self.inflight[(anchor.id, t.key)] = (self.s.tile(anchor, t), t)
+                if anchor is not None and self.s.imagery is not None and not self.teleport_pending:
+                    # a tile at most every PREFETCH_AGAIN_S (a prefetch skips sources short of request tokens): the
+                    # loop wakes on every tile done and every message from the game, and asking again for the same 40
+                    # tiles each time kept the event loop busy (~22 s of a teleport on a Steam Deck, 2026-10-20)
+                    now = time.monotonic()
+                    if len(self.prefetched) > PREFETCHED_MAX:
+                        self.prefetched.clear()
+                    for t in self.queue[self.qi:self.qi + IMAGERY_PREFETCH]:
+                        ck = (anchor.id, t.key)
+                        if ck not in self.s.tiles and now - self.prefetched.get(ck, -1e9) >= PREFETCH_AGAIN_S:
+                            self.prefetched[ck] = now
+                            self.s.prefetch_imagery(anchor, t)
+                if anchor is not None:
+                    self.emit_groups()
+                    self.flush_old()
+                if (not self.inflight and self.dirty and anchor is not None
+                        and len(self.groups) == len(self._blocked())):
+                    self.dirty = False
+                    n = sum(1 for k in self.desired if (anchor.id, k) in self.shown)
+                    self.send({"type": "far_done", "anchorId": anchor.id, "count": n})
+                    self.s.load_boost(False, "far field done")
+                    self.status(f"Far field ready ({n} tiles)")
+                    bs = sorted(self.s.build_stats)
+                    log.info("anchor %d far field done: %d tiles (%d sent, %d swaps in %.2f s; build median %.1f ms)",
+                             anchor.id, n, self.batch[1], self.batch[2], time.perf_counter() - self.batch[0],
+                             1000 * bs[len(bs) // 2] if bs else 0.0)
+                    log.info("tile build ms (geometry+write / texture) and KB (shape / texture) by level: %s",
+                             self.s.level_summary())
+                    if getattr(self.s.far_pool, "stats", None) is not None and self.batch[1] >= 50:   # (a full one)
+                        g = getattr(self.s.far_pool, "group", None)
+                        log.info("compute sharing: %s; group %s", self.s.far_pool.stats,
+                                 g["ids"] if g else "none")
+                    if self.s.imagery is not None:
+                        log.info("imagery: %s", self.s.imagery.summary())
+                        if self.s.imagery_worker or self.s.base_worker:
+                            log.info("imagery in the worker processes: %d far textures (%d after a fetch here), "
+                                     "%d base photos", self.s.imagery_worker, self.s.refetched, self.s.base_worker)
+                    if self.s.retex_stats["started"]:
+                        log.info("live retexture: %s, %d waiting", self.s.retex_stats, len(self.s.retex_todo))
+                    if not any(ck[0] != anchor.id for ck in self.shown):
+                        self.s.schedule_prune(anchor.id)
+                await self.writer.drain()
+                if waker is None:
+                    waker = asyncio.ensure_future(self.wake.wait())
+                futs = [f for f, _ in self.inflight.values()]
+                done, _ = await asyncio.wait(futs + [waker], return_when=asyncio.FIRST_COMPLETED)
+                if waker in done:
+                    waker = None
+                for ck in [ck for ck, (f, _) in self.inflight.items() if f.done()]:
+                    fut, t = self.inflight.pop(ck)
+                    if fut.cancelled():
+                        continue
+                    if fut.exception() is not None:
+                        log.error("far tile %s of anchor %d failed: %r", t.key, ck[0], fut.exception(),
+                                  exc_info=fut.exception() if t.key not in self.failed else None)   # (its first)
+                        self.failed.add(t.key)
+                        continue
+                    if ck[0] != self.active or t.key not in self.desired or ck in self.shown or t.key in self.sent:
+                        continue            # superseded meanwhile; the file stays cached
+                    # the server's latest record: a live retexture may have finished since this build
+                    info = self.s.tiles.get(ck, fut.result())
+                    if info.material is not None and not self.s.matslots.owns(ck, info.material):
+                        info = self.s.reslot(ck, info)      # its material name went to another tile meanwhile
+                    self.sent[t.key] = t
+                    if info.stale:          # a region turned ready since: re-rendered live, then far_retex
+                        self.s.retex_request(ck)
+                    self.batch[1] += 1
+                    m = {"type": "far_tile", "anchorId": ck[0], "key": t.key, "level": t.level,
+                         "shape": f"{self.s.vfs_dir}/{info.shape or self.s.tile_name(*ck)}",
+                         "pos": [round(v, 3) for v in info.pos], "err": round(info.err, 3),
+                         "skirt": round(info.skirt, 2), "state": "group"}
+                    if info.sink is not None:
+                        m["sink"] = round(info.sink, 2)
+                    if info.shape is not None and info.shape.startswith("slot_"):  # pooled (matslots.py)
+                        m["slotSerial"] = serial = next(self.s.slot_serial)
+                        self.slot_holds[matslotsmod.MatSlots.number(info.material)] = serial
+                    if info.material is not None:   # protocol 4: the tile's own imagery material
+                        m["material"] = info.material
+                        m["texture"] = f"{self.s.vfs_dir}/{info.texture}"
+                        m["detail"] = True          # the shape has UV1 (world-locked detail map)
+                        if self.s.layout.format >= 4:   # M1: texture px, the mod's governor unit kind
+                            m["tex"] = self.s.tex_size(t.level)
+                    self.send(m)
+                    if self.batch[1] % 50 == 0:
+                        left = sum(1 for g in self.groups for k in g[0] if k not in self.sent)
+                        # this change's tiles (sent / sent + still to send), not the whole far field
+                        self.status(f"Far field loading: {self.batch[1]}/{left + self.batch[1]} tiles")
 
 
+        finally:
+            if waker is not None and not waker.done():
+                waker.cancel()
 async def main_async(args):
     fmt = args.far_format
     if fmt == "cdae":

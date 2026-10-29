@@ -416,6 +416,7 @@ local function activateWorld()
   -- bigMapMode.lua:866-867 sets the same LevelInfo field at runtime
   if scenetree.theLevelInfo then scenetree.theLevelInfo.visibleDistance = VISIBLE_DISTANCE end
   terrain.hideGroundPlanes()
+  if trees.adoptExistingForests then pcall(trees.adoptExistingForests) end
   applyHorizon()
 end
 
@@ -693,13 +694,16 @@ local function placePlayer(z)
   dir = vec3(dir.x, dir.y, 0)
   if dir:length() < 1e-3 then dir = vec3(0, 1, 0) end
   local x, y = st.placeX or 0, st.placeY or 0
-  -- (a snapped teleport's spot: the server's height there is the first block's, as at the origin; a ray from above
-  -- hit the old place's buildings, still in the static collision, and the car fell 30 m, 2026-10-25)
-  if (x ~= 0 or y ~= 0) and not st.placeSnapped then
-    -- away from the origin (a BeamMP player's anchor): the server's height there is the raw elevation data; set down
-    -- on the collision under it (a graded road can be a few metres off)
-    local g = M.groundRay(z)(x, y)
-    if g then z = g + 1.0 end
+  -- Always check ground under spot (even when st.placeSnapped): if surface at (x, y) is higher than z, lift to g + 1.0
+  local g = M.groundRay(z)(x, y)
+  if g then
+    if not st.placeSnapped then
+      if x ~= 0 or y ~= 0 or g > z then
+        z = g + 1.0
+      end
+    elseif g > z then
+      z = g + 1.0
+    end
   end
   -- nothing under the spot (a hole in the terrain: a tunnel's portal before its road tile): the nearest spot that has
   -- some (safeSpot); a tunnel's tube (floorZ) is left to floorCheck

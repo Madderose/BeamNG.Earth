@@ -28,7 +28,7 @@ import staging
 
 log = logging.getLogger("earthd.ign_fr")
 
-VERSION = 1
+VERSION = 2
 ON = os.environ.get("BNE_IGN_FR", "on") != "off"
 WFS_URL = "https://data.geopf.fr/wfs/ows"
 LANE = "ign_wfs"
@@ -424,6 +424,7 @@ class IgnFr:
         ok_count = 0
 
         # 1. RPG parcels (vineyards, lavender fields, olive groves, truffle oaks)
+        rpg_vineyards = 0
         try:
             rpg = self._wfs_get("RPG.LATEST:parcelles_graphiques", bbox_str, count=2000, kind=kind)
             ok_count += 1
@@ -433,6 +434,8 @@ class IgnFr:
                     parts = _extract_rings(feat.get("geometry"))
                     if parts:
                         polys.append([crop, parts])
+                        if crop == "vineyard":
+                            rpg_vineyards += 1
         except Exception as e:
             log.debug("ign_fr RPG %s: %s: %s", bbox_str, type(e).__name__, e)
 
@@ -459,6 +462,8 @@ class IgnFr:
                 props = feat.get("properties") or {}
                 nat = str(props.get("nature") or "").strip()
                 if nat == "Vigne":
+                    if rpg_vineyards > 0:
+                        continue  # RPG already provides fine-grained vineyard parcels
                     parts = _extract_rings(feat.get("geometry"))
                     if parts:
                         polys.append(["vineyard", parts])
@@ -799,7 +804,12 @@ class IgnFr:
         step = size / px
         # Mercator grid matching chm mask_polys convention (row 0 = north = y0 + size)
         import fast
-        from matplotlib.path import Path
+        try:
+            from matplotlib.path import Path
+            has_mpl = True
+        except ImportError:
+            has_mpl = False
+            from PIL import Image, ImageDraw
         xs = x0 + (np.arange(px) + 0.5) * step
         ys = (y0 + size) - (np.arange(px) + 0.5) * step
         out = None
@@ -817,8 +827,14 @@ class IgnFr:
             if c1 <= c0 or r1 <= r0:
                 continue
             XX, YY = np.meshgrid(xs[c0:c1], ys[r0:r1])
-            pts = np.column_stack([XX.ravel(), YY.ravel()])
-            inside = Path(ring_en).contains_points(pts).reshape(XX.shape)
+            if has_mpl:
+                pts = np.column_stack([XX.ravel(), YY.ravel()])
+                inside = Path(ring_en).contains_points(pts).reshape(XX.shape)
+            else:
+                poly_px = [((x - x0) / step - c0, (y0 + size - y) / step - r0) for x, y in ring_en]
+                im_mask = Image.new("1", (c1 - c0, r1 - r0), 0)
+                ImageDraw.Draw(im_mask).polygon(poly_px, fill=1)
+                inside = np.asarray(im_mask, dtype=bool)
             if not inside.any():
                 continue
             if out is None:
