@@ -943,7 +943,7 @@ function M.update(gov, currentAnchor, player, view)
   local urgentStructure = collisionDirty and (holdActive or (hasUrgentStructure and hasUrgentStructure(px, py, math.max(M.DECK_URGENT_M, M.DECK_URGENT_S * speed))))
   local urgent = collisionDirty and (holdActive or (M.urgentColliders and M.urgentColliders()) or urgentStructure)
       and sinceReload() > M.URGENT_GAP_S * 1000
-  local due = not swapQuiet and ((collisionDirty and sinceReload() > M.RELOAD_EVERY_S * 1000) or urgent
+  local due = not swapQuiet and ((collisionDirty and sinceReload() >= M.RELOAD_EVERY_S * 1000) or urgent
       or (deletesDirty and sinceReload() > M.RELOAD_DELETES_S * 1000))
   if due and not holdActive and reloadWaits < M.RELOAD_WAIT_FRAMES and gov.roomFor and not gov:roomFor(M.RELOAD_ROOM_MS) then
     reloadWaits = reloadWaits + 1

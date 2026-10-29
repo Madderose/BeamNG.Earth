@@ -286,7 +286,9 @@ function M.apply(targetSun)
     }
   end
 
-  writeSunField(sun, 'texSize', M.SUN_TEX_SIZE)
+  local origTex = tonumber(origSunFields and origSunFields.texSize)
+  local targetTex = (origTex and origTex > 0 and origTex < M.SUN_TEX_SIZE) and origTex or M.SUN_TEX_SIZE
+  writeSunField(sun, 'texSize', targetTex)
   writeSunField(sun, 'shadowDistance', M.SUN_SHADOW_DISTANCE)
   writeSunField(sun, 'logWeight', M.SUN_LOG_WEIGHT)
   writeSunField(sun, 'lastSplitTerrainOnly', M.SUN_LAST_SPLIT_TERRAIN_ONLY)
