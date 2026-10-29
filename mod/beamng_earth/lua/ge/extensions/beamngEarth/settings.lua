@@ -972,10 +972,12 @@ function M.mapControls(on)
     pcall(pushActionMap, 'BigMap')
     local am = scenetree.findObject('BigMapActionMap')
     if am then am.trapHandledEvents = false end      -- (as the stock map: nothing else gets stuck behind it)
-  elseif not on and mapCtl then
-    if mapCtl.vt then mapCtl.vt.onActionEvent = mapCtl.vtOrig end
-    for f, fn in pairs(mapCtl) do if f ~= 'bm' and f ~= 'vt' and f ~= 'vtOrig' then mapCtl.bm[f] = fn end end
-    mapCtl = nil
+  elseif not on then
+    if mapCtl then
+      if mapCtl.vt then mapCtl.vt.onActionEvent = mapCtl.vtOrig end
+      for f, fn in pairs(mapCtl) do if f ~= 'bm' and f ~= 'vt' and f ~= 'vtOrig' then mapCtl.bm[f] = fn end end
+      mapCtl = nil
+    end
     pcall(popActionMap, 'BigMap')
     if filter and filter.addAction then pcall(filter.addAction, 0, 'beamngEarthMapBlocked', false) end
   end
@@ -1037,6 +1039,11 @@ end
 function M.onExtensionLoaded()
   M.load()
   M.applyAll()
+end
+
+function M.onExtensionUnloaded()
+  M.mapOpened(false)
+  M.redirectBigMap(false)
 end
 
 -- The one-time welcome (the user, 2026-10-15: "add a 1 time popup with info about this project"): shown a moment after
