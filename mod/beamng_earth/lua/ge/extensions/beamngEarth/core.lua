@@ -476,7 +476,8 @@ local function commitTeleport(msg)
     st.retryAt = st.clock + rebase.RETRY_S -- don't re-request every frame
     return false
   end
-  farfield.switchAnchor(msg.anchorId, false, { cx = tr.cx, cy = tr.cy }, st.sessionId)
+  -- (the global far tiles stay, placed into the new anchor's world: farfield.lua)
+  farfield.switchAnchor(msg.anchorId, false, { cx = tr.cx, cy = tr.cy }, st.sessionId, geodesy.newAnchor(msg.lat, msg.lon))
   st.loadingUntil = st.clock + LOADING_AFTER_TELEPORT_S
   st.placeFrames = PLACE_DELAY_FRAMES
   st.placeZ = (msg.groundZ or 0) + 1.0
@@ -498,6 +499,7 @@ local function commitTeleport(msg)
 
   st.anchor, st.anchorId, st.anchorKey = geodesy.newAnchor(msg.lat, msg.lon), msg.anchorId, msg.anchorKey
   trees.reanchor(st.anchor)       -- (the geotiles it has: placed into the new world; the server drops the far ones)
+  roads.replace(st.anchor, msg.anchorId)     -- (road geotiles too: roads.lua)
   st.anchorSession, st.resync = st.sessionId, false
   mpanchor.announceOwn(msg.lat, msg.lon)
   st.block, st.terrainPending, st.terrainErrorAt = { cx = tr.cx, cy = tr.cy }, nil, nil
@@ -523,7 +525,7 @@ local function finishRebase()
   -- the world shifts under the grass: made fresh (with tools/gcpatch the engine would keep it)
   groundcover.rebuild()
   if not ok then log('E', 'beamngEarth', 'rebase terrain import failed: ' .. tostring(err)) end
-  farfield.transform(xf)
+  farfield.transform(xf, rb.newAnchor)   -- (the global far tiles placed exactly into the new anchor: farfield.lua)
   -- roads, buildings, street furniture and trees move with it and stay until the new anchor's tiles cover them
   roads.transform(xf, geodesy)
   trees.transform(xf, geodesy, rb.newAnchor)    -- (geotiles: placed into the new anchor, nothing sent again)
@@ -531,11 +533,14 @@ local function finishRebase()
   pumpjacks.transform(xf)
   nightlights.transform(xf)
   gasstations.transform(xf)
+  -- road geotiles: their content placed exactly into the new anchor (its rows' modules after their transforms above),
+  -- the skins moved and lifted until the new anchor's come (roads.lua M.replace)
+  roads.replace(rb.newAnchor, msg.anchorId)
   sea.transform(xf, msg.anchorId)
   navgraph.transform(xf, msg.anchorId)    -- (the AI's road graph too: applied again at once, the AI planning afresh)
   -- a resync with a restarted server keeps the previous session's tiles the same way (st.sessionId
   -- is the new session's): they go once the new session's tiles cover them
-  farfield.switchAnchor(msg.anchorId, true, { cx = tr.cx, cy = tr.cy }, st.sessionId)
+  farfield.switchAnchor(msg.anchorId, true, { cx = tr.cx, cy = tr.cy }, st.sessionId, rb.newAnchor)
   local cs = camshift.shift(xf, rb.playerOld[1], rb.playerOld[2], rb.playerOld[3])
   be:reloadCollision()
 
@@ -810,7 +815,11 @@ local function onMessage(msg)
     -- vegFlat: the vegetation tiles may come as one flat array of numbers (trees.lua onTile), no table per tree
     net.send({ type = 'hello', protocol = PROTOCOL, format = FORMAT, modVersion = MOD_VERSION,
       sessions = farfield.heldSessions(), slotSession = farfield.session(), slotsHeld = held, vegFlat = true,
-      geoTiles = require('beamngEarth/geotile').Z })   -- (geotiles: vegetation in the global tiles' frames: trees.lua)
+      geoTiles = require('beamngEarth/geotile').Z,
+      -- (geotiles: vegetation in the global tiles' frames: trees.lua)
+      roadGeo = roads.ROAD_GEO,        -- (road tiles as geotiles too: roads.lua)
+      farGeo = roads.FAR_GEO,          -- (and the far buildings, skyline and far bridges: roads.lua)
+      globalFar = farfield.GLOBAL_FAR })  -- (and the far field from level 3 up as global tiles: farfield.lua)
     setStatus('Connected to companion server')
   elseif t == '_disconnected' then
     st.pending, st.sessionId, st.terrainPending = nil, nil, nil
@@ -831,8 +840,11 @@ local function onMessage(msg)
     -- road tiles belong to the session that sent them: a restarted server (anchor ids start again
     -- at 1) never drops the old session's tiles, so they stayed forever (2026-10-11: meshes of four
     -- sessions in the scene, some built by older code)
+    roads.setGeo(msg.roadGeo == roads.ROAD_GEO)     -- (road tiles as geotiles: roads.lua)
+    roads.setFarGeo(msg.farGeo == roads.FAR_GEO)    -- (... and the far buildings, skyline and far bridges)
     if roadsSession ~= msg.sessionId then
-      roads.clear()
+      -- (road geotiles stay: the new session's content with the same hash keeps them, the rest go once far or old)
+      roads.newSession()
       roadsSession = msg.sessionId
     end
     roads.prewarm(msg.prewarm)  -- the materials of the server's shapes set up now, not at their first tile
@@ -972,7 +984,11 @@ local function onMessage(msg)
     st.terrainErrorAt = st.clock -- the edge guard holds the car meanwhile
     setStatus('Terrain request failed: ' .. tostring(msg.error))
   elseif t == 'roads_tile' then
-    roads.onTile(msg, st.anchorId)
+    roads.onTile(msg, st.anchorId, st.anchor)
+  elseif t == 'roads_skin' then           -- a road geotile's draped surfaces for this anchor (roads.lua)
+    roads.onSkin(msg, st.anchorId)
+  elseif t == 'roads_exact' then          -- ... its tall parts' exact variants for this anchor
+    roads.onExact(msg, st.anchorId)
   elseif t == 'roads_drop' then
     roads.onDrop(msg)
   elseif t == 'far_tile' then
@@ -1986,7 +2002,7 @@ local function onUpdate(dtReal, dtSim)
     -- the roads before the far tiles: they share the governor's budget and the first to ask gets it; after a
     -- teleport the far field's hundreds of tiles took it frame after frame and the road meshes under the car
     -- came after it had passed (Brasov, Sinaia 2026-10-15: the car drove bare ground)
-    roads.update(gov, st.anchorId, st.player, M.viewAway())
+    roads.update(gov, st.anchorId, st.player, M.viewAway(), st.anchor)
     if gov.allowUrgent then
       local function urgentRemaining()
         local count = 0

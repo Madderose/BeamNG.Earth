@@ -966,9 +966,12 @@ class _Planner:
             # than LONG_PART_M by all of it (TunnelProfiles.ends grades them by the roads' plans alone)
             tplans = plans
             if own is not None:
+                # (by the cell's quad in this frame, not its box: a cell at a planning region's edge stands turned
+                # ~0.16 deg in it, and boxes left slivers planned twice or not at all between neighbouring cells)
+                quad = self._clip_quad(key)
                 kept, tplans = [], []
                 for (fid, p), cl in zip(plans, pclip):
-                    pieces = trim_plan(p, own)
+                    pieces = trim_plan(p, own if quad is None else quad)
                     kept.extend((fid, q) for q in pieces)
                     tplans.extend((fid, q) for q in (pieces if cl else [p]))
                 plans = kept
@@ -1227,6 +1230,16 @@ class _Planner:
         with self.lock:
             return memo.get(k)
 
+    def _clip_quad(self, key):
+        """The cell's quad (4, 2: its corners SW, SE, NE, NW at h = 0) in the frame, or None for a key without bounds:
+        the cells' own pieces of the plans (trim_plan), each place in one cell's whatever the frame."""
+        if not hasattr(key, "bounds"):
+            return None
+        lon0, lat0, lon1, lat1 = key.bounds()
+        e, n, _ = self.frame.geodetic_to_enu(np.array([lat0, lat0, lat1, lat1]), np.array([lon0, lon1, lon1, lon0]),
+                                             0.0)
+        return np.stack([np.asarray(e, np.float64), np.asarray(n, np.float64)], axis=1)
+
     def _clip_box(self, key, margin=CLIP_MARGIN_M):
         """The cell's box in the frame (east / north), margin wider each side; None for a key without bounds."""
         if not hasattr(key, "bounds"):
@@ -1276,8 +1289,9 @@ class _Planner:
         return obs
 
     def _observed_lift(self, bridge, xy, z_at):
-        """m the abutment at bridge end xy is raised when a source measured the deck (roadz.PROVIDER, level 1): the
-        measured deck end over the ground there, 0 or more; None when none did (the inference: bridge_lifts)."""
+        """(m the abutment at bridge end xy is raised, the measured deck end's height) when a source measured the deck
+        (roadz.PROVIDER, level 1): the measured deck end over the ground there, 0 or more; None when none did (the
+        inference: bridge_lifts)."""
         import roadz
         prov = roadz.PROVIDER
         if prov is None or not prov.enabled:
@@ -1297,7 +1311,7 @@ class _Planner:
         if not len(near):
             return None
         k = int(near[np.argmin(d[near])])
-        return max(0.0, float(z[k]) - float(z_at(np.asarray([xy], np.float64))[0]))
+        return max(0.0, float(z[k]) - float(z_at(np.asarray([xy], np.float64))[0])), float(z[k])
 
     def _coarse(self, key):
         """Is cell key's elevation only the coarse global model (dem.coarse_at its centre)? False without a DEM."""
@@ -1366,6 +1380,14 @@ class _Planner:
                 if _never_raised(specs[i]) and not got[3]:
                     continue
                 lift, others = got[0], got[1]
+                if len(got) > 4 and got[4] is not None:
+                    # (a measured deck end: up to its height from the plan's own there, not from the ground under the
+                    # point, which may lie down the cut the deck spans: Charles Street's approach over I-83 rose 2.2 m
+                    # over its plan to a deck end measured at the street's height, 2026-10-29)
+                    zp = float(np.asarray(p.z, np.float64)[-1 if at_end else 0])
+                    lift = min(float(got[4]) - zp, APPROACH_MAX_LIFT)
+                    if lift < APPROACH_MIN_LIFT:
+                        continue
                 a = approach_add(p.xy, at_end, lift, p.half, others)
                 if a is not None:
                     add = a if add is None else np.maximum(add, a)
@@ -1799,7 +1821,9 @@ class _Planner:
                 break
         seen = self._observed_lift(bridge, xy, z_at)
         if seen is not None:            # (a measured deck: its own end, not what the clearance rules would need)
-            return None if seen < APPROACH_MIN_LIFT else (min(seen, APPROACH_MAX_LIFT), others, approaches, False)
+            seen, target = seen
+            return None if seen < APPROACH_MIN_LIFT else (min(seen, APPROACH_MAX_LIFT), others, approaches, False,
+                                                          target)
         wl = self._water_lift(bridge, chain, xy, z_at) if bridge_chain_ends_free(bridge, bridges, xy) else 0.0
         if wl >= APPROACH_MIN_LIFT and (best is None or wl > best):
             return min(wl, WATER_MAX_LIFT), others, approaches, True
@@ -1872,6 +1896,21 @@ class _Planner:
             self._chains = t
         return self._chains
 
+    def _drowned(self, key, ring):
+        """roads.TunnelProfiles.drowned for tunnel part key (ring: its lon / lat points): the process's tunnel chain
+        store's (the road tiles' and blocks', blockworker: store.tunnel_store), whose chains are resolved once for all
+        of them, when it is there; else this frame's own (_chains_for)."""
+        get = getattr(self.store, "tunnel_store", None) if getattr(self, "store", None) is not None else None
+        cs = get() if callable(get) else None
+        if cs is not None:
+            try:
+                st = cs.store_at(float(ring[0][1]), float(ring[0][0]))
+                if st.wet is not None:
+                    return st.drowned(key, ring)
+            except Exception as e:      # (this frame's own then)
+                log.debug("grading: the chain store's drowned: %s: %s", type(e).__name__, e)
+        return self._chains_for().drowned(key, ring)
+
     def _tunnel_sections(self, feats, key=None, road_plans=()):
         """[(fid, spec, xy, z, kind)] of the tunnels' sections (roads.tunnel_sections on the ungraded ground, its
         ends graded by road_plans: the cell's road Plans, as roads.TunnelProfiles.ends grades them with the roads'
@@ -1896,7 +1935,7 @@ class _Planner:
                 if self.wet is not None and \
                         (np.asarray(self.wet(la, lo)) > 0.5).mean() > roadsmod.TUNNEL_WET_SHARE:
                     continue
-                if self.wet is not None and self._chains_for().drowned((str(feats.ids[i]), j), ring):
+                if self.wet is not None and self._drowned((str(feats.ids[i]), j), ring):
                     continue            # (a dry piece of an underwater tunnel: left out with it, GitHub #128)
                 g = np.asarray(self.elev(la, lo), np.float64)
                 if road_plans:
@@ -2336,14 +2375,18 @@ class Grader:
 
 
 def trim_plan(p, box):
-    """The pieces of Plan p within box (x0, y0, x1, y1): cut at its edges (earthfast.clip_segments), heights and
+    """The pieces of Plan p within box (x0, y0, x1, y1), or a convex polygon (k, 2): cut at its edges (earthfast.clip_segments), heights and
     cuttings with them; an end not at p's own end leads onto no bridge. [Plan]."""
     import fast
-    fast.require(44, "clip_segments")
     xy = np.ascontiguousarray(np.asarray(p.xy, np.float64)[:, :2])
     if len(xy) < 2:
         return [p]
-    t = np.asarray(fast._ef.clip_segments(xy, tuple(float(v) for v in box)))
+    if np.ndim(box) == 2:               # a convex polygon (a cell's quad: _Planner._clip_quad)
+        fast.require(104, "clip_segments_convex")
+        t = np.asarray(fast._ef.clip_segments_convex(xy, np.ascontiguousarray(box, np.float64)))
+    else:
+        fast.require(44, "clip_segments")
+        t = np.asarray(fast._ef.clip_segments(xy, tuple(float(v) for v in box)))
     ok = np.isfinite(t[:, 0])
     if ok.all() and (t[:, 0] == 0.0).all() and (t[:, 1] == 1.0).all():
         return [p]
