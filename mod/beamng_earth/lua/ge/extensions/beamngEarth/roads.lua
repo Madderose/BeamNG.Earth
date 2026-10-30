@@ -483,10 +483,9 @@ local function spawnWalk(q)
   if isColOnly and id then
     local o = scenetree.findObjectById(id)
     if o then
+      -- Disable rendering only (never setHidden(true), which removes the TSStatic from be:reloadCollision() / castRayStatic)
       if o.setRenderEnabled then pcall(o.setRenderEnabled, o, false)
       elseif o.setField then pcall(o.setField, o, 'isRenderEnabled', 0, 'false') end
-      if o.setHidden then pcall(o.setHidden, o, true)
-      elseif o.setField then pcall(o.setField, o, 'hidden', 0, 'true') end
     end
   end
   return id

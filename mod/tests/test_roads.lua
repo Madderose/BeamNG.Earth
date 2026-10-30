@@ -132,15 +132,18 @@ files['/t/wc.json'] = '{ chunks = { }, walk = { shape = "/t/walks_2_6_6.cdae", p
   'walkcol = { shape = "/t/walkcol_2_6_6.cdae", pos = { 0, 0, 0 } } }'
 roads.onTile({ anchorId = 2, key = '6_6', path = '/t/wc.json', n = 0 }, 2)
 roads.update(gov, 2)
-local kinds, renderOff = {}, {}
+local kinds, renderOff, hiddenFlags = {}, {}, {}
 for _, o in ipairs(statics()) do
   kinds[o.fields.shapeName] = o.fields.collisionType
   renderOff[o.fields.shapeName] = (o.renderEnabled == false or o.fields.isRenderEnabled == 'false')
+  hiddenFlags[o.fields.shapeName] = (o.hidden == true or o.fields.hidden == 'true')
 end
 T.check(kinds['/t/walks_2_6_6.cdae'] == 'None' and kinds['/t/walkcol_2_6_6.cdae'] == 'Collision Mesh',
   'walkcol collides, the drawn sidewalks only render')
 T.check(renderOff['/t/walkcol_2_6_6.cdae'] == true and not renderOff['/t/walks_2_6_6.cdae'],
   'collision-only walkcol mesh disables rendering so shadow cascades skip it')
+T.check(not hiddenFlags['/t/walkcol_2_6_6.cdae'],
+  'collision-only walkcol mesh must not set hidden=true (which removes it from be:reloadCollision)')
 roads.onDrop({ anchorId = 2, key = '6_6' })
 roads.update(gov, 2)
 T.check(#statics() == 0, 'walkcol dropped with its tile')
