@@ -504,35 +504,42 @@ export function syncFromLua() {
   })
 }
 
+export function applyStatus(stRes) {
+  const st = getState()
+  if (!stRes) return
+  const wasRunning = st.benchRunning
+  st.benchRunning = !!stRes.benchRunning
+  st.benchStage = stRes.stage || "recording"
+  st.benchStageText = stRes.stageText || ""
+  st.benchElapsed = stRes.elapsed || 0
+  st.benchDuration = stRes.duration || 30
+  if (stRes.lastSummary) st.benchSummary = stRes.lastSummary
+  if (stRes.lastFolder) st.benchFolder = stRes.lastFolder
+  if (stRes.issueRepo) st.issueRepo = stRes.issueRepo
+  if (Array.isArray(stRes.routes) && stRes.routes.length) {
+    st.routes = stRes.routes
+  }
+  st.benchHasUrl = !!stRes.lastUrl
+  if (st.benchRunning) {
+    if (st.benchStageText) st.note = st.benchStageText
+    if (!st.benchPollTimer) {
+      st.benchPollTimer = setInterval(pollBenchStatus, 500)
+    }
+  } else {
+    if (st.benchPollTimer) {
+      clearInterval(st.benchPollTimer)
+      st.benchPollTimer = null
+    }
+    const staleNote = /^(Driving|Loading|Waiting|Preparing|World|Ready|Teleporting|Requesting)/i.test(st.note || "")
+    if (wasRunning || staleNote) {
+      setNote("Benchmark saved (report.json & issue.md ready)!", 5000)
+    }
+  }
+  updateDOM()
+}
+
 function pollBenchStatus() {
-  engineLua("beamngEarth_report and beamngEarth_report.status() or nil", stRes => {
-    const st = getState()
-    if (!stRes) return
-    const wasRunning = st.benchRunning
-    st.benchRunning = !!stRes.benchRunning
-    st.benchStage = stRes.stage || "recording"
-    st.benchStageText = stRes.stageText || ""
-    st.benchElapsed = stRes.elapsed || 0
-    st.benchDuration = stRes.duration || 30
-    if (stRes.lastSummary) st.benchSummary = stRes.lastSummary
-    if (stRes.lastFolder) st.benchFolder = stRes.lastFolder
-    if (stRes.issueRepo) st.issueRepo = stRes.issueRepo
-    if (Array.isArray(stRes.routes) && stRes.routes.length) {
-      st.routes = stRes.routes
-    }
-    st.benchHasUrl = !!stRes.lastUrl
-    if (st.benchRunning && st.benchStageText) {
-      st.note = st.benchStageText
-    }
-    if (wasRunning && !st.benchRunning) {
-      if (st.benchPollTimer) {
-        clearInterval(st.benchPollTimer)
-        st.benchPollTimer = null
-      }
-      setNote("Benchmark saved (report.json & issue.md ready)!", 4500)
-    }
-    updateDOM()
-  })
+  engineLua("beamngEarth_report and beamngEarth_report.status() or nil", applyStatus)
 }
 
 function startOrStopBenchmark() {
@@ -990,7 +997,7 @@ export function toggle() {
 
 export function start() {
   stop()
-  window.bngEarthAddonsWindow = { open, close, toggle, updateDOM, syncFromLua, stop }
+  window.bngEarthAddonsWindow = { open, close, toggle, updateDOM, syncFromLua, applyStatus, stop }
   buildDOMOnce()
   syncFromLua()
   pollBenchStatus()

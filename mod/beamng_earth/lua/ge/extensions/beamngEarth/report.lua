@@ -614,6 +614,7 @@ local function finishProf(b, elapsedS)
     openForm(b.dir, data, 'perf')
     toast, toastUntil = 'Performance profiler done: add a title and Save', now() + 4
   end
+  if M.pushUiStatus then M.pushUiStatus() end
 end
 
 -- Check world load state during `stage == 'staging'` before starting the route drive.
@@ -785,8 +786,14 @@ local function profFrame(dtMs, dtReal)
   local b = prof
   local t = now() - b.t0
   if b.stage == 'staging' then
-    if checkStagingReady(b, t) then
+    local ready = checkStagingReady(b, t)
+    if math.floor(t * 2) ~= b.lastStagePush then
+      b.lastStagePush = math.floor(t * 2)
+      if M.pushUiStatus then M.pushUiStatus() end
+    end
+    if ready then
       beginRouteRecording(b)
+      if M.pushUiStatus then M.pushUiStatus() end
     end
     return
   end
@@ -825,6 +832,7 @@ local function profFrame(dtMs, dtReal)
     if Engine.Debug and Engine.Debug.getLastPerformanceMetrics then pcall(Engine.Debug.getLastPerformanceMetrics, m) end
     s.metrics = m
     b.track[#b.track + 1] = s
+    if M.pushUiStatus then M.pushUiStatus() end
   end
   if t >= b.dur then
     finishProf(b, t)
@@ -875,6 +883,16 @@ function M.status()
     routes = M.BENCH_ROUTES,
     speeds = M.BENCH_SPEEDS,
   }
+end
+
+-- Push live status directly to the CEF Generation Addons window (`earthAddonsWindow.js`) so the UI never freezes
+-- even if CEF timers are cleared by a route change or reload.
+function M.pushUiStatus()
+  if not be or not be.queueJS then return end
+  local ok, js = pcall(function()
+    return 'if(window.bngEarthAddonsWindow && window.bngEarthAddonsWindow.applyStatus) window.bngEarthAddonsWindow.applyStatus(' .. jsonEncode(M.status()) .. ');'
+  end)
+  if ok and js then pcall(be.queueJS, be, js) end
 end
 
 -- Allow the CEF UI to change loadMode live while staging (e.g. clicking "Immediate (Stream on Move)" starts driving right away)
@@ -1014,6 +1032,7 @@ function M.uiStopBench()
   if b.stage == 'staging' or #b.dts < 10 then
     if b.route then stopRouteAutodrive() end
     prof = nil
+    if M.pushUiStatus then M.pushUiStatus() end
     return { ok = true, cancelled = true }
   end
   finishProf(b, elapsed)
