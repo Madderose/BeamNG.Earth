@@ -32,7 +32,7 @@ local function copyMap(src)
 end
 
 local function fileExists(path)
-  if type(FS) == 'table' and type(FS.fileExists) == 'function' then
+  if (type(FS) == 'table' or type(FS) == 'userdata') and type(FS.fileExists) == 'function' then
     local ok, res = pcall(FS.fileExists, FS, path)
     if ok then return res == true end
   end
@@ -63,7 +63,7 @@ local function readJson(path)
 end
 
 local function findAddonManifests()
-  if type(FS) ~= 'table' or type(FS.findFiles) ~= 'function' then
+  if (type(FS) ~= 'table' and type(FS) ~= 'userdata') or type(FS.findFiles) ~= 'function' then
     return {}
   end
   local ok, files = pcall(FS.findFiles, FS, M.VFS_ROOT, 'addon.json', 2, true, false)

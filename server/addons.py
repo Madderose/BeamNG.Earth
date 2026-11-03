@@ -37,6 +37,7 @@ APPROVED_ADDONS: dict[str, dict[str, Any]] = {
         "public_key_id": "ed25519:beamng-earth-official-2026",
         "digests": {
             "4d82074a150105fcf02a55178d9fbe7050e33b2dfa853af384466f15d96e3a37",
+            "5bb2eaef2125fd69b0b95ad10c10247fca5736c6f7898db94f373d8598667664",
         },
     }
 }
@@ -650,8 +651,12 @@ class AddonRegistry:
             reasons = list(compat.reasons)
 
         disabled_env = {x.strip() for x in os.environ.get("BNG_EARTH_DISABLED_ADDONS", "").split(",") if x.strip()}
-        default_en = False if addon_id in disabled_env else True
-        enabled = bool(norm.get("enabled", default_en)) if "enabled" in addon_payload else default_en
+        if addon_id in disabled_env:
+            enabled = False
+        elif "enabled" in addon_payload and isinstance(addon_payload["enabled"], bool):
+            enabled = addon_payload["enabled"]
+        else:
+            enabled = True
         source_toggles: dict[str, bool] = {}
         for ds in norm["data_sources"]:
             sid = ds.get("id")
