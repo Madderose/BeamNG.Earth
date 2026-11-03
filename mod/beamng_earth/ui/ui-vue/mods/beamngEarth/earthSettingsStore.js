@@ -57,6 +57,7 @@ export const settingsSchema = [
       { id: "sourceProvenceBiomes", type: "bool", default: true, name: "Provence Crops & Mediterranean Biomes", desc: "Row-oriented vineyards, Sault lavender fields, olive orchards, and Mistral cypress windbreaks.", showIf: c => c.addonProvence !== false },
       { id: "effortProfile", type: "select", default: "balanced", name: "Ground-Truth Effort Profile", desc: "Layer B Effort Governor: controls how densely Ground Truth crops, trees, and aerial roof samples are synthesized without changing what exists in the world.",
         options: [ { label: "Low (Steam Deck / APU)", value: "low" }, { label: "Balanced (60 FPS Default)", value: "balanced" }, { label: "High", value: "high" }, { label: "Ultra Ground-Truth", value: "ultra" }, { label: "Auto-FPS Governor", value: "auto_fps" } ] },
+      { id: "refreshWorld", type: "worldRefresh", virtual: true, label: "Refresh now", name: "Refresh world around you", desc: "Clears and re-streams nearby vegetation, crops, buildings, and roads using your active Ground Truth addons and Effort profile." },
       { id: "rebaseDistance", type: "float", min: 2000, max: 16000, step: 100, default: 15000, name: "Rebase distance (m)", desc: "Advanced. How far you drive before the world quietly moves back under you (keeps the physics precise). 15 km keeps precision at about 1 mm." },
     ],
   },
@@ -179,6 +180,7 @@ export const help = ref(null)          // the setting pointed at (the side card'
 export const cacheConfirm = ref(false) // Clear cache: the confirmation is showing
 export const cacheBusy = ref(false)    // Clear cache: sent, waiting for the server's answer
 export const cacheResult = ref("")     // "Freed 1.2 GB" / an error
+export const worldRefreshNote = ref("") // Refresh world status note
 let cacheClearsAt = 0                  // status.cache.clears when the clear was sent
 let cacheSentAt = 0
 let lastWriteAt = 0 // a poll answered just after a uiSet may carry the value from before it
@@ -383,6 +385,18 @@ export function confirmClearCache() {
   engineLua("beamngEarth_settings and beamngEarth_settings.uiCacheClear() or nil", res => {
     if (res && res.ok) { cacheBusy.value = true; cacheSentAt = Date.now() }
     else cacheResult.value = (res && res.error) || "mod not loaded"
+  })
+}
+
+export function triggerWorldRefresh() {
+  worldRefreshNote.value = "Refreshing nearby vegetation & buildings..."
+  engineLua("beamngEarth_settings and beamngEarth_settings.uiRefreshWorld() or nil", res => {
+    if (res && res.ok) {
+      worldRefreshNote.value = "World refresh triggered"
+      setTimeout(() => { if (worldRefreshNote.value === "World refresh triggered") worldRefreshNote.value = "" }, 3500)
+    } else {
+      worldRefreshNote.value = (res && res.error) || "mod not loaded"
+    }
   })
 }
 

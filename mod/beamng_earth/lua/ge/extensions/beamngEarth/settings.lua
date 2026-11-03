@@ -1140,6 +1140,15 @@ function M.uiWelcomeDone()
   return { ok = true }
 end
 
+-- World page's "Refresh world" button: re-syncs addon toggles and clears/re-streams nearby vegetation, roads & buildings.
+function M.uiRefreshWorld()
+  local core = ext('beamngEarth_core')
+  if not core then return { ok = false, error = 'mod not loaded' } end
+  if core.syncAddons then pcall(core.syncAddons) end
+  if core.refreshWorld then pcall(core.refreshWorld) end
+  return { ok = true }
+end
+
 -- Automation (tools/benchmark.py, autodrive_perf.py: mcp.quiet_ui) keeps the page away for this game session only; the
 -- player still gets it on their next start.
 M.welcomeSuppressed = false

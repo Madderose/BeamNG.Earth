@@ -964,6 +964,7 @@ class Server:
         self.cache_dir = cache_dir
         self.picking = None          # the settings page's file window open (apppaths.pick): for which path
         revisitmod.CACHE_DIR = cache_dir
+        self.sync_worker_runtime_state()
         self.refetched = 0              # far textures whose missing photo tiles were fetched here (make_tile)
         # self.share_lock, self.group_helper = threading.Lock(), None    # (share_start: shared world building, commented out)
         try:                            # (BeamMP sharing v2: a session's mark left by an earlier run; share_hub sets it)
@@ -1750,14 +1751,42 @@ class Server:
                                      urban, self.road_widths, self.left_hand(anchor), self.mph(anchor),
                                      self.country(anchor))
 
+    def sync_worker_runtime_state(self):
+        """Export current addon and effort runtime state to cache_dir so blockworker subprocesses stay synchronized."""
+        cache_dir = getattr(self, "cache_dir", None)
+        if not cache_dir:
+            return
+        try:
+            os.makedirs(cache_dir, exist_ok=True)
+            path = os.path.join(cache_dir, "runtime_addon_effort.json")
+            tmp = f"{path}.{os.getpid()}.tmp"
+            data = {
+                "addons": addonsmod.get_registry().export_runtime_state(),
+                "effort": effortmod.get_effort_controller().export_runtime_state(),
+                "ts": time.time_ns(),
+            }
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(data, f)
+            os.replace(tmp, path)
+        except Exception as exc:
+            log.debug("sync_worker_runtime_state failed: %s", exc)
+
     def invalidate_addon_effort_caches(self):
         """Invalidate in-memory vegetation and tile caches when active addons or effort budget change."""
         revisitmod.invalidate_runtime_cache()
+        self.sync_worker_runtime_state()
         if getattr(self, "veg", None) is not None and hasattr(self.veg, "_mem"):
             with self.veg._lock:
                 self.veg._mem.clear()
+        if getattr(self, "mapdata", None) is not None and hasattr(self.mapdata, "_mem"):
+            with self.mapdata._mem_lock:
+                self.mapdata._mem.clear()
+                self.mapdata._mem_bytes = 0
         if hasattr(self, "tiles") and isinstance(getattr(self, "tiles", None), dict):
             self.tiles.clear()
+        memo = self.__dict__.get("_far_geo_done")
+        if isinstance(memo, dict):
+            memo.clear()
 
     def handle_api_request(self, method: str, path: str, body=None) -> tuple[int, dict]:
         """Dispatch /api/addons and /api/effort HTTP requests bound to this Server instance."""
@@ -5063,10 +5092,14 @@ class Connection:
                 if isinstance(line, str):
                     log.info("game: %s", line[:PERF_LOG_CHARS].replace("\n", " "))
         elif kind == "roads_reset":             # the mod dropped its roads (settings): send them all again
-            self.roads.close()
-            self.roads = road_tracker(self)
-            self.signs.close()
-            self.signs = signstream.Tracker()
+            if msg.get("all"):
+                self.s.invalidate_addon_effort_caches()
+                self.reset_world_trackers()
+            else:
+                self.roads.close()
+                self.roads = road_tracker(self)
+                self.signs.close()
+                self.signs = signstream.Tracker()
         elif kind == "highway_signs":           # the settings page's switch: no sign tiles built while it is off
             self.signs_on = bool(msg.get("on", True))
         elif kind == "graphics":                # the settings page's graphics knobs (set_graphics)
@@ -5082,9 +5115,7 @@ class Connection:
                 msg,
             )
             if payload.get("cache_invalidated"):
-                self.veg_sent.clear()
-                self.roads.close()
-                self.roads = road_tracker(self)
+                self.reset_world_trackers()
             self.send({"type": "addons_status", **payload})
         elif kind in ("effort_set", "effort_get", "effort"):
             _code, payload = self.s.handle_api_request(
@@ -5093,12 +5124,25 @@ class Connection:
                 msg,
             )
             if payload.get("cache_invalidated"):
-                self.veg_sent.clear()
-                self.roads.close()
-                self.roads = road_tracker(self)
+                self.reset_world_trackers()
             self.send({"type": "effort_status", **payload})
         else:
             log.debug("ignoring message type %r", kind)
+
+    def reset_world_trackers(self):
+        """Reset vegetation, road, sign, and far-building trackers so nearby world tiles re-stream on the next pose."""
+        if getattr(self, "veg", None) is not None:
+            old = self.veg
+            old.close()
+            self.veg = vegetationmod.Tracker(old.send_m, old.drop_m, geo=old.geo)
+        if getattr(self, "roads", None) is not None:
+            self.roads.close()
+            self.roads = road_tracker(self)
+        if getattr(self, "signs", None) is not None:
+            self.signs.close()
+            self.signs = signstream.Tracker()
+        if hasattr(self, "make_far_trackers"):
+            self.make_far_trackers(getattr(self, "far_geo", False))
 
     def set_graphics(self, msg):
         """The settings page's graphics (the user, 2026-10-28: "give player much more control in the graphics settings

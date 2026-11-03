@@ -919,6 +919,44 @@ class AddonRegistry:
                 "warnings": warnings,
             }
 
+    def export_runtime_state(self) -> dict[str, Any]:
+        """Export full runtime state of registered addons and toggles for cross-process worker synchronization."""
+        with self._lock:
+            return {
+                "approval_policy": self.approval_policy,
+                "global_source_toggles": dict(self._global_source_toggles),
+                "addons": [
+                    {
+                        "id": a.id,
+                        "manifest": a.manifest,
+                        "data_sources": a.data_sources,
+                        "biomes": a.biomes,
+                        "vfs_root": a.vfs_root,
+                        "enabled": a.enabled,
+                        "user_toggles": dict(a.source_toggles),
+                    }
+                    for a in self._addons.values()
+                ],
+            }
+
+    def import_runtime_state(self, state: dict[str, Any]) -> None:
+        """Import runtime state exported by the parent server process."""
+        if not isinstance(state, dict):
+            return
+        with self._lock:
+            pol = state.get("approval_policy")
+            if isinstance(pol, str) and pol.strip().lower() in VALID_POLICIES:
+                self.approval_policy = pol.strip().lower()
+            self._global_source_toggles = {
+                str(k): bool(v)
+                for k, v in (state.get("global_source_toggles") or {}).items()
+                if isinstance(v, bool)
+            }
+            self._addons.clear()
+            for item in state.get("addons") or []:
+                if isinstance(item, dict):
+                    self.register_addon(item, policy=self.approval_policy)
+
 
 def _register_reference_provence_digest() -> None:
     """Compute and pre-register the canonical digest of the bundled reference 'provence' addon."""

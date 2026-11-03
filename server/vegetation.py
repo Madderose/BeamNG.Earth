@@ -220,9 +220,16 @@ class Vegetation:
         self._warm, self._warm_thread = [], None
         self._warm_cv = threading.Condition()
 
+    def _cache_tag(self):
+        try:
+            return f"{addons.get_registry().cache_fingerprint()}_{effort.effort_cache_tag()}"
+        except Exception:
+            return "default"
+
     def cell(self, key):
         """The Items of map-data cell key ((z, x, y) or CellKey)."""
-        k = (int(key[1]), int(key[2]))
+        tag = self._cache_tag()
+        k = (int(key[1]), int(key[2]), tag)
         with self._lock:
             if k in self._mem:
                 self._mem.move_to_end(k)
@@ -232,7 +239,7 @@ class Vegetation:
             with self._lock:
                 if k in self._mem:
                     return self._mem[k]
-            items = self._load(*k)
+            items = self._load(int(key[1]), int(key[2]))
             with self._lock:
                 self._mem[k] = items
                 while len(self._mem) > MEM_CELLS:
@@ -272,16 +279,20 @@ class Vegetation:
                 log.exception("vegetation: building cell %s", (x, y))
 
     def ready(self, key):
-        k = (int(key[1]), int(key[2]))
+        tag = self._cache_tag()
+        k = (int(key[1]), int(key[2]), tag)
         with self._lock:
             if k in self._mem:
                 return True
-        p = self._path(*k)
+        p = self._path(int(key[1]), int(key[2]))
         return bool(p and os.path.exists(p))
 
     def _path(self, x, y):
+        if not self.dir:
+            return None
         rel = getattr(self.md, "release", "x")
-        return os.path.join(self.dir, str(rel), str(x), f"{y}.npz") if self.dir else None
+        tag = self._cache_tag()
+        return os.path.join(self.dir, f"{rel}_{tag}", str(x), f"{y}.npz")
 
     def _load(self, x, y):
         p = self._path(x, y)

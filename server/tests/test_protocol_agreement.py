@@ -141,7 +141,7 @@ MOD_TO_SERVER = {
     # "share": {"port": F(int, OPT)},       # (the BeamMP server's sharing port, its plugin's bngeConfig)
     # "peers": {"me": F(str), "members": F(list)},
     # roads (roads.py; additive): the mod removed its roads (switched off and on again): send them again
-    "roads_reset": {},
+    "roads_reset": {"all": F(bool, OPT)},
     # gas stations (gasstations.py; additive): on, sent after every hello
     "gas_stations": {"on": F(bool)},
     # highway signs (signstream.py; additive): the settings page's switch, sent after every hello and when changed
@@ -369,7 +369,8 @@ EXERCISED_ELSEWHERE = {"far_retex", "roads_tile", "roads_drop",   # roads: needs
                        "route_download",                             # only when the GPS plans a route (routeahead.py)
                        "terrain_ready_set",                          # only to a fast player's mod that says readySet
                        "server_list",                                # only when the BeamMP tab asks (online)
-                       "share_info", "share_out"}                    # only in a BeamMP session (test_mpshare)
+                       "share_info", "share_out",                    # only in a BeamMP session (test_mpshare)
+                       "addons_status", "effort_status"}             # addon & effort sync (test_addons / test_effort)
 # events the mod's net.lua makes up itself (not on the wire)
 MOD_INTERNAL = {"_connected": set(), "_disconnected": {"error"}}
 

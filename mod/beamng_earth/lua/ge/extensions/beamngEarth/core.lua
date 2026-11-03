@@ -956,6 +956,10 @@ local function onMessage(msg)
     M.graphicsSent = nil
     M.sendGraphics()
     pcall(M.syncAddons)
+    if settings and settings.get then
+      local ep = settings.get('effortProfile')
+      if type(ep) == 'string' and #ep > 0 then pcall(M.setEffortProfile, ep) end
+    end
     -- the on-screen credits: this session's own follow (the attribution line until then)
     credits.clear()
     -- M4: the terrain block first (everything below may use the lattice / follow table); a server without
@@ -1222,6 +1226,7 @@ local function onMessage(msg)
     if a and a.applySyncResponse then a.applySyncResponse(msg) end
     if msg.cache_invalidated == true then
       trees.clear()
+      if roads.newSession then roads.newSession() end
       if roads.incrementBldGen then roads.incrementBldGen() end
     end
   elseif t == 'effort_status' then
@@ -1229,6 +1234,7 @@ local function onMessage(msg)
     M._effortBudget = msg
     if msg.cache_invalidated == true then
       trees.clear()
+      if roads.newSession then roads.newSession() end
       if roads.incrementBldGen then roads.incrementBldGen() end
     end
   end
@@ -2811,11 +2817,29 @@ function M.syncAddons(userToggles)
   local a = M.addonsModule()
   if not a then return nil end
   a.discover()
+  if not userToggles then
+    local settings = rawget(_G, 'beamngEarth_settings')
+    if settings and settings.get then
+      a.setAddonEnabled('provence', settings.get('addonProvence') ~= false)
+      a.setSourceEnabled('provence', 'ign_rpg_parcels', settings.get('sourceIgnRpg') ~= false)
+      a.setSourceEnabled('provence', 'ign_orthophoto_20cm', settings.get('sourceIgnOrtho') ~= false)
+      a.setSourceEnabled('provence', 'osm_provence_landuse', settings.get('sourceProvenceBiomes') ~= false)
+    end
+  end
   local payload = a.buildSyncPayload(userToggles)
   if net.isConnected() then
     net.send({ type = 'addons_sync', addons = payload.addons, user_toggles = payload.user_toggles })
   end
   return payload
+end
+function M.refreshWorld()
+  trees.clear()
+  if roads.newSession then roads.newSession() end
+  if roads.incrementBldGen then roads.incrementBldGen() end
+  if net.isConnected() then
+    net.send({ type = 'roads_reset', all = true })
+  end
+  return { ok = true }
 end
 function M.getAddonsStatus()
   local a = M.addonsModule()

@@ -293,6 +293,27 @@ class EffortController:
                 "cache_tag": self.cache_tag(),
             }
 
+    def export_runtime_state(self) -> dict[str, Any]:
+        """Export current effort profile and governor tier for cross-process worker synchronization."""
+        with self._lock:
+            return {
+                "profile": self._profile,
+                "effective_profile": self.effective_profile,
+                "target_fps": self.governor.target_fps,
+            }
+
+    def import_runtime_state(self, state: dict[str, Any]) -> None:
+        """Import runtime state exported by the parent server process."""
+        if not isinstance(state, dict):
+            return
+        with self._lock:
+            prof = str(state.get("profile") or "").strip().lower()
+            eff = str(state.get("effective_profile") or "").strip().lower()
+            if prof in VALID_PROFILES:
+                self._profile = prof
+            if eff in CONCRETE_PROFILES:
+                self.governor.current_tier = eff
+
 
 _GLOBAL_CONTROLLER: EffortController | None = None
 _CONTROLLER_LOCK = threading.Lock()

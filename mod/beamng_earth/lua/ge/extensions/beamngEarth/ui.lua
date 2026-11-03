@@ -47,6 +47,8 @@ local function drawCompact(view)
       local on = st.get('addonProvence') ~= false
       if im.Button(on and 'Provence: ON' or 'Provence: OFF') then st.set('addonProvence', not on) end
       im.SameLine()
+      if st.uiRefreshWorld and im.Button('Refresh world') then st.uiRefreshWorld() end
+      im.SameLine()
     end
     if im.Button('Full window') then M.compact = false end
     im.SameLine()
@@ -117,6 +119,10 @@ function M.draw(view, actions)
       im.SameLine()
       local on = st.get('addonProvence') ~= false
       if im.Button(on and 'Provence Addon: ON' or 'Provence Addon: OFF') then st.set('addonProvence', not on) end
+      if st.uiRefreshWorld then
+        im.SameLine()
+        if im.Button('Refresh world') then st.uiRefreshWorld() end
+      end
     end
     im.Separator()
     wrapped('Status: ' .. (view.status ~= '' and view.status or '-'))
