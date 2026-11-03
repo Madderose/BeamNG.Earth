@@ -17,7 +17,7 @@ local M = {}
 M.dependencies = { 'ui_imgui' }
 
 M.BENCH_S = 30
-M.STAGE_MAX_S = 90
+M.STAGE_MAX_S = 60
 M.RAY_UP = 1000
 M.RAY_LEN = 3000
 M.MAX_VZ = 30
@@ -618,6 +618,8 @@ end
 
 -- Check world load state during `stage == 'staging'` before starting the route drive.
 local function checkStagingReady(b, elapsed)
+  if b.forceStart then return true end
+
   local core = rawget(_G, 'beamngEarth_core')
   local st = nil
   if core and core.status then
@@ -626,12 +628,22 @@ local function checkStagingReady(b, elapsed)
   end
   local r = gps.route and gps.route()
   local routeReady = type(r) == 'table' and type(r.points) == 'table' and #r.points >= 2
+  -- Re-request route every 4 seconds if OSRM route hasn't arrived yet (e.g. if server restarted)
+  if not routeReady and b.route and elapsed >= (b.nextRouteRetry or 3.0) then
+    b.nextRouteRetry = elapsed + 4.0
+    pcall(gps.setDestination, b.route.endLat, b.route.endLon, b.route.shortName or b.route.name)
+  end
+  -- If OSRM takes > 10s, allow fallback straight-line path so benchmark never hangs
+  local routeOrFallback = routeReady or (elapsed >= 10.0)
+
   local veh = getPlayerVehicle and getPlayerVehicle(0)
   local p = veh and veh:getPosition()
   local g = p and groundAt(p.x, p.y, p.z + M.RAY_UP)
   local teleporting = st and st.teleporting == true
-  local commits = st and tonumber(st.commits) or 0
-  local baseReady = (elapsed >= 2.0) and (not teleporting) and (commits >= 1) and routeReady and (g ~= nil)
+  -- Note: st.commits in core.status() is a table of commit records (or a count)
+  local commitsCount = st and (type(st.commits) == 'table' and #st.commits or tonumber(st.commits)) or 0
+  local hasGround = (g ~= nil) or (commitsCount >= 1)
+  local baseReady = (elapsed >= 1.5) and (not teleporting) and routeOrFallback and hasGround
 
   local queued = st and st.far and tonumber(st.far.queued) or 0
   local backlog = st and tonumber(st.serverBacklog) or 0
@@ -640,7 +652,7 @@ local function checkStagingReady(b, elapsed)
 
   if not baseReady then
     b.readySince = nil
-    if teleporting or commits < 1 or not g then
+    if teleporting or not hasGround then
       b.stageText = string.format('Waiting for terrain spawn (%ds)...', math.floor(elapsed))
     elseif not routeReady then
       b.stageText = string.format('Waiting for OSRM road route (%ds)...', math.floor(elapsed))
@@ -651,22 +663,22 @@ local function checkStagingReady(b, elapsed)
   end
 
   if b.loadMode == 'cold' then
-    -- Immediate / Cold streaming mode: start as soon as start terrain + OSRM route are ready (1s settle)
+    -- Immediate / Cold streaming mode: start as soon as start terrain + OSRM route are ready
     b.readySince = b.readySince or now()
     local settle = now() - b.readySince
-    b.stageText = string.format('Ready (cold start in %.1fs)...', math.max(0, 1.0 - settle))
-    return settle >= 1.0
+    b.stageText = string.format('Ready (starting drive in %.1fs)...', math.max(0, 0.8 - settle))
+    return settle >= 0.8
   end
 
   -- Default ('full'): wait until all initial tiles, far-field meshes, and server backlog finish loading
   if fullReady then
     b.readySince = b.readySince or now()
     local settle = now() - b.readySince
-    b.stageText = string.format('World loaded — settling (%.1fs)...', math.max(0, 2.0 - settle))
-    if settle >= 2.0 then return true end
+    b.stageText = string.format('World 100%% loaded - starting (%.1fs)...', math.max(0, 1.5 - settle))
+    if settle >= 1.5 then return true end
   else
     b.readySince = nil
-    b.stageText = string.format('Waiting full load (tiles:%d srv:%d, %ds)...', queued, backlog, math.floor(elapsed))
+    b.stageText = string.format('Loading world (tiles:%d srv:%d, %ds)...', queued, backlog, math.floor(elapsed))
     if elapsed >= M.STAGE_MAX_S then
       return true
     end
@@ -683,6 +695,12 @@ local function beginRouteRecording(b)
   local r = gps.route and gps.route()
   if r and type(r.points) == 'table' and #r.points >= 2 then
     b.path = makePath(r.points)
+  elseif b.route then
+    -- Fallback 2-point path if OSRM was unreachable
+    b.path = makePath({
+      { b.route.startLat, b.route.startLon },
+      { b.route.endLat, b.route.endLon },
+    })
   end
   local veh = getPlayerVehicle and getPlayerVehicle(0)
   if veh then
@@ -732,11 +750,11 @@ local function stepRouteKinematic(b, dtReal)
   local vz = math.max(-M.MAX_VZ, math.min(M.MAX_VZ, (z - (b.z or z)) / dtSim))
   b.z = z
 
-  if b.frame % 20 == 0 then
+  if b.frame == 1 or b.frame % 20 == 0 then
     local d = veh:getDirectionVector()
     if d and (d.x ~= 0 or d.y ~= 0) then
       local mh = headingOf(d.x, d.y)
-      if math.abs(angleDiff(mh, b.cmd or mh)) > 5 then
+      if b.frame == 1 or math.abs(angleDiff(mh, b.cmd or mh)) > 5 then
         b.cmd = mh
       end
     end
@@ -842,6 +860,7 @@ function M.status()
     benchRunning = prof ~= nil,
     stage = stStage,
     stageText = prof and prof.stageText or nil,
+    loadMode = prof and prof.loadMode or nil,
     mode = prof and prof.mode or (ls and ls.mode) or 'free',
     routeName = prof and prof.route and (prof.route.shortName or prof.route.name) or (ls and ls.routeName) or nil,
     distanceM = prof and prof.s or 0,
@@ -856,6 +875,28 @@ function M.status()
     routes = M.BENCH_ROUTES,
     speeds = M.BENCH_SPEEDS,
   }
+end
+
+-- Allow the CEF UI to change loadMode live while staging (e.g. clicking "Immediate (Stream on Move)" starts driving right away)
+function M.uiSetLoadMode(loadMode)
+  local lMode = (loadMode == 'cold') and 'cold' or 'full'
+  if prof and prof.stage == 'staging' then
+    prof.loadMode = lMode
+    if lMode == 'cold' then
+      prof.forceStart = true
+    end
+    return { ok = true, loadMode = lMode, forced = (lMode == 'cold') }
+  end
+  return { ok = true, loadMode = lMode }
+end
+
+-- Allow the user to manually start the drive immediately if currently staging
+function M.uiForceStartNow()
+  if prof and prof.stage == 'staging' then
+    prof.forceStart = true
+    return { ok = true, started = true }
+  end
+  return { ok = false }
 end
 
 -- Start a benchmark from the CEF Generation Addons UI:
@@ -885,7 +926,19 @@ function M.uiStartBench(mode, arg, speedId, loadMode)
     local sp = findSpeed(tostring(speedId or 'slow'))
     local lMode = (loadMode == 'cold') and 'cold' or 'full'
     local core = rawget(_G, 'beamngEarth_core')
-    if core and core.teleport then
+    -- Only teleport if player is more than 120 m away from the route start
+    local alreadyAtStart = false
+    if core and core.status then
+      local ok, st = pcall(function() return loadstring('return ' .. core.status())() end)
+      if ok and type(st) == 'table' and st.player and st.player.lat and st.player.lon then
+        local dlat = (st.player.lat - route.startLat) * 110540
+        local dlon = (st.player.lon - route.startLon) * 111320 * math.cos(math.rad(route.startLat))
+        if (dlat * dlat + dlon * dlon) < (120 * 120) then
+          alreadyAtStart = true
+        end
+      end
+    end
+    if not alreadyAtStart and core and core.teleport then
       pcall(core.teleport, route.startLat, route.startLon, route.shortName or route.name, { record = false })
     end
     pcall(function()
@@ -903,7 +956,7 @@ function M.uiStartBench(mode, arg, speedId, loadMode)
       t0 = now(),
       dur = tonumber(sp.duration) or 45,
       stage = 'staging',
-      stageText = 'Teleporting & requesting OSRM route...',
+      stageText = alreadyAtStart and 'Requesting OSRM route...' or 'Teleporting & requesting OSRM route...',
       mode = 'route',
       route = route,
       speedPreset = sp,

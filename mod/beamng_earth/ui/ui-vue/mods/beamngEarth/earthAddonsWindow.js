@@ -405,6 +405,13 @@ function injectStyles() {
     .bng-earth-refresh-btn:hover {
       background: #ff6600;
     }
+    .bng-earth-refresh-btn.force-start {
+      background: rgba(46, 160, 67, 0.32);
+      border-color: #3fb950;
+    }
+    .bng-earth-refresh-btn.force-start:hover {
+      background: #2ea043;
+    }
     .bng-earth-bench-btn {
       width: 100%;
       background: rgba(56, 139, 253, 0.18);
@@ -557,7 +564,7 @@ function startOrStopBenchmark() {
     st.benchDuration = res.duration || 45
     setNote(
       st.benchMode === "route"
-        ? `Teleporting & waiting for ${st.benchLoadMode === "cold" ? "road spawn" : "full world load"}: ${res.route || st.benchRouteId}...`
+        ? `Preparing route (${st.benchLoadMode === "cold" ? "immediate start" : "waiting full load"}): ${res.route || st.benchRouteId}...`
         : "Recording 30s free-drive benchmark (keep driving)...",
       0
     )
@@ -646,10 +653,22 @@ function setBenchSpeed(speedId) {
 function setBenchLoadMode(loadMode) {
   const st = getState()
   st.benchLoadMode = loadMode
+  if (st.benchRunning && st.benchStage === "staging") {
+    engineLua(`beamngEarth_report and beamngEarth_report.uiSetLoadMode(${JSON.stringify(loadMode)}) or nil`, () => {
+      pollBenchStatus()
+    })
+  }
   updateDOM()
 }
 
-function triggerRefresh() {
+function triggerRefreshOrForceStart() {
+  const st = getState()
+  if (st.benchRunning && st.benchStage === "staging") {
+    engineLua("beamngEarth_report and beamngEarth_report.uiForceStartNow() or nil", () => {
+      pollBenchStatus()
+    })
+    return
+  }
   setNote("Refreshing nearby vegetation & buildings...", 0)
   engineLua("beamngEarth_settings and beamngEarth_settings.uiRefreshWorld() or nil", () => {
     setNote("World refresh triggered", 2500)
@@ -834,7 +853,7 @@ function buildDOMOnce() {
     btn.addEventListener("click", () => setBenchLoadMode(btn.getAttribute("data-load")))
   })
 
-  root.querySelector("#bng-earth-addons-refresh").addEventListener("click", triggerRefresh)
+  root.querySelector("#bng-earth-addons-refresh").addEventListener("click", triggerRefreshOrForceStart)
   root.querySelector("#bng-earth-addons-bench").addEventListener("click", startOrStopBenchmark)
   root.querySelector("#bng-earth-bench-folder").addEventListener("click", openBenchFolder)
   root.querySelector("#bng-earth-bench-copy").addEventListener("click", copyBenchReport)
@@ -899,6 +918,13 @@ export function updateDOM() {
   root.querySelectorAll(".bng-earth-load-btn").forEach(btn => {
     btn.classList.toggle("active", btn.getAttribute("data-load") === st.benchLoadMode)
   })
+
+  const refreshBtn = root.querySelector("#bng-earth-addons-refresh")
+  if (refreshBtn) {
+    const isStaging = !!(st.benchRunning && st.benchStage === "staging")
+    refreshBtn.classList.toggle("force-start", isStaging)
+    refreshBtn.textContent = isStaging ? "Start Drive Now" : "Refresh World"
+  }
 
   const benchBtn = root.querySelector("#bng-earth-addons-bench")
   if (benchBtn) {
