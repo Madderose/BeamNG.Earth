@@ -2,7 +2,9 @@
 // Single-instance, in-place DOM updates (never rebuilds innerHTML on a timer, never resets drag position),
 // with Minimize ("Min"), Close ("X"), Refresh World, and dual-mode Hardware/Addon Benchmark controls:
 //   - Mode 1: Free Drive (30s)
-//   - Mode 2: Point-to-Point Route Auto-Drive (selectable from the multi-route BENCH_ROUTES registry)
+//   - Mode 2: Point-to-Point Route Auto-Drive (selectable via CEF-native stepper + route buttons,
+//             with Slow 80 km/h [50 mph, 1.0 km], Fast 200 km/h [124 mph, 2.5 km], and Ultra 300 km/h [186 mph, 3.75 km],
+//             plus Wait Full Load vs. Immediate Start).
 
 const ROOT_ID = "bng-earth-addons-floating-root"
 const STYLE_ID = "bng-earth-addons-floating-style"
@@ -17,9 +19,15 @@ const EFFORT_PROFILES = [
 
 const DEFAULT_ROUTES = [
   { id: "ventoux_d974", shortName: "Mont Ventoux D974 (Climb)", duration: 45 },
-  { id: "tavel_vineyards", shortName: "Tavel Vineyards -> Village", duration: 45 },
+  { id: "tavel_vineyards", shortName: "Tavel Vineyards -> Lirac", duration: 45 },
   { id: "lirac_tavel", shortName: "Lirac Streets -> Vineyards", duration: 45 },
   { id: "sault_lavender", shortName: "Sault Lavender Fields (D942)", duration: 45 },
+]
+
+const SPEED_TIERS = [
+  { id: "slow", label: "Slow: 80 km/h", sub: "50 mph · 1.0 km" },
+  { id: "fast", label: "Fast: 200 km/h", sub: "124 mph · 2.5 km" },
+  { id: "ultra", label: "Ultra: 300 km/h", sub: "186 mph · 3.75 km" },
 ]
 
 function getState() {
@@ -34,10 +42,13 @@ function getState() {
       effortProfile: "balanced",
       benchMode: "free", // "free" | "route"
       benchRouteId: "ventoux_d974",
+      benchSpeedId: "slow", // "slow" | "fast" | "ultra"
+      benchLoadMode: "full", // "full" (Wait Full Load) | "cold" (Immediate Start)
       routes: DEFAULT_ROUTES,
       note: "",
       benchRunning: false,
       benchStage: "recording",
+      benchStageText: "",
       benchElapsed: 0,
       benchDuration: 30,
       benchSummary: "",
@@ -96,7 +107,7 @@ function injectStyles() {
       border-color: #ff6600;
     }
     .bng-earth-addons-card {
-      width: 376px;
+      width: 392px;
       background: rgba(20, 24, 30, 0.94);
       border: 1px solid rgba(255, 255, 255, 0.12);
       border-radius: 8px;
@@ -160,8 +171,8 @@ function injectStyles() {
       justify-content: space-between;
       background: rgba(38, 44, 54, 0.85);
       border-radius: 5px;
-      padding: 8px 10px;
-      margin-bottom: 6px;
+      padding: 7px 10px;
+      margin-bottom: 5px;
       font-size: 13px;
       cursor: pointer;
     }
@@ -207,9 +218,9 @@ function injectStyles() {
       margin-bottom: 6px;
     }
     .bng-earth-effort-label {
-      font-size: 12px;
+      font-size: 11.5px;
       color: #b8c2d0;
-      margin-bottom: 6px;
+      margin-bottom: 5px;
     }
     .bng-earth-effort-pills {
       display: grid;
@@ -261,16 +272,118 @@ function injectStyles() {
       color: #fff;
       font-weight: 700;
     }
-    .bng-earth-route-select {
-      width: 100%;
+    .bng-earth-route-stepper {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
       background: rgba(16, 20, 26, 0.95);
       border: 1px solid rgba(88, 166, 255, 0.45);
-      color: #f0f2f5;
       border-radius: 4px;
-      padding: 5px 8px;
+      padding: 3px 4px;
+      margin-bottom: 5px;
+    }
+    .bng-earth-step-btn {
+      background: rgba(255, 255, 255, 0.08);
+      border: 1px solid rgba(255, 255, 255, 0.18);
+      color: #fff;
+      border-radius: 3px;
+      padding: 2px 9px;
       font-size: 12px;
-      outline: none;
+      font-weight: 700;
       cursor: pointer;
+    }
+    .bng-earth-step-btn:hover {
+      background: rgba(56, 139, 253, 0.45);
+      border-color: #79c0ff;
+    }
+    .bng-earth-route-cur {
+      font-size: 12px;
+      font-weight: 600;
+      color: #e6f0ff;
+      text-align: center;
+      flex: 1;
+      padding: 0 6px;
+    }
+    .bng-earth-route-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 4px;
+      margin-bottom: 6px;
+    }
+    .bng-earth-route-pill {
+      background: rgba(20, 24, 30, 0.85);
+      border: 1px solid rgba(255, 255, 255, 0.14);
+      color: #c6d0dc;
+      border-radius: 4px;
+      padding: 4px 5px;
+      font-size: 10.5px;
+      text-align: left;
+      cursor: pointer;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .bng-earth-route-pill:hover {
+      background: rgba(45, 55, 70, 0.92);
+    }
+    .bng-earth-route-pill.active {
+      background: rgba(56, 139, 253, 0.32);
+      border-color: #58a6ff;
+      color: #ffffff;
+      font-weight: 700;
+    }
+    .bng-earth-speed-pills {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 4px;
+      margin-bottom: 6px;
+    }
+    .bng-earth-speed-btn {
+      background: rgba(20, 24, 30, 0.88);
+      border: 1px solid rgba(255, 255, 255, 0.15);
+      color: #cfd6e0;
+      border-radius: 4px;
+      padding: 4px 3px;
+      font-size: 11px;
+      text-align: center;
+      cursor: pointer;
+      line-height: 1.25;
+    }
+    .bng-earth-speed-btn .sub {
+      display: block;
+      font-size: 9.5px;
+      color: #8fa0b5;
+      font-weight: 400;
+    }
+    .bng-earth-speed-btn.active {
+      background: rgba(255, 102, 0, 0.32);
+      border-color: #ff6600;
+      color: #fff;
+      font-weight: 700;
+    }
+    .bng-earth-speed-btn.active .sub {
+      color: #ffd6b8;
+    }
+    .bng-earth-load-pills {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 4px;
+    }
+    .bng-earth-load-btn {
+      background: rgba(20, 24, 30, 0.85);
+      border: 1px solid rgba(255, 255, 255, 0.14);
+      color: #c6d0dc;
+      border-radius: 4px;
+      padding: 4px 5px;
+      font-size: 10.5px;
+      text-align: center;
+      cursor: pointer;
+    }
+    .bng-earth-load-btn.active {
+      background: rgba(46, 160, 67, 0.32);
+      border-color: #3fb950;
+      color: #ffffff;
+      font-weight: 700;
     }
     .bng-earth-actions-grid {
       display: grid;
@@ -391,6 +504,7 @@ function pollBenchStatus() {
     const wasRunning = st.benchRunning
     st.benchRunning = !!stRes.benchRunning
     st.benchStage = stRes.stage || "recording"
+    st.benchStageText = stRes.stageText || ""
     st.benchElapsed = stRes.elapsed || 0
     st.benchDuration = stRes.duration || 30
     if (stRes.lastSummary) st.benchSummary = stRes.lastSummary
@@ -400,6 +514,9 @@ function pollBenchStatus() {
       st.routes = stRes.routes
     }
     st.benchHasUrl = !!stRes.lastUrl
+    if (st.benchRunning && st.benchStageText) {
+      st.note = st.benchStageText
+    }
     if (wasRunning && !st.benchRunning) {
       if (st.benchPollTimer) {
         clearInterval(st.benchPollTimer)
@@ -420,13 +537,14 @@ function startOrStopBenchmark() {
         st.benchPollTimer = null
       }
       st.benchRunning = false
+      st.benchStageText = ""
       pollBenchStatus()
       setNote(res && res.cancelled ? "Benchmark cancelled" : "Benchmark stopped & saved", 3000)
     })
     return
   }
   const modeArg = st.benchMode === "route"
-    ? `"route", ${JSON.stringify(st.benchRouteId || "ventoux_d974")}`
+    ? `"route", ${JSON.stringify(st.benchRouteId || "ventoux_d974")}, ${JSON.stringify(st.benchSpeedId || "slow")}, ${JSON.stringify(st.benchLoadMode || "full")}`
     : `"free", 30`
   engineLua(`beamngEarth_report and beamngEarth_report.uiStartBench(${modeArg}) or nil`, res => {
     if (!res || !res.ok) {
@@ -436,10 +554,10 @@ function startOrStopBenchmark() {
     st.benchRunning = true
     st.benchStage = st.benchMode === "route" ? "staging" : "recording"
     st.benchElapsed = 0
-    st.benchDuration = st.benchMode === "route" ? (res.stageDur || 8) : (res.duration || 30)
+    st.benchDuration = res.duration || 45
     setNote(
       st.benchMode === "route"
-        ? `Teleporting & staging route: ${res.route || st.benchRouteId}...`
+        ? `Teleporting & waiting for ${st.benchLoadMode === "cold" ? "road spawn" : "full world load"}: ${res.route || st.benchRouteId}...`
         : "Recording 30s free-drive benchmark (keep driving)...",
       0
     )
@@ -503,6 +621,34 @@ function setBenchMode(mode) {
   updateDOM()
 }
 
+function setBenchRoute(routeId) {
+  const st = getState()
+  st.benchRouteId = routeId
+  updateDOM()
+}
+
+function stepBenchRoute(delta) {
+  const st = getState()
+  const list = Array.isArray(st.routes) && st.routes.length ? st.routes : DEFAULT_ROUTES
+  let idx = list.findIndex(r => r.id === st.benchRouteId)
+  if (idx < 0) idx = 0
+  idx = (idx + delta + list.length) % list.length
+  st.benchRouteId = list[idx].id
+  updateDOM()
+}
+
+function setBenchSpeed(speedId) {
+  const st = getState()
+  st.benchSpeedId = speedId
+  updateDOM()
+}
+
+function setBenchLoadMode(loadMode) {
+  const st = getState()
+  st.benchLoadMode = loadMode
+  updateDOM()
+}
+
 function triggerRefresh() {
   setNote("Refreshing nearby vegetation & buildings...", 0)
   engineLua("beamngEarth_settings and beamngEarth_settings.uiRefreshWorld() or nil", () => {
@@ -514,7 +660,7 @@ function attachDrag(headerEl, rootEl) {
   let dragging = false
   let startX = 0, startY = 0, origX = 0, origY = 0
   headerEl.addEventListener("mousedown", e => {
-    if (e.target.tagName === "BUTTON" || e.target.tagName === "SELECT") return
+    if (e.target.tagName === "BUTTON") return
     const st = getState()
     dragging = true
     startX = e.clientX
@@ -523,7 +669,7 @@ function attachDrag(headerEl, rootEl) {
     origY = st.posY
     const onMove = ev => {
       if (!dragging) return
-      st.posX = Math.max(8, Math.min(window.innerWidth - 385, origX + (ev.clientX - startX)))
+      st.posX = Math.max(8, Math.min(window.innerWidth - 400, origX + (ev.clientX - startX)))
       st.posY = Math.max(8, Math.min(window.innerHeight - 80, origY + (ev.clientY - startY)))
       rootEl.style.left = `${st.posX}px`
       rootEl.style.top = `${st.posY}px`
@@ -552,8 +698,15 @@ function buildDOMOnce() {
     <button class="bng-earth-effort-btn" data-effort="${p.id}">${p.label}</button>
   `).join("")
 
-  const routeOptions = (st.routes || DEFAULT_ROUTES).map(r => `
-    <option value="${r.id}">${r.shortName || r.name}</option>
+  const routePills = (st.routes || DEFAULT_ROUTES).map((r, idx) => `
+    <button class="bng-earth-route-pill" data-route="${r.id}">${idx + 1}. ${r.shortName || r.name}</button>
+  `).join("")
+
+  const speedBtns = SPEED_TIERS.map(s => `
+    <button class="bng-earth-speed-btn" data-speed="${s.id}">
+      <span>${s.label}</span>
+      <span class="sub">${s.sub}</span>
+    </button>
   `).join("")
 
   root.innerHTML = `
@@ -602,7 +755,20 @@ function buildDOMOnce() {
           <button class="bng-earth-mode-btn" data-mode="route">Route A -> B (Auto)</button>
         </div>
         <div id="bng-earth-route-row" style="display:none;">
-          <select class="bng-earth-route-select" id="bng-earth-route-select">${routeOptions}</select>
+          <div class="bng-earth-effort-label">Select Route (click &lt; / &gt; or route button)</div>
+          <div class="bng-earth-route-stepper">
+            <button class="bng-earth-step-btn" id="bng-earth-route-prev" title="Previous route">&lt;</button>
+            <div class="bng-earth-route-cur" id="bng-earth-route-cur">Mont Ventoux D974 (1/4)</div>
+            <button class="bng-earth-step-btn" id="bng-earth-route-next" title="Next route">&gt;</button>
+          </div>
+          <div class="bng-earth-route-grid" id="bng-earth-route-grid">${routePills}</div>
+          <div class="bng-earth-effort-label">Speed &amp; Adapted Route Distance (~45s drive)</div>
+          <div class="bng-earth-speed-pills">${speedBtns}</div>
+          <div class="bng-earth-effort-label">Start Trigger (Cold Spawn Readiness)</div>
+          <div class="bng-earth-load-pills">
+            <button class="bng-earth-load-btn" data-load="full">Wait Full Load (100%)</button>
+            <button class="bng-earth-load-btn" data-load="cold">Immediate (Stream on Move)</button>
+          </div>
         </div>
       </div>
       <div class="bng-earth-actions-grid">
@@ -656,13 +822,18 @@ function buildDOMOnce() {
   root.querySelectorAll(".bng-earth-mode-btn").forEach(btn => {
     btn.addEventListener("click", () => setBenchMode(btn.getAttribute("data-mode")))
   })
-  const routeSelect = root.querySelector("#bng-earth-route-select")
-  if (routeSelect) {
-    routeSelect.value = st.benchRouteId
-    routeSelect.addEventListener("change", e => {
-      st.benchRouteId = e.target.value
-    })
-  }
+  root.querySelector("#bng-earth-route-prev").addEventListener("click", () => stepBenchRoute(-1))
+  root.querySelector("#bng-earth-route-next").addEventListener("click", () => stepBenchRoute(1))
+  root.querySelectorAll(".bng-earth-route-pill").forEach(btn => {
+    btn.addEventListener("click", () => setBenchRoute(btn.getAttribute("data-route")))
+  })
+  root.querySelectorAll(".bng-earth-speed-btn").forEach(btn => {
+    btn.addEventListener("click", () => setBenchSpeed(btn.getAttribute("data-speed")))
+  })
+  root.querySelectorAll(".bng-earth-load-btn").forEach(btn => {
+    btn.addEventListener("click", () => setBenchLoadMode(btn.getAttribute("data-load")))
+  })
+
   root.querySelector("#bng-earth-addons-refresh").addEventListener("click", triggerRefresh)
   root.querySelector("#bng-earth-addons-bench").addEventListener("click", startOrStopBenchmark)
   root.querySelector("#bng-earth-bench-folder").addEventListener("click", openBenchFolder)
@@ -710,19 +881,37 @@ export function updateDOM() {
   if (routeRow) {
     routeRow.style.display = st.benchMode === "route" ? "block" : "none"
   }
-  const routeSelect = root.querySelector("#bng-earth-route-select")
-  if (routeSelect && routeSelect.value !== st.benchRouteId) {
-    routeSelect.value = st.benchRouteId
+
+  const list = Array.isArray(st.routes) && st.routes.length ? st.routes : DEFAULT_ROUTES
+  let curIdx = list.findIndex(r => r.id === st.benchRouteId)
+  if (curIdx < 0) curIdx = 0
+  const curRoute = list[curIdx] || DEFAULT_ROUTES[0]
+  const curEl = root.querySelector("#bng-earth-route-cur")
+  if (curEl) {
+    curEl.textContent = `${curRoute.shortName || curRoute.name} (${curIdx + 1}/${list.length})`
   }
+  root.querySelectorAll(".bng-earth-route-pill").forEach(btn => {
+    btn.classList.toggle("active", btn.getAttribute("data-route") === st.benchRouteId)
+  })
+  root.querySelectorAll(".bng-earth-speed-btn").forEach(btn => {
+    btn.classList.toggle("active", btn.getAttribute("data-speed") === st.benchSpeedId)
+  })
+  root.querySelectorAll(".bng-earth-load-btn").forEach(btn => {
+    btn.classList.toggle("active", btn.getAttribute("data-load") === st.benchLoadMode)
+  })
 
   const benchBtn = root.querySelector("#bng-earth-addons-bench")
   if (benchBtn) {
     benchBtn.classList.toggle("running", !!st.benchRunning)
     if (st.benchRunning) {
-      const prefix = st.benchStage === "staging" ? "Staging" : "Stop"
-      benchBtn.textContent = `${prefix} (${st.benchElapsed}/${st.benchDuration}s)`
+      if (st.benchStage === "staging") {
+        benchBtn.textContent = `Loading (${st.benchElapsed}s) · Stop`
+      } else {
+        benchBtn.textContent = `Stop (${st.benchElapsed}/${st.benchDuration}s)`
+      }
     } else {
-      benchBtn.textContent = st.benchMode === "route" ? "Start Route Bench" : "Benchmark (30s)"
+      const spLabel = st.benchSpeedId === "ultra" ? "300 km/h" : (st.benchSpeedId === "fast" ? "200 km/h" : "80 km/h")
+      benchBtn.textContent = st.benchMode === "route" ? `Run Route (${spLabel})` : "Benchmark (30s)"
     }
   }
   const resBox = root.querySelector("#bng-earth-bench-result")

@@ -256,9 +256,12 @@ function M.buildIssue(data, hw)
   end
   local rt = data.route
   if type(rt) == 'table' and str(rt.name) then
-    local kmh = num(rt.speedMps) and (rt.speedMps * 3.6) or 0
-    local dkm = num(rt.distanceDrivenM) and (rt.distanceDrivenM / 1000.0) or 0
-    p(string.format('**Benchmark Route:** %s (target %.0f km/h, driven %.2f km)', str(rt.name), kmh, dkm))
+    local kmh = num(rt.speedKmh) or (num(rt.speedMps) and (rt.speedMps * 3.6)) or 0
+    local mph = num(rt.speedMph) or (kmh * 0.621371)
+    local dkm = num(rt.distanceDrivenM) and (rt.distanceDrivenM / 1000.0) or (num(rt.targetKm) or 0)
+    local loadStr = str(rt.loadMode) == 'cold' and 'immediate start' or 'waited for full load'
+    p(string.format('**Benchmark Route:** %s — %s (%.0f km/h / %.0f mph, driven %.2f km, %s)',
+      str(rt.name), str(rt.speedLabel) or str(rt.speedId) or 'custom', kmh, mph, dkm, loadStr))
   elseif str(data.benchMode) == 'free' then
     p('**Benchmark Mode:** Free Drive (30 s)')
   end

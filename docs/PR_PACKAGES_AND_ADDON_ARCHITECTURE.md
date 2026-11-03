@@ -61,9 +61,8 @@ Previously, toggling a world-generation setting in-game had **no visible effect*
    - Whenever an addon or effort setting changes, `earthd.py` atomically writes `cache_dir/runtime_addon_effort.json`.
    - Before each tile job (`veg_geo`, `roads_geo`, `far_geo`, `build`), `blockworker.py` checks `st_mtime_ns` of `runtime_addon_effort.json` (~10 µs stat call) and, when changed, imports the updated `AddonRegistry` and `EffortController` state and flushes its in-memory cell caches.
 3. **Instant Client + Server Tracker Reset (`Connection.reset_world_trackers()` & `Refresh World`)**:
-   - When `cache_invalidated` is true (or when the user clicks **`Refresh World Around You`**), `core.lua` clears active vegetation and building sessions (`trees.clear()`, `roads.newSession()`, `roads.incrementBldGen()`) while `earthd.py` resets `self.veg`, `self.roads`, `self.signs`, and `self.bldfar`/`bldsky`/`brfar`.
+   - When `cache_invalidated` is true (or when the user clicks **`Refresh World`**), `core.lua` clears active vegetation and building sessions (`trees.clear()`, `roads.newSession()`, `roads.incrementBldGen()`) while `earthd.py` resets `self.veg`, `self.roads`, `self.signs`, and `self.bldfar`/`bldsky`/`brfar`.
    - On the very next `pose` tick (~100 ms later), the server immediately re-streams all surrounding tiles using the newly selected addons and effort profile—allowing players and modders to compare Ground Truth packs and Effort levels live in 1–4 seconds without moving or restarting!
-
 
 ---
 
@@ -91,19 +90,25 @@ To ensure experimental branch benchmarks (`Madderose/BeamNG.Earth`) do not spam 
 
 ---
 
-## 5. Dual-Mode In-Game Benchmark & Multi-Route Auto-Drive Registry (`BENCH_ROUTES`)
+## 5. Dual-Mode In-Game Benchmark, Multi-Route Registry (`BENCH_ROUTES`) & Speed Tiers (`BENCH_SPEEDS`)
 
-To support both quick spot-checks and reproducible A/B comparisons across hardware and addon configurations, the **`Generation Addons`** floating window (`earthAddonsWindow.js`) and [`report.lua`](../mod/beamng_earth/lua/ge/extensions/beamngEarth/report.lua) provide **two benchmark modes**:
+To support both quick spot-checks and reproducible A/B comparisons across hardware and addon configurations, the **`Generation Addons`** floating window ([`earthAddonsWindow.js`](../mod/beamng_earth/ui/ui-vue/mods/beamngEarth/earthAddonsWindow.js)) and [`report.lua`](../mod/beamng_earth/lua/ge/extensions/beamngEarth/report.lua) provide **two benchmark modes**:
 
 1. **Mode 1 — `Free Drive (30s)` (`mode = "free"`)**:
    - Immediately records 30 seconds of frame times (`fps`, `avgMs`, `p50`, `p95`, `p99` / `1% low`, `maxMs`), hitches (`> 50 ms` with coordinates), 1 Hz per-second world telemetry, and hardware/addon settings from wherever the player is currently driving.
-2. **Mode 2 — `Route A -> B (Auto-Drive)` (`mode = "route"`)**:
-   - Selects a reproducible point-to-point route from `M.BENCH_ROUTES` in [`report.lua`](../mod/beamng_earth/lua/ge/extensions/beamngEarth/report.lua):
-     - **`ventoux_d974`**: *Mont Ventoux D974 Climb (Malaucène → Hillside)* (`44.171279, 5.139169` → `44.167000, 5.175000`, `45 s`, target `72 km/h`)
-     - **`tavel_vineyards`**: *Tavel Vineyards → Village (Route de la Commanderie)* (`43.994226, 4.740771` → `44.011161, 4.701794`, `45 s`, target `65 km/h`)
-     - **`lirac_tavel`**: *Lirac Narrow Streets → Tavel Vineyards* (`44.036874, 4.690922` → `44.011161, 4.701794`, `45 s`, target `65 km/h`)
-     - **`sault_lavender`**: *Sault Plateau Lavender Fields (D942)* (`44.081847, 5.365593` → `44.091500, 5.355000`, `45 s`, target `80 km/h`)
-   - **Two-Stage Execution**:
-     1. **Staging (`stage = "staging"`, `8 s`)**: Teleports the vehicle to `(startLat, startLon)` and plans the OSRM road route to `(endLat, endLon)` via `gps.setDestination`. Frame times during teleport/staging are excluded so initial spawn loading does not skew driving metrics.
-     2. **Auto-Drive Recording (`stage = "recording"`, `45 s`)**: Sets `gps.speedOverride = route.speedMps`, activates `gps.setAutodrive(true)` along the local road graph, captures `screenshot.jpg`, and records frame times and hitches until the timer completes or the vehicle arrives at Point B.
-   - **Adding New Routes**: Call `beamngEarth_report.registerBenchRoute({ id = '...', name = '...', shortName = '...', startLat = ..., startLon = ..., endLat = ..., endLon = ..., speedMps = 20.0, duration = 45, stageS = 8 })` or append to `M.BENCH_ROUTES` in `report.lua`. The CEF dropdown automatically populates all registered routes via `beamngEarth_report.status().routes`.
+2. **Mode 2 — `Route A -> B (Auto)` (`mode = "route"`)**:
+   - **CEF-Native Route Selector**: Because BeamNG's offscreen CEF renderer suppresses native OS `<select>` popup menus, routes are selected via a `<` / `>` stepper bar and direct one-click route pill buttons:
+     - **`ventoux_d974`**: *Mont Ventoux D974 Climb (Malaucène → Summit)* (`44.171279, 5.139169` → `44.173433, 5.277728`, ~18 km route)
+     - **`tavel_vineyards`**: *Tavel Vineyards → Lirac Village (D4 / Route de la Commanderie)* (`43.994226, 4.740771` → `44.036874, 4.690922`, ~6.5 km route)
+     - **`lirac_tavel`**: *Lirac Narrow Streets → Tavel Vineyards* (`44.036874, 4.690922` → `43.994226, 4.740771`, ~6.5 km route)
+     - **`sault_lavender`**: *Sault Plateau Lavender Fields → Aurel (D942)* (`44.081847, 5.365593` → `44.129500, 5.428000`, ~7.5 km route)
+   - **3 Speed Tiers with Route Distance Adapted to Speed (`M.BENCH_SPEEDS`)**:
+     - **`Slow: 80 km/h (50 mph)`** (`22.22 m/s`) → **`1.00 km`** drive (~45 s)
+     - **`Fast: 200 km/h (124 mph)`** (`55.56 m/s`) → **`2.50 km`** drive (~45 s)
+     - **`Ultra: 300 km/h (186 mph)`** (`83.33 m/s`) → **`3.75 km`** drive (~45 s)
+   - **OSRM Road-Spline Kinematic Driver**:
+     - Uses the same per-frame ENU road-spline placement (`geodeticToEnu` + `castRayStatic` + `setClusterPosRelRot` + `applyClusterVelocityScaleAdd`) as `tools/drive_driver.lua`, keeping the vehicle smoothly on the OSRM road centerline even at `200 km/h` and `300 km/h` across curves and world rebases.
+   - **Full World Load vs. Immediate Start Readiness (`loadMode`)**:
+     - **`Wait Full Load (100%)` (Default, `loadMode = "full"`)**: Instead of a fixed countdown, waits until the terrain block under the vehicle is committed, the OSRM road route is ready, **and** all initial tiles/buildings/vegetation finish loading (`far.done == true`, `far.queued == 0`, `serverBacklog == 0` for 2.0 consecutive seconds) before starting the drive and recording frames.
+     - **`Immediate (Stream on Move)` (`loadMode = "cold"`)**: Waits only until the start terrain block under the car and OSRM road route are ready, then begins driving immediately to measure cold world streaming while moving.
+   - **Adding New Routes**: Call `beamngEarth_report.registerBenchRoute({ id = '...', name = '...', shortName = '...', startLat = ..., startLon = ..., endLat = ..., endLon = ... })` or append to `M.BENCH_ROUTES` in `report.lua`.

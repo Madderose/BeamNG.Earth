@@ -17,30 +17,73 @@ local M = {}
 M.dependencies = { 'ui_imgui' }
 
 M.BENCH_S = 30
+M.STAGE_MAX_S = 90
+M.RAY_UP = 1000
+M.RAY_LEN = 3000
+M.MAX_VZ = 30
+M.ZERO_INPUTS = "input.event('throttle', 0, 2); input.event('brake', 0, 2); input.event('steering', 0, 2); "
+  .. "input.event('clutch', 0, 2); input.event('parkingbrake', 0, 2)"
+
+-- Speed presets for Route A -> B Auto-Benchmark (distance adapted to speed so every run covers ~45 s of driving):
+--   - slow:  80 km/h (50 mph)   -> 1.00 km
+--   - fast:  200 km/h (124 mph) -> 2.50 km
+--   - ultra: 300 km/h (186 mph) -> 3.75 km
+M.BENCH_SPEEDS = {
+  {
+    id = 'slow',
+    label = 'Slow: 80 km/h (50 mph)',
+    shortLabel = '80 km/h (50 mph)',
+    kmh = 80,
+    mph = 50,
+    mps = 22.222,
+    targetKm = 1.0,
+    duration = 45,
+  },
+  {
+    id = 'fast',
+    label = 'Fast: 200 km/h (124 mph)',
+    shortLabel = '200 km/h (124 mph)',
+    kmh = 200,
+    mph = 124,
+    mps = 55.556,
+    targetKm = 2.5,
+    duration = 45,
+  },
+  {
+    id = 'ultra',
+    label = 'Ultra: 300 km/h (186 mph)',
+    shortLabel = '300 km/h (186 mph)',
+    kmh = 300,
+    mph = 186,
+    mps = 83.333,
+    targetKm = 3.75,
+    duration = 45,
+  },
+}
+
 -- Extensible list of point-to-point Auto-Benchmark routes (Mode 2: Route Auto-Drive).
+-- Each route spans >= 6 km along OSRM roads so Slow (1.0 km), Fast (2.5 km), and Ultra (3.75 km) runs all fit.
 -- Maintainers and regional addons can register additional routes via M.registerBenchRoute(route).
 M.BENCH_ROUTES = {
   {
     id = 'ventoux_d974',
-    name = 'Mont Ventoux D974 Climb (Malaucene -> Hillside)',
+    name = 'Mont Ventoux D974 Climb (Malaucene -> Summit)',
     shortName = 'Mont Ventoux D974 (Climb)',
     region = 'Provence',
     startLat = 44.171279, startLon = 5.139169,
-    endLat = 44.167000, endLon = 5.175000,
-    speedMps = 20.0, -- 72 km/h
+    endLat = 44.173433, endLon = 5.277728,
+    speedMps = 22.222,
     duration = 45,
-    stageS = 8,
   },
   {
     id = 'tavel_vineyards',
-    name = 'Tavel Vineyards -> Village (Route de la Commanderie)',
-    shortName = 'Tavel Vineyards -> Village',
+    name = 'Tavel Vineyards -> Lirac Village (D4 / Route de la Commanderie)',
+    shortName = 'Tavel Vineyards -> Lirac',
     region = 'Provence',
     startLat = 43.994226, startLon = 4.740771,
-    endLat = 44.011161, endLon = 4.701794,
-    speedMps = 18.0, -- 65 km/h
+    endLat = 44.036874, endLon = 4.690922,
+    speedMps = 22.222,
     duration = 45,
-    stageS = 8,
   },
   {
     id = 'lirac_tavel',
@@ -48,21 +91,19 @@ M.BENCH_ROUTES = {
     shortName = 'Lirac Streets -> Vineyards',
     region = 'Provence',
     startLat = 44.036874, startLon = 4.690922,
-    endLat = 44.011161, endLon = 4.701794,
-    speedMps = 18.0, -- 65 km/h
+    endLat = 43.994226, endLon = 4.740771,
+    speedMps = 22.222,
     duration = 45,
-    stageS = 8,
   },
   {
     id = 'sault_lavender',
-    name = 'Sault Plateau Lavender Fields (D942)',
+    name = 'Sault Plateau Lavender Fields -> Aurel (D942)',
     shortName = 'Sault Lavender Fields (D942)',
     region = 'Provence',
     startLat = 44.081847, startLon = 5.365593,
-    endLat = 44.091500, endLon = 5.355000,
-    speedMps = 22.0, -- 80 km/h
+    endLat = 44.129500, endLon = 5.428000,
+    speedMps = 22.222,
     duration = 45,
-    stageS = 8,
   },
 }
 
@@ -84,7 +125,7 @@ local gps = require('beamngEarth/gps')
 local im = nil
 local ffi = require('ffi')
 local form = nil        -- the open report window: { dir, data, kind, titleBuf, noteBuf, frames }
-local prof = nil        -- the running profiler: { t0, dur, stage, stageDur, route, fromCef, dts, track, hitches, dir, start, form }
+local prof = nil        -- the running profiler: { t0, dur, stage, route, speedPreset, loadMode, fromCef, dts, track, hitches, dir, start, form }
 local saved = nil       -- the ImGui "report saved" window: { folder, dir, url, untilT }
 local lastSaved = nil   -- persistent last saved report for CEF UI (never cleared by ImGui timer)
 local ring, ringN = {}, 0
@@ -105,6 +146,10 @@ function M.getBenchRoutes()
   return M.BENCH_ROUTES
 end
 
+function M.getBenchSpeeds()
+  return M.BENCH_SPEEDS
+end
+
 function M.registerBenchRoute(r)
   if type(r) ~= 'table' or type(r.id) ~= 'string' then return false end
   for i, existing in ipairs(M.BENCH_ROUTES) do
@@ -122,6 +167,75 @@ local function findRoute(routeId)
     if r.id == routeId then return r end
   end
   return M.BENCH_ROUTES[1]
+end
+
+local function findSpeed(speedId)
+  for _, s in ipairs(M.BENCH_SPEEDS) do
+    if s.id == speedId then return s end
+  end
+  return M.BENCH_SPEEDS[1]
+end
+
+-- Kinematic OSRM road-spline helpers (same math as tools/drive_driver.lua)
+local function headingOf(dx, dy)
+  return math.deg(math.atan2(dx, dy)) % 360
+end
+
+local function angleDiff(a, b)
+  local d = (a - b) % 360
+  if d > 180 then d = d - 360 end
+  return d
+end
+
+local function yawQuat(dh)
+  local h = math.rad(dh) / 2
+  return 0, 0, math.sin(h), math.cos(h)
+end
+
+local function groundAt(x, y, zTop)
+  if type(castRayStatic) ~= 'function' or type(vec3) ~= 'function' then return nil end
+  local d = castRayStatic(vec3(x, y, zTop), vec3(0, 0, -1), M.RAY_LEN)
+  if d and d < M.RAY_LEN then return zTop - d end
+  return nil
+end
+
+local function makePath(pts)
+  if type(pts) ~= 'table' or #pts < 2 then return nil end
+  local la0 = tonumber(pts[1][1])
+  if not la0 then return nil end
+  local kx = 111320 * math.cos(math.rad(la0))
+  local path = { la = {}, lo = {}, cum = { 0 }, total = 0, k = 1 }
+  for i, q in ipairs(pts) do
+    path.la[i], path.lo[i] = tonumber(q[1]), tonumber(q[2])
+    if i > 1 then
+      local dx = (path.lo[i] - path.lo[i - 1]) * kx
+      local dy = (path.la[i] - path.la[i - 1]) * 110540
+      path.cum[i] = path.cum[i - 1] + math.sqrt(dx * dx + dy * dy)
+    end
+  end
+  path.total = path.cum[#path.cum] or 0
+  return path
+end
+
+local function pathAt(path, s)
+  local n = #path.cum
+  local k = path.k or 1
+  if s <= 0 then k = 1 end
+  while k < n - 1 and path.cum[k + 1] < s do k = k + 1 end
+  while k > 1 and path.cum[k] > s do k = k - 1 end
+  path.k = k
+  local seg = path.cum[k + 1] - path.cum[k]
+  local f = seg > 0 and math.max(0, math.min(1, (s - path.cum[k]) / seg)) or 0
+  return path.la[k] + f * (path.la[k + 1] - path.la[k]), path.lo[k] + f * (path.lo[k + 1] - path.lo[k])
+end
+
+local function pathXY(path, s)
+  local core = rawget(_G, 'beamngEarth_core')
+  local st = core and core._state and core._state()
+  if not (st and st.anchor) then return nil end
+  local la, lo = pathAt(path, s)
+  local x, y = st.anchor:geodeticToEnu(la, lo, 0)
+  return x, y
 end
 
 local function stats(dts)
@@ -434,7 +548,10 @@ local function stopRouteAutodrive()
     if gps.autodrive and gps.autodrive() then gps.setAutodrive(false) end
     gps.clear()
     local veh = getPlayerVehicle and getPlayerVehicle(0)
-    if veh then veh:queueLuaCommand('ai.setMode("disabled")') end
+    if veh then
+      veh:applyClusterVelocityScaleAdd(-1, 0, 0, 0, 0)
+      veh:queueLuaCommand(M.ZERO_INPUTS .. '; ai.setMode("disabled")')
+    end
   end)
 end
 
@@ -447,7 +564,7 @@ local function computeTrackDistance(track)
       if prev then
         local dx, dy = p[1] - prev[1], p[2] - prev[2]
         local step = math.sqrt(dx * dx + dy * dy)
-        if step < 250 then dist = dist + step end
+        if step < 350 then dist = dist + step end
       end
       prev = p
     end
@@ -461,6 +578,7 @@ local function finishProf(b, elapsedS)
   data.kind = 'perf'
   data.benchMode = b.mode or (b.route and 'route' or 'free')
   if b.route then
+    local sp = b.speedPreset or findSpeed('slow')
     data.route = {
       id = b.route.id,
       name = b.route.name,
@@ -469,8 +587,14 @@ local function finishProf(b, elapsedS)
       startLon = b.route.startLon,
       endLat = b.route.endLat,
       endLon = b.route.endLon,
-      speedMps = b.route.speedMps,
-      distanceDrivenM = computeTrackDistance(b.track),
+      speedId = sp.id,
+      speedLabel = sp.shortLabel or sp.label,
+      speedKmh = sp.kmh,
+      speedMph = sp.mph,
+      speedMps = b.speedMps or sp.mps,
+      targetKm = sp.targetKm,
+      loadMode = b.loadMode or 'full',
+      distanceDrivenM = (b.s and b.s > 0) and b.s or computeTrackDistance(b.track),
     }
   end
   data.bench = stats(b.dts)
@@ -492,33 +616,172 @@ local function finishProf(b, elapsedS)
   end
 end
 
-local function profFrame(dtMs)
+-- Check world load state during `stage == 'staging'` before starting the route drive.
+local function checkStagingReady(b, elapsed)
+  local core = rawget(_G, 'beamngEarth_core')
+  local st = nil
+  if core and core.status then
+    local ok, s = pcall(function() return loadstring('return ' .. core.status())() end)
+    if ok and type(s) == 'table' then st = s end
+  end
+  local r = gps.route and gps.route()
+  local routeReady = type(r) == 'table' and type(r.points) == 'table' and #r.points >= 2
+  local veh = getPlayerVehicle and getPlayerVehicle(0)
+  local p = veh and veh:getPosition()
+  local g = p and groundAt(p.x, p.y, p.z + M.RAY_UP)
+  local teleporting = st and st.teleporting == true
+  local commits = st and tonumber(st.commits) or 0
+  local baseReady = (elapsed >= 2.0) and (not teleporting) and (commits >= 1) and routeReady and (g ~= nil)
+
+  local queued = st and st.far and tonumber(st.far.queued) or 0
+  local backlog = st and tonumber(st.serverBacklog) or 0
+  local farDone = st and ((st.far and st.far.done == true) or (tostring(st.status or ''):find('Far field ready', 1, true) ~= nil))
+  local fullReady = baseReady and farDone and (queued == 0) and (backlog == 0)
+
+  if not baseReady then
+    b.readySince = nil
+    if teleporting or commits < 1 or not g then
+      b.stageText = string.format('Waiting for terrain spawn (%ds)...', math.floor(elapsed))
+    elseif not routeReady then
+      b.stageText = string.format('Waiting for OSRM road route (%ds)...', math.floor(elapsed))
+    else
+      b.stageText = string.format('Preparing start (%ds)...', math.floor(elapsed))
+    end
+    return false
+  end
+
+  if b.loadMode == 'cold' then
+    -- Immediate / Cold streaming mode: start as soon as start terrain + OSRM route are ready (1s settle)
+    b.readySince = b.readySince or now()
+    local settle = now() - b.readySince
+    b.stageText = string.format('Ready (cold start in %.1fs)...', math.max(0, 1.0 - settle))
+    return settle >= 1.0
+  end
+
+  -- Default ('full'): wait until all initial tiles, far-field meshes, and server backlog finish loading
+  if fullReady then
+    b.readySince = b.readySince or now()
+    local settle = now() - b.readySince
+    b.stageText = string.format('World loaded — settling (%.1fs)...', math.max(0, 2.0 - settle))
+    if settle >= 2.0 then return true end
+  else
+    b.readySince = nil
+    b.stageText = string.format('Waiting full load (tiles:%d srv:%d, %ds)...', queued, backlog, math.floor(elapsed))
+    if elapsed >= M.STAGE_MAX_S then
+      return true
+    end
+  end
+  return false
+end
+
+local function beginRouteRecording(b)
+  b.stage = 'recording'
+  b.t0 = now()
+  b.lastSample = -1
+  b.s = 0
+  b.frame = 0
+  local r = gps.route and gps.route()
+  if r and type(r.points) == 'table' and #r.points >= 2 then
+    b.path = makePath(r.points)
+  end
+  local veh = getPlayerVehicle and getPlayerVehicle(0)
+  if veh then
+    local p = veh:getPosition()
+    local d = veh:getDirectionVector()
+    local g = groundAt(p.x, p.y, p.z + M.RAY_UP) or p.z
+    b.ground = g
+    b.clearance = math.max(0.05, math.min(3.5, p.z - g))
+    b.z = g + b.clearance
+    b.cmd = (d and (d.x ~= 0 or d.y ~= 0)) and headingOf(d.x, d.y) or 0
+    veh:queueLuaCommand(M.ZERO_INPUTS .. '; ai.setMode("disabled")')
+  end
+  b.start = capture()
+  b.start.screenshot = screenshot(b.dir)
+  b.start.kind = 'perf'
+  b.start.title = b.title
+  b.start.note = b.note
+end
+
+local function stepRouteKinematic(b, dtReal)
+  local veh = getPlayerVehicle and getPlayerVehicle(0)
+  if not veh or not b.path then return false end
+  local dtSim = math.max(0.001, math.min(tonumber(dtReal) or 0.016, 0.1))
+  b.frame = (b.frame or 0) + 1
+  local speed = b.speedMps or 22.222
+  local ds = speed * dtSim
+  local x1, y1 = pathXY(b.path, b.s + ds)
+  local x2, y2 = pathXY(b.path, b.s + ds + 4)
+  if not x1 or not y1 then return false end
+
+  local hx, hy = 0, 1
+  local h = b.cmd or 0
+  if x2 and y2 then
+    local dx, dy = x2 - x1, y2 - y1
+    local len = math.sqrt(dx * dx + dy * dy)
+    if len > 1e-6 then
+      hx, hy = dx / len, dy / len
+      h = headingOf(hx, hy)
+    end
+  end
+
+  local p = veh:getPosition()
+  local zTop = (p and p.z or b.ground or 0) + M.RAY_UP
+  local g = groundAt(x1, y1, zTop)
+  if g then b.ground = g end
+  local z = (b.ground or (p and p.z) or 0) + (b.clearance or 0.6)
+  local vz = math.max(-M.MAX_VZ, math.min(M.MAX_VZ, (z - (b.z or z)) / dtSim))
+  b.z = z
+
+  if b.frame % 20 == 0 then
+    local d = veh:getDirectionVector()
+    if d and (d.x ~= 0 or d.y ~= 0) then
+      local mh = headingOf(d.x, d.y)
+      if math.abs(angleDiff(mh, b.cmd or mh)) > 5 then
+        b.cmd = mh
+      end
+    end
+  end
+
+  local qx, qy, qz, qw = yawQuat(angleDiff(h, b.cmd or h))
+  b.cmd = h
+  veh:setClusterPosRelRot(-1, x1, y1, z, qx, qy, qz, qw)
+  veh:applyClusterVelocityScaleAdd(-1, 0, hx * speed, hy * speed, vz)
+  if b.frame % 15 == 1 then
+    veh:queueLuaCommand(string.format(
+      "for _, wd in pairs(wheels.wheels or {}) do wd.tireSoundVolumeCoef = 0 if wd.radius and wd.radius > 0 then wd.angularVelocity = %f / wd.radius * (wd.wheelDir or 1) end end",
+      speed))
+  end
+
+  b.s = b.s + ds
+  local targetKm = (b.targetMeters or 1000) / 1000
+  local kmh = b.speedPreset and b.speedPreset.kmh or math.floor(speed * 3.6 + 0.5)
+  b.stageText = string.format('Driving %.2f / %.2f km (%d km/h)', b.s / 1000, targetKm, kmh)
+
+  if b.s >= (b.targetMeters or 1000) or (b.path.total > 20 and b.s >= b.path.total - 5) then
+    return true -- finished target distance
+  end
+  return false
+end
+
+local function profFrame(dtMs, dtReal)
   local b = prof
   local t = now() - b.t0
   if b.stage == 'staging' then
-    local stageDur = b.stageDur or 8
-    if t >= stageDur then
-      -- Transition from route staging to active recording + autodrive
-      b.stage = 'recording'
-      b.t0 = now()
-      b.lastSample = -1
-      b.start = capture()
-      b.start.screenshot = screenshot(b.dir)
-      b.start.kind = 'perf'
-      b.start.title = b.title
-      b.start.note = b.note
-      if b.route then
-        pcall(function()
-          gps.speedOverride = b.route.speedMps or 20.0
-          gps.setDestination(b.route.endLat, b.route.endLon, b.route.shortName or b.route.name)
-          gps.setAutodrive(true)
-        end)
-      end
+    if checkStagingReady(b, t) then
+      beginRouteRecording(b)
     end
     return
   end
 
   b.dts[#b.dts + 1] = dtMs
+  if b.route and b.path then
+    local doneDist = stepRouteKinematic(b, dtReal)
+    if doneDist then
+      finishProf(b, t)
+      return
+    end
+  end
+
   local core = rawget(_G, 'beamngEarth_core')
   if dtMs > 50 then
     local veh = getPlayerVehicle and getPlayerVehicle(0)
@@ -544,14 +807,6 @@ local function profFrame(dtMs)
     if Engine.Debug and Engine.Debug.getLastPerformanceMetrics then pcall(Engine.Debug.getLastPerformanceMetrics, m) end
     s.metrics = m
     b.track[#b.track + 1] = s
-    -- Check if route autodrive reached the destination early
-    if b.route and t > 5 then
-      local gst = gps.status and gps.status()
-      if not gst or (gst.remaining and gst.remaining < 35) then
-        finishProf(b, t)
-        return
-      end
-    end
   end
   if t >= b.dur then
     finishProf(b, t)
@@ -579,15 +834,18 @@ end
 function M.status()
   local ls = ensureLastSaved()
   local stStage = prof and (prof.stage or 'recording') or nil
-  local stDur = prof and (stStage == 'staging' and (prof.stageDur or 8) or prof.dur) or M.BENCH_S
+  local stDur = prof and prof.dur or M.BENCH_S
   return {
     formOpen = form ~= nil,
     noteOpen = form ~= nil,
     profilerRunning = prof ~= nil,
     benchRunning = prof ~= nil,
     stage = stStage,
+    stageText = prof and prof.stageText or nil,
     mode = prof and prof.mode or (ls and ls.mode) or 'free',
     routeName = prof and prof.route and (prof.route.shortName or prof.route.name) or (ls and ls.routeName) or nil,
+    distanceM = prof and prof.s or 0,
+    targetMeters = prof and prof.targetMeters or 0,
     saved = count,
     lastFolder = ls and ls.folder or nil,
     elapsed = prof and math.max(0, math.floor(now() - prof.t0)) or 0,
@@ -596,13 +854,16 @@ function M.status()
     lastUrl = ls and ls.url or nil,
     issueRepo = M.getIssueRepo(),
     routes = M.BENCH_ROUTES,
+    speeds = M.BENCH_SPEEDS,
   }
 end
 
 -- Start a benchmark from the CEF Generation Addons UI:
 --   mode: 'free' (30s free drive) or 'route' (point-to-point route autodrive)
 --   arg: duration seconds (for 'free') or routeId string (for 'route')
-function M.uiStartBench(mode, arg)
+--   speedId: 'slow' (80 km/h, 1.0 km) | 'fast' (200 km/h, 2.5 km) | 'ultra' (300 km/h, 3.75 km)
+--   loadMode: 'full' (wait for full world load before driving, default) | 'cold' (start as soon as terrain + road ready)
+function M.uiStartBench(mode, arg, speedId, loadMode)
   onLevel()
   if not ourLevel then return { ok = false, error = 'Not in BeamNG.Earth level' } end
   if prof then return { ok = true, alreadyRunning = true } end
@@ -621,24 +882,34 @@ function M.uiStartBench(mode, arg)
 
   if mode == 'route' then
     local route = findRoute(tostring(arg or 'ventoux_d974'))
+    local sp = findSpeed(tostring(speedId or 'slow'))
+    local lMode = (loadMode == 'cold') and 'cold' or 'full'
     local core = rawget(_G, 'beamngEarth_core')
     if core and core.teleport then
       pcall(core.teleport, route.startLat, route.startLon, route.shortName or route.name, { record = false })
     end
     pcall(function()
-      gps.speedOverride = route.speedMps or 20.0
+      gps.clear()
       gps.setDestination(route.endLat, route.endLon, route.shortName or route.name)
     end)
-    local title = string.format('Route Benchmark: %s (%s, effort=%s)', route.shortName or route.id, addonTag, effortTag)
-    local note = string.format('Automated point-to-point route benchmark on %s (%.5f, %.5f -> %.5f, %.5f, target %.0f km/h, %s, effortProfile=%s).',
-      route.name, route.startLat, route.startLon, route.endLat, route.endLon, (route.speedMps or 20) * 3.6, addonTag, effortTag)
+    local loadLabel = (lMode == 'cold') and 'immediate-cold' or 'full-load'
+    local title = string.format('Route Benchmark: %s @ %d km/h (%s, %s, effort=%s)',
+      route.shortName or route.id, sp.kmh, loadLabel, addonTag, effortTag)
+    local note = string.format(
+      'Automated point-to-point route benchmark on %s (%.5f, %.5f -> %.5f, %.5f, speed %d km/h / %d mph, target %.2f km, start=%s, %s, effortProfile=%s).',
+      route.name, route.startLat, route.startLon, route.endLat, route.endLon,
+      sp.kmh, sp.mph, sp.targetKm, loadLabel, addonTag, effortTag)
     prof = {
       t0 = now(),
-      dur = tonumber(route.duration) or 45,
+      dur = tonumber(sp.duration) or 45,
       stage = 'staging',
-      stageDur = tonumber(route.stageS) or 8,
+      stageText = 'Teleporting & requesting OSRM route...',
       mode = 'route',
       route = route,
+      speedPreset = sp,
+      speedMps = sp.mps,
+      targetMeters = (sp.targetKm or 1.0) * 1000,
+      loadMode = lMode,
       fromCef = true,
       title = title,
       note = note,
@@ -648,7 +919,15 @@ function M.uiStartBench(mode, arg)
       dir = rel,
       lastSample = -1,
     }
-    return { ok = true, mode = 'route', route = route.shortName or route.name, duration = prof.dur, stageDur = prof.stageDur }
+    return {
+      ok = true,
+      mode = 'route',
+      route = route.shortName or route.name,
+      speed = sp.shortLabel,
+      targetKm = sp.targetKm,
+      loadMode = lMode,
+      duration = prof.dur,
+    }
   end
 
   local dur = tonumber(arg) or M.BENCH_S
@@ -722,7 +1001,7 @@ function M.onPreRender(dtReal)
   local ms = dtReal * 1000
   ringN = ringN + 1
   ring[(ringN - 1) % M.RING + 1] = ms
-  if prof then profFrame(ms) end
+  if prof then profFrame(ms, dtReal) end
 end
 
 local function wrapped(s)
