@@ -1156,6 +1156,9 @@ function M.uiOpenAddonsWindow()
   M.navigate('play')
   local gh = rawget(_G, 'guihooks')
   if gh and gh.trigger then gh.trigger('BeamNGEarthAddonsWindow', { open = true }) end
+  if be and be.queueJS then
+    pcall(be.queueJS, be, 'if(window.bngEarthAddonsWindow && window.bngEarthAddonsWindow.open) window.bngEarthAddonsWindow.open();')
+  end
   return { ok = true }
 end
 

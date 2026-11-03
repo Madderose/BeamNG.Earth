@@ -33,7 +33,7 @@ const SPEED_TIERS = [
 function getState() {
   if (!window.__bngEarthAddonsState) {
     window.__bngEarthAddonsState = {
-      visible: true,
+      visible: false,
       minimized: false,
       addonProvence: true,
       sourceIgnRpg: true,
