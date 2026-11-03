@@ -1,5 +1,6 @@
 """osmtags.py: OpenStreetMap's road tags (lanes, width, speed limit...) joined to Overture's road segments by way id,
 and the roads using them (roads.road_specs / carriageway, navgraph lanes)."""
+import os
 import sys
 import unittest
 from pathlib import Path
@@ -20,6 +21,29 @@ def tagged(lines, classes, records, tags):
 
 
 class JoinTest(unittest.TestCase):
+    def test_decoded_row_group_rows(self):
+        # a row group's table (OsmTags._decode's layout): texts as UTF-8 blobs, numbers NaN where missing
+        names = list(osmtags.COLUMNS)
+        t = {"id": np.array([7, 9], np.int64), "race": np.array([False, True]), "frn": np.array([100, 101], np.int64)}
+        for c in names:
+            if c in osmtags.TEXT_COLUMNS:
+                vals = ["Straße", None] if c == "name" else [None, None]
+                enc = [b"" if v is None else v.encode("utf-8") for v in vals]
+                t[c + "_ok"] = np.array([v is not None for v in vals])
+                t[c + "_off"] = np.concatenate([[0], np.cumsum([len(b) for b in enc])])
+                t[c] = np.frombuffer(b"".join(enc), np.uint8)
+            else:
+                t[c] = np.array([2.0 if c == "lanes" else np.nan, np.nan])
+        rows = osmtags._rows(t, [0, 1])
+        self.assertEqual(rows[0][:3], (7, False, 100))
+        got = dict(zip(names, rows[0][3:]))
+        self.assertEqual(got["name"], "Straße")
+        self.assertEqual(got["lanes"], 2)
+        self.assertIsInstance(got["lanes"], int)
+        self.assertIsNone(got["width"])
+        self.assertEqual(rows[1][:3], (9, True, 101))
+        self.assertTrue(all(v is None for v in rows[1][3:]))
+
     def test_way_id(self):
         self.assertEqual(osmtags.way_id("w1360453999@2"), 1360453999)
         self.assertIsNone(osmtags.way_id("n12@1"))
@@ -238,6 +262,50 @@ class RacewayTest(unittest.TestCase):
         wkb = struct.pack("<BII", 1, 2, 2) + struct.pack("<4d", 1.0, 2.0, 3.0, 4.0)
         np.testing.assert_allclose(osmtags._linestring(wkb), [[1, 2], [3, 4]])
         self.assertIsNone(osmtags._linestring(struct.pack("<BI", 1, 3) + b"x" * 20), "a polygon is not a line")
+
+
+class TableSaveTest(unittest.TestCase):
+    """GitHub #663: a decoded row group table is used even when its file cannot be saved (Windows: the file there is
+    open in another process, PermissionError), and the temporary file goes."""
+
+    def make(self, tmp):
+        import threading
+        import types
+        ot = osmtags.OsmTags.__new__(osmtags.OsmTags)
+        ot._lock, ot._tables = threading.Lock(), {}
+        table = {"id": np.array([7], np.int64)}
+        ot._decode = lambda *a: table
+        remote = types.SimpleNamespace(cache_dir=tmp)
+        return ot, remote, table
+
+    def check(self, there):
+        import tempfile
+        from unittest import mock
+        import staging
+        with tempfile.TemporaryDirectory() as tmp:
+            ot, remote, table = self.make(tmp)
+            d = os.path.join(tmp, osmtags.TABLE_DIR)
+            if there:                           # (a copy another process wrote and holds open)
+                os.makedirs(d)
+                with open(os.path.join(d, "3.npz"), "wb") as f:
+                    f.write(b"held")
+
+            real = os.replace
+
+            def denied(a, b):                   # (Windows: the table's file is open in another process)
+                if os.path.dirname(b) == d:
+                    raise PermissionError(5, "Access is denied")
+                return real(a, b)
+            with mock.patch("os.replace", denied), mock.patch.object(staging, "REPLACE_WAITS", (0.0,)):
+                got = ot._table(None, "uri", {}, 3, remote, "demand")
+            self.assertIs(got, table)
+            self.assertFalse([n for n in os.listdir(d) if "tmp" in n])
+
+    def test_replace_denied_with_a_copy_there(self):
+        self.check(True)
+
+    def test_replace_denied_nothing_there(self):
+        self.check(False)
 
 
 if __name__ == "__main__":

@@ -208,11 +208,19 @@ def run_server(argv):
     earthd.main()
 
 
-def start_server(user_dir, extra, log_path):
+def start_server(user_dir, extra, log_path, game_running=None):
     cmd = [sys.executable] + ([] if FROZEN else [os.path.abspath(__file__)])
     cmd += ["--server", "--user-dir", user_dir] + RECOMMENDED + extra
     env = dict(os.environ)
     env["BNGEARTH_PARENT"] = str(os.getpid())      # the server ends when this launcher does (watch_parent)
+    if game_running is not None:    # (whether a game ran before this start: earthd.game_running, its earlier sessions)
+        env["BNGEARTH_GAME_AT_START"] = "1" if game_running else "0"
+    # (dev: BNGE_SERVER_ENV="LD_PRELOAD=/usr/lib/libjemalloc.so MALLOC_CONF=prof:true": variables for the server
+    # alone, not the game, e.g. a heap profiler)
+    for kv in os.environ.get("BNGE_SERVER_ENV", "").split():
+        k, sep, v = kv.partition("=")
+        if sep and k:
+            env[k] = v
     kw = {"cwd": ROOT, "env": env}
     if IS_WIN:
         kw["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
@@ -728,6 +736,8 @@ def start_game(use_gcpatch, build="native", gfx="", user_dir=None, steam_args=({
     Steam applies them itself): variables for the game's environment, a command that wraps it (gamemoderun,
     mangohud), the game's own options after %command%."""
     steam_env, wrapper, steam_opts = steam_args
+    # (dev: BNGE_GAME_WRAPPER="perf record ... --" profiles the game alone, Linux direct start)
+    wrapper = os.environ.get("BNGE_GAME_WRAPPER", "").split() + list(wrapper or [])
     win_args = ["-gfx", GFX_ARG.get(gfx, gfx)] if gfx else []
     extra = os.environ.get("BNGE_GAME_ARGS", "").split()     # (tests: e.g. "-bngetest car,damage")
     win_args += extra
@@ -1357,7 +1367,7 @@ def run(args):
                 "Close its window (or end 'BeamNG.Earth' in the task manager), then start again.")
         sys.exit(1)
     log_path = os.path.join(data_dir(), "logs", "server.log")
-    server = start_server(user_dir, extra, log_path)
+    server = start_server(user_dir, extra, log_path, game_running=bool(running))
     row("World server", "running")
     row("Server log", log_path)
     beammp = None

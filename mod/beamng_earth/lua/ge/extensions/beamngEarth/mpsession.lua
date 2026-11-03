@@ -77,6 +77,11 @@ local stats = { anchors = 0, go = 0, poses = 0, converged = 0, peers = 0 }
 -- local anchorSince = 0       -- seconds our anchor has been the same (converge's settle)
 -- local lastAnchorKey = nil
 local statusIn = 5
+-- BeamMP shared world generation v2 (server mpshare.py, .claude/work/mp_share_v2.md): our world server's share code
+-- and weight (its share_info answer) ride on our poses; the plugin groups the players near each other with the same
+-- code (bngeGroup) and relays their messages (bngeShare), which pass through here untouched. nil: not asked yet this
+-- session; false: asked.
+local shareInfo = nil
 local members = {}          -- tostring(pid) -> true: the other players within DAMAGE_NEAR_M at the last check
 local sentDamage = {}       -- own game vehicle id -> the damage its state was last sent at
 local damageSince = {}      -- own game vehicle id -> seconds its damage has differed from sentDamage
@@ -522,36 +527,39 @@ onGoToRef = onGoTo
 -- No car yet (BeamMP joins without one): the free camera, left at the level's spawn point under the generated
 -- ground, put once on the ground at the origin (where the vehicle selector spawns the car); and lifted back over the
 -- ground whenever it is under it (a teleport moves the world under a free camera: from a valley to a mountain it
--- ended 1400 m underground, a black screen). A teleport (the join's to the other players, or the map's) does not move
--- a free camera either way: onto lower ground it was left hundreds of metres up, and the car the vehicle selector
--- spawns there (at the camera) fell from it (the user, 2026-10-24: "sometimes i spawn high above the ground in
--- beammp"); so on each new anchor it is put on the ground again, 3 m over it.
-local goTo = nil            -- after a teleport with no car: { from = the anchor key then, x, y = its target there }
-local seenKey = nil         -- the anchor (M.key) of the latest placeCamera call
-local function placeCamera(player, anchorKey)
-  seenKey = anchorKey or seenKey
-  if (getPlayerVehicle and getPlayerVehicle(0)) or not be or not be.getSurfaceHeightBelow then goTo = nil return end
+-- ended 1400 m underground, a black screen). A teleport (the join's to the other players, or the map's) puts the
+-- camera at its target itself (core.lua moveCamera / placePlayer, in single player too: onto lower ground it was left
+-- hundreds of metres up, and the car the vehicle selector spawns there fell from it, the user 2026-10-24: "sometimes i
+-- spawn high above the ground in beammp").
+M.TUBE_RAY_M = 8
+local function placeCamera(player)
+  if (getPlayerVehicle and getPlayerVehicle(0)) or not be or not be.getSurfaceHeightBelow then return end
   local x, y = 0, -8
-  local moved = goTo ~= nil and anchorKey ~= nil and anchorKey ~= goTo.from      -- (the teleport's anchor is in)
-  if moved then
-    x, y = goTo.x, goTo.y
-  elseif camPlaced then
+  if camPlaced then
     if not player or not player.x then return end
     x, y = player.x, player.y
   end
   local z = be:getSurfaceHeightBelow(vec3(x, y, 9000))
   if type(z) ~= 'number' or z < -1e5 then return end      -- (the ground not there yet)
-  if camPlaced and not moved and player.z >= z - 0.5 then return end
+  if camPlaced and player.z >= z - 0.5 then return end
+  -- (under the terrain over collision a few metres down: in a tunnel's tube, where a teleport put it (core floorCheck)
+  -- or it was flown in; only a camera over nothing is lost underground)
+  -- (the ray from the camera: from higher, a camera just under the ground met that ground and counted as in a tube;
+  -- a hit only under the surface)
+  local ray = camPlaced and rawget(_G, 'castRayStatic')
+  local from = player.z + 0.1
+  local d = ray and ray(vec3(x, y, from), vec3(0, 0, -1), M.TUBE_RAY_M)
+  if d and d < M.TUBE_RAY_M and from - d < z - 0.5 then return end
   camPlaced = true
-  if moved then goTo = nil end
   local q = quatFromDir(vec3(0, 1, -0.15), vec3(0, 0, 1))
   if core_camera and core_camera.setPosRot then core_camera.setPosRot(0, x, y, z + 3, q.x, q.y, q.z, q.w) end
 end
 
--- A teleport asked (core.teleportTo): with no car the camera goes to its target (x, y in the new anchor's frame) once
--- that anchor is in. A rebase does not come here (a free camera flown far keeps its height).
-function M.onTeleport(x, y)
-  goTo = { from = seenKey or '', x = tonumber(x) or 0, y = tonumber(y) or 0 }
+-- A teleport asked (core.teleportTo): core puts the camera at its target (no car), so the join's first placement at
+-- the origin does not follow it (a teleport can be asked before the ground at the origin is in). A rebase does not
+-- come here.
+function M.onTeleport()
+  camPlaced = true
 end
 M.placeCamera = placeCamera     -- (tests)
 
@@ -561,7 +569,7 @@ M.SUPPORT = 'BeamNG.Earth on BeamMP: for help join the TGForever Discord, https:
   .. 'not like a normal BeamNG mod: if something is not working, it is almost certainly a BeamNG.Earth problem, not a '
   .. 'BeamMP one, so please do not contact the BeamMP team or open BeamMP support tickets about it.'
 function M.onPostJoin()
-  joined, wentTo, camPlaced, goTo = true, false, false, nil
+  joined, wentTo, camPlaced = true, false, false
   anchors = {}
   log('I', 'beamngEarth', M.SUPPORT)
 end
@@ -821,12 +829,44 @@ local function updateFloating(owners)
   end
 end
 
+function M.onShareInfo(msg)
+  shareInfo = { code = tostring(msg.code or ''), weight = tonumber(msg.weight) or 1 }
+  log('I', 'beamngEarth', 'BeamMP: sharing world building with the players near us (code ' .. shareInfo.code .. ')')
+end
+
+-- A share message of our world server for the group ("*") or one member, through the plugin.
+-- (never a message BeamMP's launcher aborts on: over 500 bytes with "Zp" in it, its Network/GlobalHandler.cpp; the
+-- app's base64 has none, this is the guard)
+function M.shareOut(msg)
+  if rawget(_G, 'TriggerServerEvent') and type(msg.d) == 'string' then
+    local data = tostring(msg.to or '*') .. '|' .. msg.d
+    if #data > 400 and data:find('Zp', 1, true) then
+      stats.shareRefused = (stats.shareRefused or 0) + 1
+      return
+    end
+    TriggerServerEvent('bngeShare', data)
+    stats.shareOut = (stats.shareOut or 0) + 1
+  end
+end
+
+local function onShare(data)
+  if type(data) ~= 'string' then return end
+  require('beamngEarth/net').send({ type = 'share_in', d = data })
+  stats.shareIn = (stats.shareIn or 0) + 1
+end
+
+local function onGroup(data)
+  if type(data) == 'string' then require('beamngEarth/net').send({ type = 'share_group', d = data }) end
+end
+
 -- Each frame (core.lua) in a BeamMP session in our level: anchor (core's st.anchor), player { x, y, z } in its frame
 -- (the car; the camera when there is none).
 function M.update(dt, anchor, player)
   if not handlers and rawget(_G, 'AddEventHandler') then
     AddEventHandler('bngeAnchors', onAnchors, 'beamngEarth')
     AddEventHandler('bngeGoTo', onGoTo, 'beamngEarth')
+    AddEventHandler('bngeShare', onShare, 'beamngEarth')
+    AddEventHandler('bngeGroup', onGroup, 'beamngEarth')
     -- AddEventHandler('bngePeers', onPeers, 'beamngEarth')     -- (shared world building, commented out)
     AddEventHandler('bngeConfig', onConfig, 'beamngEarth')
     handlers = true
@@ -926,8 +966,12 @@ function M.update(dt, anchor, player)
   --   share = false               -- our world server's group service, asked once a session (its answer: onShare), on
   --   require('beamngEarth/net').send({ type = 'share', port = M.sharePort(config) })     -- the server's port
   -- end
+  if shareInfo == nil then
+    shareInfo = false               -- (asked once a session: its answer is onShareInfo)
+    require('beamngEarth/net').send({ type = 'share_hello' })
+  end
   if not anchor then return end
-  placeCamera(player, M.key(anchor.lat, anchor.lon))
+  placeCamera(player)
   anchorRef = anchor
   testStep(dt)
   if not player then return end
@@ -942,8 +986,8 @@ function M.update(dt, anchor, player)
       if ok and tonumber(nx) and tonumber(ny) then h = (h - math.deg(math.atan2(nx, ny)) + 360) % 360 end
     end
     TriggerServerEvent('bngePose', jsonEncode({ v = M.PROTO, aLat = anchor.lat, aLon = anchor.lon, lat = lat,
-      lon = lon, joined = joined, h = h and math.floor(h * 10 + 0.5) / 10 or nil }))   -- (sp / sc / sw: shared world
-      -- building's port, code and weight, commented out)
+      lon = lon, joined = joined, h = h and math.floor(h * 10 + 0.5) / 10 or nil,
+      sc = shareInfo and shareInfo.code or nil, sw = shareInfo and shareInfo.weight or nil }))
     stats.poses = stats.poses + 1
     if joined then log('I', 'beamngEarth', string.format('BeamMP: first pose sent (%.5f, %.5f)', lat, lon)) end
     joined = false
@@ -1095,6 +1139,7 @@ end
 
 -- The session's end (BeamMP left, the level's end): the deactivated cars back on, everything forgotten.
 function M.reset()
+  shareInfo = nil             -- (asked again in the next session)
   for gid in pairs(deactivated) do
     local veh = vehicle(gid)
     if veh then veh:setActive(1) end
@@ -1116,17 +1161,18 @@ function M.reset()
   require('beamngEarth/mpanchor').reset()
 end
 
--- The other players for the world map: { { name, lat, lon, h } } (h: heading in degrees from true north, nil when
--- they have no car), from the plugin's latest bngeAnchors (POSE_S old at most).
+-- The other players for the world map: { { pid, name, lat, lon, h } } (pid: the server's player id as a string, what
+-- the map keys and follows them by: two players can have the same name; h: heading in degrees from true north, nil
+-- when they have no car), from the plugin's latest bngeAnchors (POSE_S old at most).
 function M.others()
   local out, mine = {}, myPid()
   for k, a in pairs(anchors) do
     if k ~= mine and type(a) == 'table' and tonumber(a.lat) and tonumber(a.lon) then
-      out[#out + 1] = { name = type(a.name) == 'string' and a.name or ('player ' .. k), lat = tonumber(a.lat),
+      out[#out + 1] = { pid = k, name = type(a.name) == 'string' and a.name or ('player ' .. k), lat = tonumber(a.lat),
         lon = tonumber(a.lon), h = tonumber(a.h) }
     end
   end
-  table.sort(out, function(x, y) return x.name < y.name end)
+  table.sort(out, function(x, y) if x.name ~= y.name then return x.name < y.name end return x.pid < y.pid end)
   return out
 end
 
