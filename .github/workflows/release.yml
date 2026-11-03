@@ -185,17 +185,21 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           v=${{ needs.check.outputs.version }}
+          python3 tools/package.py --beammp
+          python3 tools/package_addon.py
           pre=""
-          case "$v" in *preview*|*alpha*|*rc*) pre="--prerelease";; esac     # betas are full releases (the user, 2026-10-22)
+          case "$v" in *preview*|*alpha*|*rc*|*experimental*) pre="--prerelease";; esac     # betas are full releases (the user, 2026-10-22)
           cat > notes.md <<EOF
           **Download** the file for your system, run it, and it does the rest: it installs the mod into BeamNG.drive,
           starts the world server and starts the game. Then pick **Freeroam > BeamNG.Earth**.
 
-          - **Windows:** \`BeamNG.Earth-$v.exe\` (Windows may warn about an unknown app: More info > Run anyway)
-          - **Linux:** \`BeamNG.Earth-$v-x86_64.AppImage\` (make it executable: right-click > Properties, or
-            \`chmod +x\`). It starts the native game with the grass patch, no Steam launch options needed.
+          - **Windows Standalone Launcher + Server:** \`BeamNG.Earth-$v.exe\` (Windows may warn about an unknown app: More info > Run anyway)
+          - **Linux Standalone AppImage (x86_64):** \`BeamNG.Earth-$v-x86_64.AppImage\` (make it executable: right-click > Properties, or \`chmod +x\`). It starts the native game with the grass patch, no Steam launch options needed.
+          - **Cross-Platform Source + Mod Package (Windows / Linux / macOS):** \`BeamNG.Earth-$v.zip\`
+          - **BeamMP Server Drop-in:** \`BeamNG.Earth-BeamMP-Server-$v.zip\`
+          - **France & Provence Ground Truth Addon Pack:** \`beamng_earth_provence.zip\`
 
-          Steam must be running. Closing the game stops the server. See the README for details.
+          Steam must be running. Closing the game stops the server. See the README and CHANGELOG for details.
           EOF
-          gh release create "v$v" out/linux/* out/windows/* --target "$GITHUB_SHA" --title "BeamNG.Earth $v" \
+          gh release create "v$v" out/linux/* out/windows/* dist/*.zip --target "$GITHUB_SHA" --title "BeamNG.Earth $v" \
             --notes-file notes.md --generate-notes $pre

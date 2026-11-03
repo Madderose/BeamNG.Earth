@@ -581,8 +581,13 @@ class AddonRegistry:
 
     def load_bundled_addons(self) -> None:
         """Load bundled reference addons from repo/addons/*/beamng_earth_addons/*/addon.json if present."""
+        import sys
         repo_root = Path(__file__).resolve().parents[1]
         addons_root = repo_root / "addons"
+        if not addons_root.is_dir():
+            meipass = getattr(sys, "_MEIPASS", None)
+            if meipass:
+                addons_root = Path(meipass) / "addons"
         if not addons_root.is_dir():
             return
         for addon_json in sorted(addons_root.glob("*/beamng_earth_addons/*/addon.json")):

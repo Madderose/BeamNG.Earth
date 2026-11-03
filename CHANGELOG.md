@@ -1,4 +1,4 @@
-# Changelog - `dev-experimental-branch` (`1.7.3-dev-experimental`)
+# Changelog — `dev-experimental-branch` (`1.7.3-dev-experimental`)
 
 All notable changes on `origin/dev-experimental-branch` relative to `TecnaGamer/BeamNG.Earth` `upstream/dev` (`ad9ae5a1`, `1.7.3-beta`, `earthfast` `v142`).
 
@@ -7,7 +7,7 @@ Changes are organized into **4 modular PR packages** so upstream maintainers can
 ---
 
 ## [PR Package 1] Performance, Frame-Pacing & Shadow Culling (`pr/perf-frame-pacing-and-shadows` / PR #41)
-*Pure engine & streaming performance improvements - zero changes to terrain/biome data sources.*
+*Pure engine & streaming performance improvements — zero changes to terrain/biome data sources.*
 
 ### Added
 - **Deferred Time-Sliced Building Collision Rebuild (`roads.lua`, `core.lua`)**:
@@ -55,12 +55,12 @@ Changes are organized into **4 modular PR packages** so upstream maintainers can
 ---
 
 ## [PR Package 3] France & Provence Ground Truth Pack (`pr/addon-provence-ground-truth` / PR #456)
-*Reference regional Ground Truth addon (`beamng_earth_provence.zip`) powered by French IGN Geoplateforme WFS/WMS and Mediterranean biome rules.*
+*Reference regional Ground Truth addon (`beamng_earth_provence.zip`) powered by French IGN Géoplateforme WFS/WMS and Mediterranean biome rules.*
 
 ### Added
 - **Reference Addon Package (`addons/beamng_earth_provence/`, `tools/package_addon.py`)**:
-  - Declarative `addon.json`, `data_sources.json`, and `biomes.json` defining bbox `[42.3N..45.2N, 3.0E..7.8E]` (Provence-Alpes-Cote d'Azur, Occitanie, Vallee du Rhone).
-- **French IGN Geoplateforme BD TOPO & RPG Provider (`server/ign_fr.py`, `server/mapdata.py`, `server/imagery.py`)**:
+  - Declarative `addon.json`, `data_sources.json`, and `biomes.json` defining bbox `[42.3°N..45.2°N, 3.0°E..7.8°E]` (Provence-Alpes-Côte d'Azur, Occitanie, Vallée du Rhône).
+- **French IGN Géoplateforme BD TOPO & RPG Provider (`server/ign_fr.py`, `server/mapdata.py`, `server/imagery.py`)**:
   - Fetches official IGN BD TOPO 3D building heights/materials, IGN RPG agricultural crop parcels (`vigne`, `lavande`, `olivier`, `verger`, `tournesol`), and linear hedgerows (`haie`).
 - **Row-Aligned Mediterranean Crops & Aerial Orthophoto Roof Tinting (`server/vegetation.py`, `server/buildings.py`, `bne_lavender_row.dae`)**:
   - Synthesizes parcel-oriented vineyard rows, Sault lavender rows (`bne_lavender_row.dae`), olive orchards, and Mistral cypress windbreaks (`haie`).
