@@ -627,24 +627,56 @@ local function checkStagingReady(b, elapsed)
     local ok, s = pcall(function() return loadstring('return ' .. core.status())() end)
     if ok and type(s) == 'table' then st = s end
   end
-  local r = gps.route and gps.route()
-  local routeReady = type(r) == 'table' and type(r.points) == 'table' and #r.points >= 2
-  -- Re-request route every 4 seconds if OSRM route hasn't arrived yet (e.g. if server restarted)
-  if not routeReady and b.route and elapsed >= (b.nextRouteRetry or 3.0) then
-    b.nextRouteRetry = elapsed + 4.0
-    pcall(gps.setDestination, b.route.endLat, b.route.endLon, b.route.shortName or b.route.name)
+  local teleporting = st and st.teleporting == true
+  local atStartLoc = false
+  if st and st.player and st.player.lat and st.player.lon and b.route then
+    local dlat = (st.player.lat - b.route.startLat) * 110540
+    local dlon = (st.player.lon - b.route.startLon) * 111320 * math.cos(math.rad(b.route.startLat))
+    atStartLoc = (dlat * dlat + dlon * dlon) < (250 * 250)
   end
-  -- If OSRM takes > 10s, allow fallback straight-line path so benchmark never hangs
-  local routeOrFallback = routeReady or (elapsed >= 10.0)
+
+  -- Only request the OSRM route AFTER the teleport has placed the player at the route's start coordinates!
+  -- Requesting before teleport completes causes gps.lua to plan a route from the previous location (kilometres away).
+  if atStartLoc and not teleporting and not b.destSet and b.route then
+    b.destSet = true
+    b.destSetAt = elapsed
+    b.nextRouteRetry = elapsed + 3.5
+    pcall(function()
+      gps.clear()
+      gps.setDestination(b.route.endLat, b.route.endLon, b.route.shortName or b.route.name)
+    end)
+  end
+
+  local r = gps.route and gps.route()
+  local routeReady = false
+  if type(r) == 'table' and type(r.points) == 'table' and #r.points >= 2 and b.route then
+    local p1 = r.points[1]
+    if type(p1) == 'table' and tonumber(p1[1]) and tonumber(p1[2]) then
+      local rlat = (tonumber(p1[1]) - b.route.startLat) * 110540
+      local rlon = (tonumber(p1[2]) - b.route.startLon) * 111320 * math.cos(math.rad(b.route.startLat))
+      routeReady = (rlat * rlat + rlon * rlon) < (250 * 250)
+    end
+  end
+
+  -- Re-request route every 3.5 seconds if OSRM route from startLat/startLon hasn't arrived yet
+  if atStartLoc and not teleporting and not routeReady and b.route and elapsed >= (b.nextRouteRetry or 3.0) then
+    b.nextRouteRetry = elapsed + 3.5
+    pcall(function()
+      gps.clear()
+      gps.setDestination(b.route.endLat, b.route.endLon, b.route.shortName or b.route.name)
+    end)
+  end
+  -- If OSRM takes > 12s after arriving at start, allow fallback straight-line path so benchmark never hangs
+  local sinceDest = b.destSetAt and (elapsed - b.destSetAt) or 0
+  local routeOrFallback = routeReady or (atStartLoc and sinceDest >= 12.0)
 
   local veh = getPlayerVehicle and getPlayerVehicle(0)
   local p = veh and veh:getPosition()
   local g = p and groundAt(p.x, p.y, p.z + M.RAY_UP)
-  local teleporting = st and st.teleporting == true
   -- Note: st.commits in core.status() is a table of commit records (or a count)
   local commitsCount = st and (type(st.commits) == 'table' and #st.commits or tonumber(st.commits)) or 0
   local hasGround = (g ~= nil) or (commitsCount >= 1)
-  local baseReady = (elapsed >= 1.5) and (not teleporting) and routeOrFallback and hasGround
+  local baseReady = (elapsed >= 1.5) and (not teleporting) and atStartLoc and routeOrFallback and hasGround
 
   local queued = st and st.far and tonumber(st.far.queued) or 0
   local backlog = st and tonumber(st.serverBacklog) or 0
@@ -653,7 +685,7 @@ local function checkStagingReady(b, elapsed)
 
   if not baseReady then
     b.readySince = nil
-    if teleporting or not hasGround then
+    if teleporting or not atStartLoc or not hasGround then
       b.stageText = string.format('Waiting for terrain spawn (%ds)...', math.floor(elapsed))
     elseif not routeReady then
       b.stageText = string.format('Waiting for OSRM road route (%ds)...', math.floor(elapsed))
@@ -694,10 +726,19 @@ local function beginRouteRecording(b)
   b.s = 0
   b.frame = 0
   local r = gps.route and gps.route()
-  if r and type(r.points) == 'table' and #r.points >= 2 then
+  local validRoute = false
+  if r and type(r.points) == 'table' and #r.points >= 2 and b.route then
+    local p1 = r.points[1]
+    if type(p1) == 'table' and tonumber(p1[1]) and tonumber(p1[2]) then
+      local rlat = (tonumber(p1[1]) - b.route.startLat) * 110540
+      local rlon = (tonumber(p1[2]) - b.route.startLon) * 111320 * math.cos(math.rad(b.route.startLat))
+      validRoute = (rlat * rlat + rlon * rlon) < (250 * 250)
+    end
+  end
+  if validRoute then
     b.path = makePath(r.points)
   elseif b.route then
-    -- Fallback 2-point path if OSRM was unreachable
+    -- Fallback 2-point path if OSRM was unreachable or stale
     b.path = makePath({
       { b.route.startLat, b.route.startLon },
       { b.route.endLat, b.route.endLon },
@@ -956,13 +997,12 @@ function M.uiStartBench(mode, arg, speedId, loadMode)
         end
       end
     end
+    pcall(gps.clear)
     if not alreadyAtStart and core and core.teleport then
       pcall(core.teleport, route.startLat, route.startLon, route.shortName or route.name, { record = false })
+    else
+      pcall(gps.setDestination, route.endLat, route.endLon, route.shortName or route.name)
     end
-    pcall(function()
-      gps.clear()
-      gps.setDestination(route.endLat, route.endLon, route.shortName or route.name)
-    end)
     local loadLabel = (lMode == 'cold') and 'immediate-cold' or 'full-load'
     local title = string.format('Route Benchmark: %s @ %d km/h (%s, %s, effort=%s)',
       route.shortName or route.id, sp.kmh, loadLabel, addonTag, effortTag)
@@ -974,7 +1014,9 @@ function M.uiStartBench(mode, arg, speedId, loadMode)
       t0 = now(),
       dur = tonumber(sp.duration) or 45,
       stage = 'staging',
-      stageText = alreadyAtStart and 'Requesting OSRM route...' or 'Teleporting & requesting OSRM route...',
+      stageText = alreadyAtStart and 'Requesting OSRM route...' or 'Teleporting to route start...',
+      destSet = alreadyAtStart,
+      destSetAt = alreadyAtStart and 0 or nil,
       mode = 'route',
       route = route,
       speedPreset = sp,
