@@ -368,7 +368,8 @@ class IgnFr:
 
     def cell(self, key, bounds=None, kind="demand"):
         """Return FrCell for z14 cell key, fetching from IGN WFS if needed; None outside France or offline."""
-        if not ON:
+        import addons
+        if not ON or not addons.get_registry().is_source_enabled("ign_rpg_parcels"):
             return None
         ck = mapcells.CellKey(int(key[0]), int(key[1]), int(key[2]))
         if bounds is None:

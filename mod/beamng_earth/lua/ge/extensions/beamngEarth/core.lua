@@ -955,6 +955,7 @@ local function onMessage(msg)
     -- the graphics settings the server serves (terrain detail, tree and building reach, the ground photo's size)
     M.graphicsSent = nil
     M.sendGraphics()
+    pcall(M.syncAddons)
     -- the on-screen credits: this session's own follow (the attribution line until then)
     credits.clear()
     -- M4: the terrain block first (everything below may use the lattice / follow table); a server without
@@ -1216,6 +1217,12 @@ local function onMessage(msg)
       cacheClears = cacheClears + 1
       cacheInfo.clearedBytes, cacheInfo.clears = tonumber(msg.clearedBytes) or 0, cacheClears
     end
+  elseif t == 'addons_status' or t == 'addons_sync' then
+    local a = M.addonsModule and M.addonsModule()
+    if a and a.applySyncResponse then a.applySyncResponse(msg) end
+  elseif t == 'effort_status' then
+    if type(msg.profile) == 'string' then M._effortProfile = msg.profile end
+    M._effortBudget = msg
   end
 end
 
@@ -2779,6 +2786,43 @@ end
 -- The highway signs on / off (settings highwaySigns): shown or hidden at once, built by the server only while on.
 function M.setHighwaySigns(on)
   if roads.setSignsEnabled(on) then net.send({ type = 'highway_signs', on = roads.signsEnabled }) end
+end
+
+-- Native Addon Registry (addons.lua) & Layer B Effort Controller hooks (stored on M to respect 200-local limit)
+M._addons = nil
+M._effortProfile = 'balanced'
+M._effortBudget = nil
+function M.addonsModule()
+  if not M._addons then
+    local ok, mod = pcall(require, 'beamngEarth/addons')
+    if ok and type(mod) == 'table' then M._addons = mod end
+  end
+  return M._addons
+end
+function M.syncAddons(userToggles)
+  local a = M.addonsModule()
+  if not a then return nil end
+  a.discover()
+  local payload = a.buildSyncPayload(userToggles)
+  if net.isConnected() then
+    net.send({ type = 'addons_sync', addons = payload.addons, user_toggles = payload.user_toggles })
+  end
+  return payload
+end
+function M.getAddonsStatus()
+  local a = M.addonsModule()
+  return a and a.getStatus() or { synced = false, discovered = {}, active = {}, rejected = {}, warnings = {} }
+end
+function M.setEffortProfile(profile, telemetry)
+  if type(profile) == 'string' and #profile > 0 then
+    M._effortProfile = profile
+  end
+  local sent = false
+  if net.isConnected() then
+    net.send({ type = 'effort_set', profile = M._effortProfile, telemetry = telemetry })
+    sent = true
+  end
+  return { ok = true, profile = M._effortProfile, sent = sent }
 end
 
 M.onUpdate = onUpdate

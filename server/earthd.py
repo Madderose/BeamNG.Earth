@@ -141,8 +141,95 @@ import cpupin  # noqa: E402
 import netfetch  # noqa: E402
 import protocol  # noqa: E402
 import weather as weathermod  # noqa: E402
+import addons as addonsmod  # noqa: E402
+import effort as effortmod  # noqa: E402
 
 PROTOCOL = 4
+VERSION = updatesmod.local_version() or "1.7.0-beta"
+HTTP_ROUTES = ("GET /api/addons", "POST /api/addons/sync", "GET /api/effort", "POST /api/effort")
+
+
+def handle_api_request(method: str, path: str, body=None, server=None) -> tuple[int, dict]:
+    """Handle HTTP API routes for Native Addons (Layer A) and Effort Controller (Layer B):
+      - GET  /api/addons
+      - POST /api/addons/sync
+      - GET  /api/effort
+      - POST /api/effort
+    """
+    m = str(method or "GET").strip().upper()
+    clean_path = str(path or "").split("?", 1)[0].rstrip("/") or "/"
+    data = {}
+    if body is not None:
+        if isinstance(body, (bytes, bytearray)):
+            raw_s = body.decode("utf-8", errors="replace").strip()
+            data = json.loads(raw_s) if raw_s else {}
+        elif isinstance(body, str):
+            raw_s = body.strip()
+            data = json.loads(raw_s) if raw_s else {}
+        elif isinstance(body, dict):
+            data = dict(body)
+
+    if m == "GET" and clean_path == "/api/addons":
+        return 200, addonsmod.get_registry().get_status()
+
+    if m == "POST" and clean_path == "/api/addons/sync":
+        reg = addonsmod.get_registry()
+        prev_fp = reg.cache_fingerprint()
+        if "addons" in data:
+            resp = reg.sync_addons(
+                data.get("addons") or [],
+                user_toggles=data.get("user_toggles"),
+                policy=data.get("policy") or data.get("approval_policy"),
+            )
+        else:
+            if "policy" in data or "approval_policy" in data:
+                reg.set_approval_policy(str(data.get("policy") or data.get("approval_policy")))
+            if "addon_id" in data and "source_id" in data and "enabled" in data:
+                reg.set_source_enabled(str(data["addon_id"]), str(data["source_id"]), bool(data["enabled"]))
+            elif "source_id" in data and "enabled" in data:
+                reg.set_source_enabled(str(data["source_id"]), bool(data["enabled"]))
+            elif "addon_id" in data and "enabled" in data:
+                reg.set_addon_enabled(str(data["addon_id"]), bool(data["enabled"]))
+            resp = reg.get_status()
+            resp["cache_invalidated"] = prev_fp != reg.cache_fingerprint()
+            resp["previous_fingerprint"] = prev_fp
+
+        if resp.get("cache_invalidated"):
+            revisitmod.invalidate_runtime_cache()
+            if server is not None and hasattr(server, "invalidate_addon_effort_caches"):
+                server.invalidate_addon_effort_caches()
+        return 200, resp
+
+    if m == "GET" and clean_path == "/api/effort":
+        return 200, effortmod.get_effort_controller().get_status()
+
+    if m == "POST" and clean_path == "/api/effort":
+        ctrl = effortmod.get_effort_controller()
+        prev_tag = ctrl.cache_tag()
+        try:
+            if "profile" in data and data["profile"] is not None:
+                ctrl.set_profile(str(data["profile"]), initial_auto_tier=data.get("initial_auto_tier"))
+            telem = data.get("telemetry") if isinstance(data.get("telemetry"), dict) else data
+            if any(k in telem for k in ("fps_p50", "fps_p95", "frame_ms_p95", "target_fps")):
+                ctrl.report_telemetry(
+                    fps_p50=telem.get("fps_p50"),
+                    fps_p95=telem.get("fps_p95"),
+                    frame_ms_p95=telem.get("frame_ms_p95"),
+                    target_fps=telem.get("target_fps"),
+                )
+        except ValueError as exc:
+            return 400, {"error": str(exc)}
+
+        new_tag = ctrl.cache_tag()
+        out = ctrl.get_status()
+        out["cache_invalidated"] = prev_tag != new_tag
+        if out["cache_invalidated"]:
+            revisitmod.invalidate_runtime_cache()
+            if server is not None and hasattr(server, "invalidate_addon_effort_caches"):
+                server.invalidate_addon_effort_caches()
+        return 200, out
+
+    return 404, {"error": f"Unknown API route: {m} {clean_path}"}
 # The BeamNG.Earth server list (native/serverlist behind Caddy on the project's mini PC): server_list()
 SERVER_LIST_URL = "https://earth.tgforever.net/servers"
 # Tile/heightmap content format (hello.format) is the layout's: 3 = v1.3.1 (2 m lattice, fixed Q,
@@ -1662,6 +1749,19 @@ class Server:
         return signstream.build_tile(self.mapdata, anchor.frame, aid, tx, ty, elev, self.out_dir, self.vfs_dir,
                                      urban, self.road_widths, self.left_hand(anchor), self.mph(anchor),
                                      self.country(anchor))
+
+    def invalidate_addon_effort_caches(self):
+        """Invalidate in-memory vegetation and tile caches when active addons or effort budget change."""
+        revisitmod.invalidate_runtime_cache()
+        if getattr(self, "veg", None) is not None and hasattr(self.veg, "_mem"):
+            with self.veg._lock:
+                self.veg._mem.clear()
+        if hasattr(self, "tiles") and isinstance(getattr(self, "tiles", None), dict):
+            self.tiles.clear()
+
+    def handle_api_request(self, method: str, path: str, body=None) -> tuple[int, dict]:
+        """Dispatch /api/addons and /api/effort HTTP requests bound to this Server instance."""
+        return handle_api_request(method, path, body=body, server=self)
 
     def build_sky_tile(self, aid, ux, uy):
         """buildings.skyline_tile: a skyline (render-only) tile of anchor aid, or None (its cells not at hand: asked
@@ -4975,6 +5075,20 @@ class Connection:
             if self.s.set_gas_stations(msg.get("on")):
                 self.roads.close()
                 self.roads = road_tracker(self)
+        elif kind in ("addons_sync", "addons_get"):
+            _code, payload = self.s.handle_api_request(
+                "POST" if kind == "addons_sync" else "GET",
+                "/api/addons/sync" if kind == "addons_sync" else "/api/addons",
+                msg,
+            )
+            self.send({"type": "addons_status", **payload})
+        elif kind in ("effort_set", "effort_get", "effort"):
+            _code, payload = self.s.handle_api_request(
+                "POST" if kind in ("effort_set", "effort") else "GET",
+                "/api/effort",
+                msg,
+            )
+            self.send({"type": "effort_status", **payload})
         else:
             log.debug("ignoring message type %r", kind)
 

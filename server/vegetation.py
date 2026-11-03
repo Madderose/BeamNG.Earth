@@ -28,6 +28,8 @@ import numpy as np
 import fast
 from PIL import Image, ImageDraw
 
+import addons
+import effort
 import mapcells
 import pacer
 import staging
@@ -154,9 +156,20 @@ def regional(group, height, lat, lon, lcls, u, narrow=None):
         [G_DECIDUOUS, G_CONIFER, G_SHRUB, G_ROCK, G_PINE_WEST, G_PALM, G_JUNIPER, G_DESERT_SHRUB, G_DESERT_ROCK,
          G_OAK_WEST, G_TROPICAL], [WC["shrub"], WC["bare"], WC["grass"], WC["built"]]), np.uint8)
     med = (g_lat >= 35.0) & (g_lat <= 45.2) & (g_lon >= -9.5) & (g_lon <= 28.0)
-    if med.any():
+    if med.any() and addons.get_registry().is_source_enabled("osm_provence_landuse"):
         out = out.copy()
-        provence = (g_lat >= 42.0) & (g_lat <= 45.0) & (g_lon >= 2.5) & (g_lon <= 7.8)
+        prov_bbox = (42.0, 2.5, 45.0, 7.8)
+        try:
+            reg = addons.get_registry()
+            for a in reg.active_addons():
+                for b in a.biomes:
+                    if b.get("id") == "provence_mediterranean" and isinstance(b.get("bbox"), (list, tuple)) and len(b["bbox"]) == 4:
+                        bb = b["bbox"]
+                        prov_bbox = (min(42.0, float(bb[0])), min(2.5, float(bb[1])), max(45.0, float(bb[2])), max(7.8, float(bb[3])))
+                        break
+        except Exception:
+            pass
+        provence = (g_lat >= prov_bbox[0]) & (g_lat <= prov_bbox[2]) & (g_lon >= prov_bbox[1]) & (g_lon <= prov_bbox[3])
         is_tree = (out == G_DECIDUOUS) | (out == G_CONIFER)
         is_nar = bc(narrow, bool) if narrow is not None else np.zeros(n, bool)
         cyp = med & is_tree & (
@@ -419,7 +432,7 @@ class Vegetation:
             _mask_polys(bld_feat, bld_parcel, chm, 5.0)
         fr = None
         ign = getattr(self.md, "ign_fr", None)
-        if ign is not None:
+        if ign is not None and addons.get_registry().is_source_enabled("ign_rpg_parcels"):
             try:
                 fr = ign.cell(key, bounds=cd.bounds)
             except Exception as e:
@@ -547,6 +560,8 @@ class Vegetation:
     def _build_parcels(self, fr, lu, cd, chm, blocked, crop_mask):
         """Row-aligned vineyards (grape_vine_group & grape_vine), lavender fields (bne_lavender_row), and
         olive/truffle orchards (olive & holm_oak) from IGN RPG / BD TOPO and Overture land_use."""
+        if not addons.get_registry().is_source_enabled("osm_provence_landuse"):
+            return _empty()
         lon0, lat0, lon1, lat1 = cd.bounds
         lat_mid = 0.5 * (lat0 + lat1)
         lon_mid = 0.5 * (lon0 + lon1)
@@ -599,20 +614,12 @@ class Vegetation:
 
             if cname == "vineyard":
                 inner = avail & ~_dilate(~avail, max(2, int(round(6.5 / chm.dx))))
-                sa_blk, sb_blk = 15.5 * m_scale, 7.2 * m_scale
-                da_sub = np.array([-5.17, 0.0, 5.17]) * m_scale
-                db_sub = np.array([-2.4, 0.0, 2.4]) * m_scale
             else:
                 inner = None
-                if cname == "lavender":
-                    avail &= ~_dilate(~avail, 1)
-                    sa_blk, sb_blk = 2.45 * m_scale, 2.72 * m_scale
-                elif cname == "olive":
-                    avail &= ~_dilate(~avail, 1)
-                    sa_blk, sb_blk = 7.5 * m_scale, 7.5 * m_scale
-                else:  # truffle
-                    avail &= ~_dilate(~avail, 1)
-                    sa_blk, sb_blk = 9.0 * m_scale, 9.0 * m_scale
+                avail &= ~_dilate(~avail, 1)
+            crop_cfg = _structured_crop(cname, lat=lat_mid, lon=lon_mid, m_scale=m_scale)
+            sa_blk, sb_blk = crop_cfg["sa_blk"], crop_cfg["sb_blk"]
+            da_sub, db_sub = crop_cfg["da_sub"], crop_cfg["db_sub"]
 
             all_parts = []
             for f_tab, sel in c_sources:
@@ -910,16 +917,95 @@ class Vegetation:
                      (0.8 + 0.4 * _hash01(GI[sel], GJ[sel], 17)).astype(np.float32)) if n else _empty()
 
 
-def _thin(jj, ii, h, px):
+def _structured_crop(cname="vineyard", lat=None, lon=None, m_scale=1.0, poly=None, budget=None, registry=None):
+    """Resolve Layer A Ground Truth crop row specification from active addons (with default fallback)
+    and scale spacings by Layer B EffortBudget.crop_row_spacing_mult."""
+    if not isinstance(cname, str) and poly is None:
+        poly, cname = cname, "vineyard"
+    b = budget if budget is not None else effort.get_budget()
+    reg = registry if registry is not None else addons.get_registry()
+    mult = float(b.crop_row_spacing_mult)
+    key = str(cname or "vineyard").strip().lower()
+    spec = reg.get_crop_row_spec(key, lat=lat, lon=lon) or {}
+
+    defaults = {
+        "vineyard": {"row_spacing_m": 2.2, "point_spacing_m": 1.2, "block_spacing_a_m": 15.5, "block_spacing_b_m": 7.2,
+                     "single_spacing_a_m": 5.17, "single_spacing_b_m": 2.4},
+        "lavender": {"row_spacing_m": 1.5, "point_spacing_m": 0.8, "block_spacing_a_m": 2.45, "block_spacing_b_m": 2.72},
+        "olive": {"row_spacing_m": 6.0, "point_spacing_m": 6.0, "block_spacing_a_m": 7.5, "block_spacing_b_m": 7.5},
+        "orchard": {"row_spacing_m": 5.5, "point_spacing_m": 5.0, "block_spacing_a_m": 6.0, "block_spacing_b_m": 6.0},
+        "truffle": {"row_spacing_m": 8.0, "point_spacing_m": 8.0, "block_spacing_a_m": 9.0, "block_spacing_b_m": 9.0},
+    }
+    d = defaults.get(key, defaults["vineyard"])
+    row_sp = float(spec.get("row_spacing_m", d["row_spacing_m"])) * mult
+    pt_sp = float(spec.get("point_spacing_m", d["point_spacing_m"])) * mult
+    sa_blk = float(spec.get("block_spacing_a_m", d["block_spacing_a_m"])) * mult * float(m_scale)
+    sb_blk = float(spec.get("block_spacing_b_m", d["block_spacing_b_m"])) * mult * float(m_scale)
+    sa_single = float(spec.get("single_spacing_a_m", d.get("single_spacing_a_m", 5.17))) * mult * float(m_scale)
+    sb_single = float(spec.get("single_spacing_b_m", d.get("single_spacing_b_m", 2.4))) * mult * float(m_scale)
+    da_sub = np.array([-sa_single, 0.0, sa_single], dtype=np.float64)
+    db_sub = np.array([-sb_single, 0.0, sb_single], dtype=np.float64)
+
+    points = None
+    if poly is not None:
+        arr = np.asarray(poly, dtype=np.float64)
+        if arr.ndim == 2 and len(arr) >= 3:
+            xmin, ymin = arr[:, 0].min(), arr[:, 1].min()
+            xmax, ymax = arr[:, 0].max(), arr[:, 1].max()
+            xs = np.arange(xmin, xmax, max(0.2, pt_sp))
+            ys = np.arange(ymin, ymax, max(0.2, row_sp))
+            if len(xs) and len(ys):
+                XX, YY = np.meshgrid(xs, ys)
+                points = np.column_stack([XX.ravel(), YY.ravel()])
+
+    return {
+        "crop": key,
+        "row_spacing": row_sp,
+        "point_spacing": pt_sp,
+        "sa_blk": sa_blk,
+        "sb_blk": sb_blk,
+        "da_sub": da_sub,
+        "db_sub": db_sub,
+        "crop_row_spacing_mult": mult,
+        "spec": spec,
+        "points": points,
+    }
+
+
+def _aerial_blob_trees(candidates, budget=None):
+    """Gate and cap aerial canopy blob trees according to Layer B EffortBudget.aerial_blob_max_trees."""
+    b = budget if budget is not None else effort.get_budget()
+    cap = int(b.aerial_blob_max_trees)
+    if isinstance(candidates, Items):
+        if cap <= 0 or len(candidates) == 0:
+            return _empty()
+        if len(candidates) <= cap:
+            return candidates
+        order = np.argsort(candidates.rank)[:cap]
+        order.sort()
+        return candidates.take(order)
+    seq = list(candidates or [])
+    if cap <= 0 or not seq:
+        return []
+    return seq[:cap]
+
+
+def _thin(jj, ii, h, px, spacing_mult=None):
     """Non-maximum suppression: the tallest tops first, each removing the others within its crown
-    radius (0.12 h + 1 m, times CROWN_SPACING). Deterministic (ties broken by position). earthfast thin_tops
-    (2026-10-23: the same tops as the Python loop it replaced)."""
+    radius (0.12 h + 1 m, times CROWN_SPACING * budget.tree_spacing_mult). Deterministic (ties broken by position).
+    earthfast thin_tops (2026-10-23: the same tops as the Python loop it replaced)."""
     if len(jj) == 0:
         return jj, ii
     fast.require(64, "thin_tops")
+    mult = float(spacing_mult) if spacing_mult is not None else float(effort.get_budget().tree_spacing_mult)
+    eff_spacing = float(CROWN_SPACING) * mult
     keep = fast._ef.thin_tops(np.ascontiguousarray(jj, np.int64), np.ascontiguousarray(ii, np.int64),
-                              np.ascontiguousarray(h, np.float32), float(CROWN_SPACING), float(px))
+                              np.ascontiguousarray(h, np.float32), eff_spacing, float(px))
     return jj[keep], ii[keep]
+
+
+Vegetation._structured_crop = staticmethod(_structured_crop)
+Vegetation._aerial_blob_trees = staticmethod(_aerial_blob_trees)
 
 
 def _empty():

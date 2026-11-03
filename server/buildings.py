@@ -20,6 +20,8 @@ import math
 import numpy as np
 
 import fast
+import addons
+import effort
 import mapgeom
 import ships
 import staging
@@ -3264,9 +3266,33 @@ def _load_aerial_tile(md, z, tx, ty):
     return rgb
 
 
-def sample_aerial_roofs(frame, items, x0, y0, md):
+def _sample_roof_ortho(frame=None, items=None, x0=0.0, y0=0.0, md=None, budget=None, registry=None):
+    """Gate and execute aerial orthophoto roof colour sampling based on Layer B EffortBudget.roof_ortho_sampling
+    and Layer A AddonRegistry.is_source_enabled('ign_orthophoto_20cm')."""
+    b = budget if budget is not None else effort.get_budget()
+    reg = registry if registry is not None else addons.get_registry()
+    if not b.roof_ortho_sampling or not reg.is_source_enabled("ign_orthophoto_20cm"):
+        return items if items is not None else None
+    if items is None and isinstance(frame, np.ndarray):
+        pix = frame.reshape(-1, 3).astype(np.float32)
+        r, g, bl = pix[:, 0], pix[:, 1], pix[:, 2]
+        lum = 0.299 * r + 0.587 * g + 0.114 * bl
+        keep = (lum >= 38.0) & (lum <= 242.0) & ~((g > r * 1.12) & (g > bl * 1.15))
+        if not keep.any():
+            return None
+        med = np.median(pix[keep], axis=0) / 255.0
+        return (round(float(med[0]), 3), round(float(med[1]), 3), round(float(med[2]), 3))
+    if items is None:
+        return True
+    return sample_aerial_roofs(frame, items, x0, y0, md, _checked=True)
+
+
+def sample_aerial_roofs(frame, items, x0, y0, md, _checked=False):
     """Sample interior roof colours from streamed/cached z=17 (or z=16) aerial orthophoto tiles for each building
     in items, filtering out shadows, glare, and overhanging tree canopy."""
+    if not _checked:
+        if not effort.get_budget().roof_ortho_sampling or not addons.get_registry().is_source_enabled("ign_orthophoto_20cm"):
+            return items
     if not items or md is None or not getattr(md, "cache_dir", None):
         return items
     import imagery

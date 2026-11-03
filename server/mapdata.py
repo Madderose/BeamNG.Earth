@@ -61,6 +61,8 @@ from dataclasses import dataclass, field
 import numpy as np
 
 import geodesy
+import addons
+import effort
 import gradesep
 import mapcells
 import mapgeom
@@ -316,6 +318,8 @@ class MapData:
         ig = getattr(self, "ign_fr", None)
         if ig is None or layer != "buildings" or feats is None:
             return feats
+        if not addons.get_registry().is_source_enabled("ign_rpg_parcels"):
+            return feats
         if feats.__dict__.get("_ign_bld_joined"):
             return feats
         try:
@@ -323,6 +327,15 @@ class MapData:
         except Exception as e:
             log.debug("ign_fr buildings join %s: %s: %s", key, type(e).__name__, e)
             return feats
+
+    def _fr_parcels(self, key, bounds=None, kind="demand"):
+        """Fetch/enrich IGN RPG agricultural parcels for cell `key` when `ign_rpg_parcels` data source is enabled."""
+        ig = getattr(self, "ign_fr", None)
+        if ig is None or not addons.get_registry().is_source_enabled("ign_rpg_parcels"):
+            return None
+        return ig.cell(key, bounds=bounds, kind=kind)
+
+    enrich_ign_parcels = _fr_parcels
 
     def versions(self):
         rails = getattr(self, "rail_tags", None)
