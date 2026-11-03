@@ -71,7 +71,7 @@ Previously, toggling a world-generation setting in-game had **no visible effect*
 ### 4.1 Why BeamNG 0.40 Blocked Direct `openWebBrowser` Calls to GitHub
 In BeamNG.drive 0.40+, the engine's C++ `openWebBrowser(url)` function enforces an internal domain whitelist (`E|platform| unable to open webpage due to domain filter: https://github.com/...`). Calling `openWebBrowser` directly from GE Lua silently fails when trying to open GitHub issue pages.
 
-To make **`Post GitHub Ticket`** work reliably across Windows, Linux, and macOS without ever overwriting the user's clipboard automatically:
+To make **`Post GitHub Ticket`** work reliably across Windows and Linux without ever overwriting the user's clipboard automatically:
 1. [`report.lua`](../mod/beamng_earth/lua/ge/extensions/beamngEarth/report.lua) sends `{ type = 'open_page', url = url }` via [`core.lua`](../mod/beamng_earth/lua/ge/extensions/beamngEarth/core.lua) (`beamngEarth_core.openPage(url)`) to the local Python companion server (`server/earthd.py` -> [`server/updates.py`](../server/updates.py) `open_page(url)`).
 2. On Windows, when the URL exceeds Win32 `ShellExecuteW`'s 2,083-character limit (`len(url) > 2000`), `updates.open_page(url)` resolves the user's default HTTPS browser executable via `winreg` (`HKCU\Software\Microsoft\Windows\Shell\Associations\UrlAssociations\https\UserChoice`) and spawns `[browser_exe, url]` via `CreateProcessW` (which supports up to 32,767 characters, passing the full `7,000`-character GitHub issue URL with **zero truncation**).
 3. A separate **`Copy Report`** button (`beamngEarth_report.copyLastReport()`) is provided alongside **`Open Folder`** and **`Post GitHub Ticket`** so the user's clipboard is only modified when they explicitly click **`Copy Report`**.

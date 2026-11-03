@@ -195,7 +195,7 @@ jobs:
 
           - **Windows Standalone Launcher + Server:** \`BeamNG.Earth-$v.exe\` (Windows may warn about an unknown app: More info > Run anyway)
           - **Linux Standalone AppImage (x86_64):** \`BeamNG.Earth-$v-x86_64.AppImage\` (make it executable: right-click > Properties, or \`chmod +x\`). It starts the native game with the grass patch, no Steam launch options needed.
-          - **Cross-Platform Source + Mod Package (Windows / Linux / macOS):** \`BeamNG.Earth-$v.zip\`
+          - **Cross-Platform Source + Mod Package (Windows / Linux):** \`BeamNG.Earth-$v.zip\`
           - **BeamMP Server Drop-in:** \`BeamNG.Earth-BeamMP-Server-$v.zip\`
           - **France & Provence Ground Truth Addon Pack:** \`beamng_earth_provence.zip\`
 
