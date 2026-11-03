@@ -1,4 +1,4 @@
-﻿# Changelog â€” `dev-experimental-branch` (`1.7.3-dev-experimental`)
+# Changelog - `dev-experimental-branch` (`1.7.3-dev-experimental`)
 
 All notable changes on `origin/dev-experimental-branch` relative to `TecnaGamer/BeamNG.Earth` `upstream/dev` (`ad9ae5a1`, `1.7.3-beta`, `earthfast` `v142`).
 
@@ -6,8 +6,8 @@ Changes are organized into **4 modular PR packages** so upstream maintainers can
 
 ---
 
-## [PR Package 1] Performance, Frame-Pacing & Shadow Culling (`pr/perf-frame-pacing-and-shadows`)
-*Pure engine & streaming performance improvements â€” zero changes to terrain/biome data sources.*
+## [PR Package 1] Performance, Frame-Pacing & Shadow Culling (`pr/perf-frame-pacing-and-shadows` / PR #41)
+*Pure engine & streaming performance improvements - zero changes to terrain/biome data sources.*
 
 ### Added
 - **Deferred Time-Sliced Building Collision Rebuild (`roads.lua`, `core.lua`)**:
@@ -21,15 +21,16 @@ Changes are organized into **4 modular PR packages** so upstream maintainers can
 - **Worker Process Priority & Windows UTF-8 Safety (`server/pools.py`, `launcher.py`, `install.py`)**:
   - Ensures background worker pools run at below-normal CPU priority so the game's render/physics threads are never starved, and enforces `PYTHONUTF8=1` across Windows subprocesses.
 
-### Benchmark Impact (Mont Ventoux D974, `3.0 km` @ `120 mph`, DX12)
+### Benchmark Impact (Mont Ventoux D974, DX12)
 - **Hitches `>50 ms` (severe frame stalls)**: Reduced from **`2`** on `upstream/dev` to **`0`** (`-100%`).
 - **Hitches `>33 ms`**: Reduced from **`6`** on `upstream/dev` to **`2`** (`-66.7%`).
 - **`p99` Frame Time**: Improved from `21.15 ms` to `20.38 ms` (`-3.6%`), and worst-frame `max_ms` improved from `57.20 ms` to `45.57 ms` (`-20.3%`).
+- **In-Game `300 km/h` (`3.75 km`) Route Climb**: `74.7 fps avg`, `1% low 50.2 fps`, `worst frame 22 ms`, `0 frames over 50 ms`.
 
 ---
 
-## [PR Package 2] Declarative Addon Architecture, Layer B Effort Governor & Live World Reload (`pr/addon-architecture-and-effort-governor`)
-*Core infrastructure separating "Ground Truth" (Layer A) from "Performance Effort" (Layer B), with instant in-game toggle & live world reload.*
+## [PR Package 2] Declarative Addon Architecture, Layer B Effort Governor, Live World Reload & In-Game Benchmark UI (`pr/addon-architecture-and-effort-governor`)
+*Core infrastructure separating "Ground Truth" (Layer A) from "Performance Effort" (Layer B), with instant in-game toggle, live world reload, and dual-mode in-game benchmarking.*
 
 ### Added
 - **Layer A Declarative Addon Registry & Security/Approval Gate (`server/addons.py`, `mod/beamng_earth/lua/ge/extensions/beamngEarth/addons.lua`)**:
@@ -42,24 +43,28 @@ Changes are organized into **4 modular PR packages** so upstream maintainers can
 - **Live World & Vegetation Reload on Toggle (`server/earthd.py`, `server/blockworker.py`, `server/revisit.py`, `server/vegetation.py`, `core.lua`)**:
   - **Cache-Tag Isolation**: Both `revisit.py` and `vegetation.py` (`Vegetation._path`, `cell`, `ready`) key their disk and memory caches by `<addon_cache_fingerprint>_<effort_cache_tag>`. Toggling an addon or effort profile immediately switches to the matching cache namespace without corrupting or overwriting baseline cached cells.
   - **Cross-Process Worker Sync (`runtime_addon_effort.json`)**: `earthd.py` exports runtime addon/effort state to `cache_dir/runtime_addon_effort.json`; `blockworker.py` subprocesses (`road_pool`, `far_bld_pool`, `block_pools`) automatically detect `st_mtime_ns` changes and synchronize their in-process `AddonRegistry`, `EffortController`, and memory caches before building tiles.
-  - **Live Tracker Reset (`Connection.reset_world_trackers()`) & `Refresh World` Action**: Toggling any addon, data source, or effort profile (or clicking `Refresh World Around You`) clears in-game vegetation/buildings (`trees.clear()`, `roads.newSession()`, `roads.incrementBldGen()`) and resets server-side streaming trackers (`self.veg`, `self.roads`, `self.signs`, `self.bldfar`/`bldsky`/`brfar`) so the surrounding world re-streams live within 1â€“4 seconds without restarting the game or teleporting.
-- **Dedicated `Addons` UI Tab & Floating CEF Window (`earthAddonsWindow.js`, `earthSettingsStore.js`, `EarthSettingsBody.vue`, `index.js`, `settings.lua`, `ui.lua`)**:
-  - Moved all Generation Addon and Effort controls out of the `World` settings tab into a dedicated **`Addons`** tab in `Pause Menu > BeamNG.Earth > Addons`.
-  - Added a standalone, draggable CEF floating window (**`/ Generation Addons`**) with live switches, Effort profile pills (`Low`, `Balanced`, `High`, `Ultra`, `Auto-FPS`), **`Refresh World Around You`** button, **`Min`** (collapse to pill), and **`X`** (close completely).
+  - **Live Tracker Reset (`Connection.reset_world_trackers()`) & `Refresh World` Action**: Toggling any addon, data source, or effort profile (or clicking `Refresh World`) clears in-game vegetation/buildings (`trees.clear()`, `roads.newSession()`, `roads.incrementBldGen()`) and resets server-side streaming trackers (`self.veg`, `self.roads`, `self.signs`, `self.bldfar`/`bldsky`/`brfar`) so the surrounding world re-streams live within 1-4 seconds without restarting the game or teleporting.
+- **Dedicated `Addons` UI Tab, Floating CEF Window & Dual-Mode In-Game Benchmark (`earthAddonsWindow.js`, `report.lua`, `issuefmt.lua`, `updates.py`)**:
+  - Dedicated **`Addons`** tab in `Pause Menu > BeamNG.Earth > Addons` plus a standalone, draggable CEF floating window (**`/ Generation Addons`**) with live switches, Effort profile pills (`Low`, `Balanced`, `High`, `Ultra`, `Auto-FPS`), **`Refresh World`**, **`Min`** (collapse to pill), and **`X`** (close completely).
+  - **Dual-Mode In-Game Benchmark**:
+    - **Mode 1 (`Free Drive 30s`)** & **Mode 2 (`Route A -> B Auto-Drive`)** with extensible `M.BENCH_ROUTES` registry and CEF-native route stepper/buttons.
+    - **3 Speed Tiers with Adapted Distance**: `Slow: 80 km/h (50 mph, 1.0 km)`, `Fast: 200 km/h (124 mph, 2.5 km)`, and `Ultra: 300 km/h (186 mph, 3.75 km)` driven via OSRM road-spline kinematic placement.
+    - **Full World Load vs. Immediate Start**: Waits until terrain physics, OSRM route, and all surrounding tiles/buildings/server jobs are 100% loaded (`Wait Full Load (100%)`) before starting the drive, or starts immediately (`Immediate (Stream on Move)`).
+    - **GitHub Ticket Routing & Clipboard Safety**: `Open Folder`, explicit `Copy Report` (never overwrites user clipboard automatically), and `Post GitHub Ticket` routed via `server/updates.py` (`open_page`) with configurable `ISSUE_REPO` (`Madderose/BeamNG.Earth` on experimental branch vs. `TecnaGamer/BeamNG.Earth` on upstream branches).
 
 ---
 
-## [PR Package 3] France & Provence Ground Truth Pack (`pr/addon-provence-ground-truth`)
-*Reference regional Ground Truth addon (`beamng_earth_provence.zip`) powered by French IGN GÃ©oplateforme WFS/WMS and Mediterranean biome rules.*
+## [PR Package 3] France & Provence Ground Truth Pack (`pr/addon-provence-ground-truth` / PR #456)
+*Reference regional Ground Truth addon (`beamng_earth_provence.zip`) powered by French IGN Geoplateforme WFS/WMS and Mediterranean biome rules.*
 
 ### Added
 - **Reference Addon Package (`addons/beamng_earth_provence/`, `tools/package_addon.py`)**:
-  - Declarative `addon.json`, `data_sources.json`, and `biomes.json` defining bbox `[42.3Â°N..45.2Â°N, 3.0Â°E..7.8Â°E]` (Provence-Alpes-CÃ´te d'Azur, Occitanie, VallÃ©e du RhÃ´ne).
-- **French IGN GÃ©oplateforme BD TOPO & RPG Provider (`server/ign_fr.py`, `server/mapdata.py`, `server/imagery.py`)**:
+  - Declarative `addon.json`, `data_sources.json`, and `biomes.json` defining bbox `[42.3N..45.2N, 3.0E..7.8E]` (Provence-Alpes-Cote d'Azur, Occitanie, Vallee du Rhone).
+- **French IGN Geoplateforme BD TOPO & RPG Provider (`server/ign_fr.py`, `server/mapdata.py`, `server/imagery.py`)**:
   - Fetches official IGN BD TOPO 3D building heights/materials, IGN RPG agricultural crop parcels (`vigne`, `lavande`, `olivier`, `verger`, `tournesol`), and linear hedgerows (`haie`).
 - **Row-Aligned Mediterranean Crops & Aerial Orthophoto Roof Tinting (`server/vegetation.py`, `server/buildings.py`, `bne_lavender_row.dae`)**:
   - Synthesizes parcel-oriented vineyard rows, Sault lavender rows (`bne_lavender_row.dae`), olive orchards, and Mistral cypress windbreaks (`haie`).
-  - Samples 20 cm IGN aerial orthophotos (`ign_orthophoto_20cm`) to tint Provence building roofs and faÃ§ades with authentic local terracotta and limestone hues.
+  - Samples 20 cm IGN aerial orthophotos (`ign_orthophoto_20cm`) to tint Provence building roofs and facades with authentic local terracotta and limestone hues.
 
 ### Benchmark Impact (`provence` Disabled vs. Enabled on Mont Ventoux D974, Warm Cache)
 - **Average FPS**: `58.9 FPS` (`provence` OFF) vs `58.8 FPS` (`provence` ON, `-0.17%`).
