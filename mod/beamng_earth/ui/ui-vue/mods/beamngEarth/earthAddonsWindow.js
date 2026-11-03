@@ -1,21 +1,9 @@
-// Standalone floating "Generation Addons" window in the CEF UI layer (works in DX12/Vulkan both in gameplay and menus).
+// Standalone floating "Generation Addons" window in the CEF UI layer.
+// Single-instance, in-place DOM updates (never rebuilds innerHTML on a timer, never resets drag position),
+// with both Minimize ("-") and full Close ("✕") buttons.
 
 const ROOT_ID = "bng-earth-addons-floating-root"
 const STYLE_ID = "bng-earth-addons-floating-style"
-
-let state = {
-  open: true,
-  addonProvence: true,
-  sourceIgnRpg: true,
-  sourceIgnOrtho: true,
-  sourceProvenceBiomes: true,
-  effortProfile: "balanced",
-  note: "",
-  posX: 28,
-  posY: 84,
-}
-
-let pollId = null
 
 const EFFORT_PROFILES = [
   { id: "low", label: "Low" },
@@ -25,6 +13,25 @@ const EFFORT_PROFILES = [
   { id: "auto_fps", label: "Auto-FPS" },
 ]
 
+function getState() {
+  if (!window.__bngEarthAddonsState) {
+    window.__bngEarthAddonsState = {
+      visible: true,
+      minimized: false,
+      addonProvence: true,
+      sourceIgnRpg: true,
+      sourceIgnOrtho: true,
+      sourceProvenceBiomes: true,
+      effortProfile: "balanced",
+      note: "",
+      posX: 28,
+      posY: 84,
+      noteTimer: null,
+    }
+  }
+  return window.__bngEarthAddonsState
+}
+
 function engineLua(code, cb) {
   if (window.bngApi && window.bngApi.engineLua) {
     window.bngApi.engineLua(code, cb)
@@ -32,9 +39,12 @@ function engineLua(code, cb) {
 }
 
 function injectStyles() {
-  if (document.getElementById(STYLE_ID)) return
-  const style = document.createElement("style")
-  style.id = STYLE_ID
+  let style = document.getElementById(STYLE_ID)
+  if (!style) {
+    style = document.createElement("style")
+    style.id = STYLE_ID
+    document.head.appendChild(style)
+  }
   style.textContent = `
     #${ROOT_ID} {
       position: fixed;
@@ -96,18 +106,29 @@ function injectStyles() {
       background: #ff6600;
       transform: skewX(-16deg);
     }
-    .bng-earth-addons-minbtn {
+    .bng-earth-addons-hdrbtns {
+      display: flex;
+      align-items: center;
+      gap: 5px;
+    }
+    .bng-earth-addons-hdrbtn {
       background: rgba(255, 255, 255, 0.08);
       border: 1px solid rgba(255, 255, 255, 0.16);
       color: #ddd;
       border-radius: 4px;
       padding: 2px 8px;
       font-size: 12px;
+      line-height: 1.3;
       cursor: pointer;
     }
-    .bng-earth-addons-minbtn:hover {
+    .bng-earth-addons-hdrbtn:hover {
       background: rgba(255, 102, 0, 0.25);
       border-color: #ff6600;
+      color: #fff;
+    }
+    .bng-earth-addons-hdrbtn.close:hover {
+      background: rgba(220, 50, 50, 0.8);
+      border-color: #ff5555;
       color: #fff;
     }
     .bng-earth-addons-row {
@@ -208,66 +229,60 @@ function injectStyles() {
       color: #ff9944;
       text-align: center;
       margin-top: 6px;
+      min-height: 15px;
     }
   `
-  document.head.appendChild(style)
 }
 
-function syncFromLua() {
+function setNote(text, clearMs = 2500) {
+  const st = getState()
+  st.note = text
+  updateDOM()
+  if (st.noteTimer) clearTimeout(st.noteTimer)
+  if (text && clearMs > 0) {
+    st.noteTimer = setTimeout(() => {
+      st.note = ""
+      updateDOM()
+    }, clearMs)
+  }
+}
+
+export function syncFromLua() {
   engineLua("beamngEarth_settings and beamngEarth_settings.getAll() or nil", res => {
     if (!res) return
-    state.addonProvence = res.addonProvence !== false
-    state.sourceIgnRpg = res.sourceIgnRpg !== false
-    state.sourceIgnOrtho = res.sourceIgnOrtho !== false
-    state.sourceProvenceBiomes = res.sourceProvenceBiomes !== false
-    state.effortProfile = res.effortProfile || "balanced"
-    render()
+    const st = getState()
+    st.addonProvence = res.addonProvence !== false
+    st.sourceIgnRpg = res.sourceIgnRpg !== false
+    st.sourceIgnOrtho = res.sourceIgnOrtho !== false
+    st.sourceProvenceBiomes = res.sourceProvenceBiomes !== false
+    st.effortProfile = res.effortProfile || "balanced"
+    updateDOM()
   })
 }
 
 function toggleBool(key) {
-  state[key] = !state[key]
-  state.note = "Applying & refreshing world..."
-  render()
-  engineLua(`beamngEarth_settings and beamngEarth_settings.uiSet(${JSON.stringify(key)}, ${state[key] ? "true" : "false"}) or nil`, () => {
-    state.note = "Updated"
-    render()
-    setTimeout(() => { if (state.note === "Updated") { state.note = ""; render() } }, 2500)
+  const st = getState()
+  st[key] = !st[key]
+  setNote("Applying & refreshing world...", 0)
+  engineLua(`beamngEarth_settings and beamngEarth_settings.uiSet(${JSON.stringify(key)}, ${st[key] ? "true" : "false"}) or nil`, () => {
+    setNote("Updated", 2000)
   })
 }
 
 function setEffort(id) {
-  state.effortProfile = id
-  state.note = `Effort profile: ${id}...`
-  render()
+  const st = getState()
+  st.effortProfile = id
+  setNote(`Effort profile: ${id}...`, 0)
   engineLua(`beamngEarth_settings and beamngEarth_settings.uiSet("effortProfile", ${JSON.stringify(id)}) or nil`, () => {
-    state.note = `Effort: ${id}`
-    render()
-    setTimeout(() => { if (state.note.startsWith("Effort:")) { state.note = ""; render() } }, 2500)
+    setNote(`Effort: ${id}`, 2000)
   })
 }
 
 function triggerRefresh() {
-  state.note = "Refreshing nearby vegetation & buildings..."
-  render()
+  setNote("Refreshing nearby vegetation & buildings...", 0)
   engineLua("beamngEarth_settings and beamngEarth_settings.uiRefreshWorld() or nil", () => {
-    state.note = "World refresh triggered"
-    render()
-    setTimeout(() => { if (state.note === "World refresh triggered") { state.note = ""; render() } }, 3000)
+    setNote("World refresh triggered", 2500)
   })
-}
-
-function ensureRoot() {
-  injectStyles()
-  let root = document.getElementById(ROOT_ID)
-  if (!root) {
-    root = document.createElement("div")
-    root.id = ROOT_ID
-    document.body.appendChild(root)
-  }
-  root.style.left = `${state.posX}px`
-  root.style.top = `${state.posY}px`
-  return root
 }
 
 function attachDrag(headerEl, rootEl) {
@@ -275,17 +290,18 @@ function attachDrag(headerEl, rootEl) {
   let startX = 0, startY = 0, origX = 0, origY = 0
   headerEl.addEventListener("mousedown", e => {
     if (e.target.tagName === "BUTTON") return
+    const st = getState()
     dragging = true
     startX = e.clientX
     startY = e.clientY
-    origX = state.posX
-    origY = state.posY
+    origX = st.posX
+    origY = st.posY
     const onMove = ev => {
       if (!dragging) return
-      state.posX = Math.max(8, Math.min(window.innerWidth - 370, origX + (ev.clientX - startX)))
-      state.posY = Math.max(8, Math.min(window.innerHeight - 120, origY + (ev.clientY - startY)))
-      rootEl.style.left = `${state.posX}px`
-      rootEl.style.top = `${state.posY}px`
+      st.posX = Math.max(8, Math.min(window.innerWidth - 370, origX + (ev.clientX - startX)))
+      st.posY = Math.max(8, Math.min(window.innerHeight - 80, origY + (ev.clientY - startY)))
+      rootEl.style.left = `${st.posX}px`
+      rootEl.style.top = `${st.posY}px`
     }
     const onUp = () => {
       dragging = false
@@ -297,108 +313,171 @@ function attachDrag(headerEl, rootEl) {
   })
 }
 
-export function render() {
-  const root = ensureRoot()
-  if (!state.open) {
-    root.innerHTML = `
-      <div class="bng-earth-addons-pill" id="bng-earth-addons-expand">
-        <span class="bng-earth-addons-slash"></span>
-        <span>Generation Addons (${state.addonProvence ? "ON" : "OFF"})</span>
-      </div>
-    `
-    const btn = root.querySelector("#bng-earth-addons-expand")
-    if (btn) btn.addEventListener("click", () => { state.open = true; syncFromLua(); render() })
-    return
-  }
-
-  const subRows = state.addonProvence ? `
-    <div class="bng-earth-addons-row sub" data-key="sourceIgnRpg">
-      <span>- IGN BD TOPO & RPG Parcels</span>
-      <div class="bng-earth-switch ${state.sourceIgnRpg ? "on" : ""}"></div>
-    </div>
-    <div class="bng-earth-addons-row sub" data-key="sourceIgnOrtho">
-      <span>- IGN 20 cm Orthophoto Roof Tinting</span>
-      <div class="bng-earth-switch ${state.sourceIgnOrtho ? "on" : ""}"></div>
-    </div>
-    <div class="bng-earth-addons-row sub" data-key="sourceProvenceBiomes">
-      <span>- Provence Crops & Biomes</span>
-      <div class="bng-earth-switch ${state.sourceProvenceBiomes ? "on" : ""}"></div>
-    </div>
-  ` : ""
+function buildDOMOnce() {
+  injectStyles()
+  let root = document.getElementById(ROOT_ID)
+  if (root) root.remove()
+  const st = getState()
+  root = document.createElement("div")
+  root.id = ROOT_ID
+  root.style.left = `${st.posX}px`
+  root.style.top = `${st.posY}px`
 
   const effortBtns = EFFORT_PROFILES.map(p => `
-    <button class="bng-earth-effort-btn ${state.effortProfile === p.id ? "active" : ""}" data-effort="${p.id}">${p.label}</button>
+    <button class="bng-earth-effort-btn" data-effort="${p.id}">${p.label}</button>
   `).join("")
 
   root.innerHTML = `
-    <div class="bng-earth-addons-card">
+    <div class="bng-earth-addons-pill" id="bng-earth-addons-pill-view" style="display:none;">
+      <span class="bng-earth-addons-slash"></span>
+      <span id="bng-earth-addons-pill-text">Generation Addons (ON)</span>
+      <button class="bng-earth-addons-hdrbtn close" id="bng-earth-addons-pill-close" title="Close">X</button>
+    </div>
+    <div class="bng-earth-addons-card" id="bng-earth-addons-card-view">
       <div class="bng-earth-addons-header" id="bng-earth-addons-drag">
         <div class="bng-earth-addons-title">
           <span class="bng-earth-addons-slash"></span>
           <span>Generation Addons</span>
         </div>
-        <button class="bng-earth-addons-minbtn" id="bng-earth-addons-min" title="Minimize to pill">Hide</button>
+        <div class="bng-earth-addons-hdrbtns">
+          <button class="bng-earth-addons-hdrbtn" id="bng-earth-addons-min" title="Minimize to pill">Min</button>
+          <button class="bng-earth-addons-hdrbtn close" id="bng-earth-addons-close" title="Close window">X</button>
+        </div>
       </div>
       <div class="bng-earth-addons-row" data-key="addonProvence">
         <span>France & Provence Ground Truth Pack</span>
-        <div class="bng-earth-switch ${state.addonProvence ? "on" : ""}"></div>
+        <div class="bng-earth-switch" data-switch="addonProvence"></div>
       </div>
-      ${subRows}
+      <div id="bng-earth-addons-subrows">
+        <div class="bng-earth-addons-row sub" data-key="sourceIgnRpg">
+          <span>- IGN BD TOPO & RPG Parcels</span>
+          <div class="bng-earth-switch" data-switch="sourceIgnRpg"></div>
+        </div>
+        <div class="bng-earth-addons-row sub" data-key="sourceIgnOrtho">
+          <span>- IGN 20 cm Orthophoto Roof Tinting</span>
+          <div class="bng-earth-switch" data-switch="sourceIgnOrtho"></div>
+        </div>
+        <div class="bng-earth-addons-row sub" data-key="sourceProvenceBiomes">
+          <span>- Provence Crops & Biomes</span>
+          <div class="bng-earth-switch" data-switch="sourceProvenceBiomes"></div>
+        </div>
+      </div>
       <div class="bng-earth-effort-box">
         <div class="bng-earth-effort-label">Ground-Truth Effort Profile (Layer B)</div>
         <div class="bng-earth-effort-pills">${effortBtns}</div>
       </div>
       <button class="bng-earth-refresh-btn" id="bng-earth-addons-refresh">Refresh World Around You</button>
-      ${state.note ? `<div class="bng-earth-addons-note">${state.note}</div>` : ""}
+      <div class="bng-earth-addons-note" id="bng-earth-addons-note"></div>
     </div>
   `
+  document.body.appendChild(root)
 
-  const header = root.querySelector("#bng-earth-addons-drag")
-  if (header) attachDrag(header, root)
+  attachDrag(root.querySelector("#bng-earth-addons-drag"), root)
 
-  const minBtn = root.querySelector("#bng-earth-addons-min")
-  if (minBtn) minBtn.addEventListener("click", () => { state.open = false; render() })
+  root.querySelector("#bng-earth-addons-min").addEventListener("click", e => {
+    e.stopPropagation()
+    st.minimized = true
+    updateDOM()
+  })
+  root.querySelector("#bng-earth-addons-close").addEventListener("click", e => {
+    e.stopPropagation()
+    st.visible = false
+    updateDOM()
+  })
+  root.querySelector("#bng-earth-addons-pill-view").addEventListener("click", e => {
+    if (e.target.id === "bng-earth-addons-pill-close") return
+    st.minimized = false
+    syncFromLua()
+    updateDOM()
+  })
+  root.querySelector("#bng-earth-addons-pill-close").addEventListener("click", e => {
+    e.stopPropagation()
+    st.visible = false
+    updateDOM()
+  })
 
   root.querySelectorAll(".bng-earth-addons-row").forEach(row => {
     row.addEventListener("click", () => toggleBool(row.getAttribute("data-key")))
   })
-
   root.querySelectorAll(".bng-earth-effort-btn").forEach(btn => {
     btn.addEventListener("click", () => setEffort(btn.getAttribute("data-effort")))
   })
+  root.querySelector("#bng-earth-addons-refresh").addEventListener("click", triggerRefresh)
 
-  const refBtn = root.querySelector("#bng-earth-addons-refresh")
-  if (refBtn) refBtn.addEventListener("click", triggerRefresh)
+  updateDOM()
+}
+
+export function updateDOM() {
+  const root = document.getElementById(ROOT_ID)
+  if (!root) return
+  const st = getState()
+  if (!st.visible) {
+    root.style.display = "none"
+    return
+  }
+  root.style.display = "block"
+  const pill = root.querySelector("#bng-earth-addons-pill-view")
+  const card = root.querySelector("#bng-earth-addons-card-view")
+  if (st.minimized) {
+    pill.style.display = "inline-flex"
+    card.style.display = "none"
+    const pillText = root.querySelector("#bng-earth-addons-pill-text")
+    if (pillText) pillText.textContent = `Generation Addons (${st.addonProvence ? "ON" : "OFF"})`
+    return
+  }
+  pill.style.display = "none"
+  card.style.display = "block"
+
+  ;["addonProvence", "sourceIgnRpg", "sourceIgnOrtho", "sourceProvenceBiomes"].forEach(k => {
+    const sw = root.querySelector(`[data-switch="${k}"]`)
+    if (sw) sw.classList.toggle("on", !!st[k])
+  })
+  const sub = root.querySelector("#bng-earth-addons-subrows")
+  if (sub) sub.style.display = st.addonProvence ? "block" : "none"
+
+  root.querySelectorAll(".bng-earth-effort-btn").forEach(btn => {
+    btn.classList.toggle("active", btn.getAttribute("data-effort") === st.effortProfile)
+  })
+  const noteEl = root.querySelector("#bng-earth-addons-note")
+  if (noteEl) {
+    noteEl.textContent = st.note || ""
+    noteEl.style.display = st.note ? "block" : "none"
+  }
 }
 
 export function open() {
-  state.open = true
+  const st = getState()
+  st.visible = true
+  st.minimized = false
+  if (!document.getElementById(ROOT_ID)) buildDOMOnce()
   syncFromLua()
-  render()
+  updateDOM()
 }
 
 export function close() {
-  state.open = false
-  render()
+  const st = getState()
+  st.visible = false
+  updateDOM()
 }
 
 export function toggle() {
-  state.open = !state.open
-  if (state.open) syncFromLua()
-  render()
+  const st = getState()
+  st.visible = !st.visible
+  if (st.visible) {
+    st.minimized = false
+    syncFromLua()
+  }
+  updateDOM()
 }
 
 export function start() {
-  window.bngEarthAddonsWindow = { open, close, toggle, render, syncFromLua }
+  stop()
+  window.bngEarthAddonsWindow = { open, close, toggle, updateDOM, syncFromLua, stop }
+  buildDOMOnce()
   syncFromLua()
-  render()
-  if (pollId) clearInterval(pollId)
-  pollId = setInterval(syncFromLua, 3000)
 }
 
 export function stop() {
-  if (pollId) clearInterval(pollId)
-  pollId = null
   const root = document.getElementById(ROOT_ID)
   if (root) root.remove()
 }

@@ -1151,11 +1151,12 @@ function M.uiRefreshWorld()
   return { ok = true }
 end
 
--- Opens the standalone floating ImGui "BeamNG.Earth - Generation Addons" window and returns to gameplay.
+-- Opens the standalone floating CEF "Generation Addons" window and returns to gameplay.
 function M.uiOpenAddonsWindow()
-  ui.addonsVisible = true
   M.navigate('play')
-  return { ok = true, addonsVisible = ui.addonsVisible }
+  local gh = rawget(_G, 'guihooks')
+  if gh and gh.trigger then gh.trigger('BeamNGEarthAddonsWindow', { open = true }) end
+  return { ok = true }
 end
 
 -- Automation (tools/benchmark.py, autodrive_perf.py: mcp.quiet_ui) keeps the page away for this game session only; the
@@ -1199,9 +1200,6 @@ local function releaseMap(why)
 end
 
 function M.onUpdate()
-  if ui.addonsVisible and ui.drawAddonsWindow then
-    pcall(ui.drawAddonsWindow)
-  end
   if mapOpen then keepMapMenuActions() end
   if mapCtl and mapPolledAt and os.clock() - mapPolledAt > M.MAP_LOST_S then
     releaseMap(string.format('the map has not asked for %.0f s', os.clock() - mapPolledAt))
