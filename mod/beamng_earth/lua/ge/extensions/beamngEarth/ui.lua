@@ -72,6 +72,7 @@ local function drawAddonsWindow()
   if not im then return end
   if not addonsOpenPtr then addonsOpenPtr = im.BoolPtr(true) end
   addonsOpenPtr[0] = true
+  if im.SetNextWindowPos then im.SetNextWindowPos(im.ImVec2(80, 120), im.Cond_FirstUseEver) end
   im.SetNextWindowSize(im.ImVec2(430, 0), im.Cond_FirstUseEver)
   if im.Begin('BeamNG.Earth - Generation Addons##addons', addonsOpenPtr, im.WindowFlags_AlwaysAutoResize) then
     local st = rawget(_G, 'beamngEarth_settings')
@@ -118,11 +119,11 @@ local function drawAddonsWindow()
   im.End()
   if not addonsOpenPtr[0] then M.addonsVisible = false end
 end
+M.drawAddonsWindow = drawAddonsWindow
 
 -- view: plain table of values to show; actions.teleport(lat, lon) is called on the button,
 -- actions.setRebaseDistance(m) when the rebase slider is released.
 function M.draw(view, actions)
-  drawAddonsWindow()
   if not M.visible then return end
   im = im or ui_imgui
   if not im then return end

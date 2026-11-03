@@ -60,9 +60,9 @@ export const settingsSchema = [
     items: [
       { id: "addonsStatus", type: "info", name: "Active generation addons", desc: "Shows which native BeamNG.Earth Ground Truth addons are currently discovered, approved, and active in the world server." },
       { id: "addonProvence", type: "bool", default: true, name: "France & Provence Ground Truth Pack", desc: "Enables the native Provence / Occitanie Ground Truth addon (beamng_earth_provence): IGN BD TOPO 3D building footprints, IGN RPG agricultural parcels, 20 cm aerial orthophoto roof tinting, and Mediterranean crops (vineyards, lavender, olive groves, cypress windbreaks)." },
-      { id: "sourceIgnRpg", type: "bool", default: true, name: "  ↳ IGN BD TOPO & RPG Parcels", desc: "Fetches official French IGN Géoplateforme WFS building heights/materials, RPG crop parcels, and linear hedgerows.", showIf: c => c.addonProvence !== false },
-      { id: "sourceIgnOrtho", type: "bool", default: true, name: "  ↳ IGN 20 cm Orthophoto Roof Tinting", desc: "Samples 20 cm aerial orthophotos to tint Provence building roofs with real terracotta and limestone hues.", showIf: c => c.addonProvence !== false },
-      { id: "sourceProvenceBiomes", type: "bool", default: true, name: "  ↳ Provence Crops & Mediterranean Biomes", desc: "Row-oriented vineyards, Sault lavender fields, olive orchards, and Mistral cypress windbreaks.", showIf: c => c.addonProvence !== false },
+      { id: "sourceIgnRpg", type: "bool", default: true, name: "- IGN BD TOPO & RPG Parcels", desc: "Fetches official French IGN Geoplateforme WFS building heights/materials, RPG crop parcels, and linear hedgerows.", showIf: c => c.addonProvence !== false },
+      { id: "sourceIgnOrtho", type: "bool", default: true, name: "- IGN 20 cm Orthophoto Roof Tinting", desc: "Samples 20 cm aerial orthophotos to tint Provence building roofs with real terracotta and limestone hues.", showIf: c => c.addonProvence !== false },
+      { id: "sourceProvenceBiomes", type: "bool", default: true, name: "- Provence Crops & Mediterranean Biomes", desc: "Row-oriented vineyards, Sault lavender fields, olive orchards, and Mistral cypress windbreaks.", showIf: c => c.addonProvence !== false },
       { id: "effortProfile", type: "select", default: "balanced", name: "Ground-Truth Effort Profile", desc: "Layer B Effort Governor: controls how densely Ground Truth crops, trees, and aerial roof samples are synthesized without changing what exists in the world.",
         options: [ { label: "Low (Steam Deck / APU)", value: "low" }, { label: "Balanced (60 FPS Default)", value: "balanced" }, { label: "High", value: "high" }, { label: "Ultra Ground-Truth", value: "ultra" }, { label: "Auto-FPS Governor", value: "auto_fps" } ] },
       { id: "refreshWorld", type: "worldRefresh", virtual: true, label: "Refresh now", name: "Refresh world around you", desc: "Clears and re-streams nearby vegetation, crops, buildings, and roads using your active Ground Truth addons and Effort profile." },
@@ -414,6 +414,9 @@ export function triggerWorldRefresh() {
 }
 
 export function openAddonsFloatingWindow() {
+  if (window.bngEarthAddonsWindow && window.bngEarthAddonsWindow.open) {
+    window.bngEarthAddonsWindow.open()
+  }
   engineLua("beamngEarth_settings and beamngEarth_settings.uiOpenAddonsWindow() or nil")
 }
 

@@ -23,6 +23,7 @@
 -- UI and the Lua extensions does not matter). Without the page the window stays as before.
 
 local M = {}
+M.dependencies = { 'ui_imgui' }
 
 local rebase = require('beamngEarth/rebase')
 local ui = require('beamngEarth/ui')
@@ -1198,6 +1199,9 @@ local function releaseMap(why)
 end
 
 function M.onUpdate()
+  if ui.addonsVisible and ui.drawAddonsWindow then
+    pcall(ui.drawAddonsWindow)
+  end
   if mapOpen then keepMapMenuActions() end
   if mapCtl and mapPolledAt and os.clock() - mapPolledAt > M.MAP_LOST_S then
     releaseMap(string.format('the map has not asked for %.0f s', os.clock() - mapPolledAt))
