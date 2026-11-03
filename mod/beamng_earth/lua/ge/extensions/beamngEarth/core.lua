@@ -1220,9 +1220,17 @@ local function onMessage(msg)
   elseif t == 'addons_status' or t == 'addons_sync' then
     local a = M.addonsModule and M.addonsModule()
     if a and a.applySyncResponse then a.applySyncResponse(msg) end
+    if msg.cache_invalidated == true then
+      trees.clear()
+      if roads.incrementBldGen then roads.incrementBldGen() end
+    end
   elseif t == 'effort_status' then
     if type(msg.profile) == 'string' then M._effortProfile = msg.profile end
     M._effortBudget = msg
+    if msg.cache_invalidated == true then
+      trees.clear()
+      if roads.incrementBldGen then roads.incrementBldGen() end
+    end
   end
 end
 

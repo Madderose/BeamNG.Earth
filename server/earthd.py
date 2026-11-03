@@ -5081,6 +5081,10 @@ class Connection:
                 "/api/addons/sync" if kind == "addons_sync" else "/api/addons",
                 msg,
             )
+            if payload.get("cache_invalidated"):
+                self.veg_sent.clear()
+                self.roads.close()
+                self.roads = road_tracker(self)
             self.send({"type": "addons_status", **payload})
         elif kind in ("effort_set", "effort_get", "effort"):
             _code, payload = self.s.handle_api_request(
@@ -5088,6 +5092,10 @@ class Connection:
                 "/api/effort",
                 msg,
             )
+            if payload.get("cache_invalidated"):
+                self.veg_sent.clear()
+                self.roads.close()
+                self.roads = road_tracker(self)
             self.send({"type": "effort_status", **payload})
         else:
             log.debug("ignoring message type %r", kind)

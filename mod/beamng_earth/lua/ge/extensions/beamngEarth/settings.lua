@@ -83,6 +83,13 @@ M.SCHEMA = {
   -- exit, overhead and merge signs and Interstate mile markers along highways (roads.lua sign tiles; server
   -- signstream.py, from cody196's PR #363); needs Roads
   highwaySigns = { kind = 'bool', default = true, label = 'Highway signs' },
+  -- Native Addon Registry (Layer A Ground Truth) & Effort Controller (Layer B) controls
+  addonProvence = { kind = 'bool', default = true, label = 'France & Provence Ground Truth Pack' },
+  sourceIgnRpg = { kind = 'bool', default = true, label = 'IGN BD TOPO & RPG Parcels' },
+  sourceIgnOrtho = { kind = 'bool', default = true, label = 'IGN 20 cm Orthophoto Roof Tinting' },
+  sourceProvenceBiomes = { kind = 'bool', default = true, label = 'Provence Crops & Mediterranean Biomes' },
+  effortProfile = { kind = 'enum', default = 'balanced',
+    values = { 'low', 'balanced', 'high', 'ultra', 'auto_fps' }, label = 'Ground-Truth Effort Profile' },
   -- Earth imagery on supported vehicle dashboard screens (dashboard.lua)
   dashboardSatellite = { kind = 'bool', default = true, label = 'Satellite on dashboard screens' },
   hudVisible = { kind = 'bool', default = false, label = 'Status HUD at level start' },
@@ -125,7 +132,8 @@ M.SCHEMA = {
 }
 M.ORDER = { 'quality', 'framePacing', 'terrainDetail', 'groundPhoto', 'trees', 'treeDistance', 'buildingDistance', 'objectDetail',
   'grassDistance', 'nightLights', 'rebaseDistance', 'viewDistanceMode', 'viewDistanceKm', 'hazeStrength', 'skyMode', 'clouds',
-  'weatherMode', 'realGravity', 'groundCover', 'groundCoverDensity', 'rocks', 'roads', 'highwaySigns', 'dashboardSatellite',
+  'weatherMode', 'realGravity', 'groundCover', 'groundCoverDensity', 'rocks', 'roads', 'highwaySigns',
+  'addonProvence', 'sourceIgnRpg', 'sourceIgnOrtho', 'sourceProvenceBiomes', 'effortProfile', 'dashboardSatellite',
   'hudVisible', 'statusBar',
   'placeNamesOnline', 'creditsVisible', 'beammpOnLaunch',
   'creditsCorner', 'creditsSize', 'cacheCapGb', 'routeDownload', 'serverCores', 'serverPriority', 'teleportPriority', 'devOutlineKm',
@@ -463,6 +471,45 @@ M.APPLY = {
   highwaySigns = function(v)
     local core = ext('beamngEarth_core')
     if core and core.setHighwaySigns then core.setHighwaySigns(v) else require('beamngEarth/roads').setSignsEnabled(v) end
+  end,
+  addonProvence = function()
+    local core = ext('beamngEarth_core')
+    local a = core and core.addonsModule and core.addonsModule()
+    if a then
+      a.setAddonEnabled('provence', values.addonProvence ~= false)
+      a.setSourceEnabled('provence', 'ign_rpg_parcels', values.sourceIgnRpg ~= false)
+      a.setSourceEnabled('provence', 'ign_orthophoto_20cm', values.sourceIgnOrtho ~= false)
+      a.setSourceEnabled('provence', 'osm_provence_landuse', values.sourceProvenceBiomes ~= false)
+      if core.syncAddons then core.syncAddons() end
+    end
+  end,
+  sourceIgnRpg = function()
+    local core = ext('beamngEarth_core')
+    local a = core and core.addonsModule and core.addonsModule()
+    if a then
+      a.setSourceEnabled('provence', 'ign_rpg_parcels', values.sourceIgnRpg ~= false)
+      if core.syncAddons then core.syncAddons() end
+    end
+  end,
+  sourceIgnOrtho = function()
+    local core = ext('beamngEarth_core')
+    local a = core and core.addonsModule and core.addonsModule()
+    if a then
+      a.setSourceEnabled('provence', 'ign_orthophoto_20cm', values.sourceIgnOrtho ~= false)
+      if core.syncAddons then core.syncAddons() end
+    end
+  end,
+  sourceProvenceBiomes = function()
+    local core = ext('beamngEarth_core')
+    local a = core and core.addonsModule and core.addonsModule()
+    if a then
+      a.setSourceEnabled('provence', 'osm_provence_landuse', values.sourceProvenceBiomes ~= false)
+      if core.syncAddons then core.syncAddons() end
+    end
+  end,
+  effortProfile = function(v)
+    local core = ext('beamngEarth_core')
+    if core and core.setEffortProfile then core.setEffortProfile(v) end
   end,
   roads = function(v)
     local core = ext('beamngEarth_core')

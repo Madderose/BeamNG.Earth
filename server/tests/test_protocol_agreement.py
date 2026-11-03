@@ -180,6 +180,9 @@ MOD_TO_SERVER = {
     "random_place": {"id": F(int)},
     # the level select's place pictures (placepreview.py; additive): [{key, lat, lon}]
     "place_previews": {"places": F((list, dict))},
+    # Native Addon Registry (addons.lua <-> addons.py) & Layer B Effort Controller (effort.py)
+    "addons_sync": {"addons": F((list, dict), OPT), "user_toggles": F(dict, OPT)},
+    "effort_set": {"profile": F(str, OPT), "telemetry": F(dict, OPT, NULL)},
 }
 CAM = {"x", "y", "z", "fx", "fy", "fz", "fovDeg", "h"}     # h: the screen height px (screen-space LOD)
 TERRAIN = {"cx": F(NUM), "cy": F(NUM), "heightmap": F(str), "size": F(int), "squareSize": F(NUM),
@@ -218,6 +221,12 @@ SERVER_TO_MOD = {
                      "country": F(str, OPT)},   # the status bar's location
     "random_place_result": {"id": F(int), "lat": F(NUM, OPT), "lon": F(NUM, OPT), "name": F(str, OPT)},
     "place_previews_ready": {"keys": F(list)},
+    "addons_status": {"schema_version": F(int, OPT), "approval_policy": F(str, OPT), "engine_version": F(str, OPT),
+                      "earthfast_abi": F(int, OPT), "cache_fingerprint": F(str, OPT), "addons": F(list, OPT),
+                      "active": F(list, OPT), "rejected": F(list, OPT), "warnings": F(list, OPT),
+                      "cache_invalidated": F(bool, OPT), "previous_fingerprint": F(str, OPT)},
+    "effort_status": {"profile": F(str, OPT), "effective_profile": F(str, OPT), "budget": F(dict, OPT),
+                      "governor": F(dict, OPT), "cache_tag": F(str, OPT), "cache_invalidated": F(bool, OPT)},
     "map_tiles_ready": {"tiles": F(list)},  # [z, x, y, ok, layer] each: written to <user>/temp/beamngEarth/maptiles
     "hello": {"protocol": F(int), "format": F(int), "serverVersion": F(str), "appVersion": F(str), "sessionId": F(str),
               "farFormat": F(str), "material": F(str),

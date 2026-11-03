@@ -42,6 +42,12 @@ local function drawCompact(view)
       if im.Button(dev.isActive() and 'Dev tools off' or 'Dev tools') then dev.toggleLast() end
       im.SameLine()
     end
+    local st = rawget(_G, 'beamngEarth_settings')
+    if st and st.get and st.set then
+      local on = st.get('addonProvence') ~= false
+      if im.Button(on and 'Provence: ON' or 'Provence: OFF') then st.set('addonProvence', not on) end
+      im.SameLine()
+    end
     if im.Button('Full window') then M.compact = false end
     im.SameLine()
     text('Settings: pause menu > BeamNG.Earth')
@@ -105,6 +111,12 @@ function M.draw(view, actions)
     if dev then
       im.SameLine()
       if im.Button(dev.isActive() and 'Dev tools off' or 'Dev tools') then dev.toggleLast() end
+    end
+    local st = rawget(_G, 'beamngEarth_settings')
+    if st and st.get and st.set then
+      im.SameLine()
+      local on = st.get('addonProvence') ~= false
+      if im.Button(on and 'Provence Addon: ON' or 'Provence Addon: OFF') then st.set('addonProvence', not on) end
     end
     im.Separator()
     wrapped('Status: ' .. (view.status ~= '' and view.status or '-'))
