@@ -2482,6 +2482,18 @@ end
 
 function M.toggleUI() ui.visible = not ui.visible end
 
+function M.openPage(url)
+  if type(url) ~= 'string' or url == '' then return false end
+  if net.isConnected() then
+    net.send({ type = 'open_page', url = url })
+    return true
+  elseif openWebBrowser then
+    pcall(openWebBrowser, url)
+    return true
+  end
+  return false
+end
+
 -- The session's terrain block size (docs/V1_4_SPEC.md 3.5, M4): 1024 (v1.3.1) or 512, from the
 -- server's hello.blockSize. Sets the lattice, the terrain-follow table, the importMaps layer / flat
 -- maps and the rebase staleness rule together. Returns the size in use and whether `size` was valid.

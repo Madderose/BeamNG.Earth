@@ -1,6 +1,8 @@
 // Standalone floating "Generation Addons" window in the CEF UI layer.
 // Single-instance, in-place DOM updates (never rebuilds innerHTML on a timer, never resets drag position),
-// with Minimize ("Min"), Close ("X"), Refresh World, and integrated 30s Hardware/Addon Benchmark Ticket controls.
+// with Minimize ("Min"), Close ("X"), Refresh World, and dual-mode Hardware/Addon Benchmark controls:
+//   - Mode 1: Free Drive (30s)
+//   - Mode 2: Point-to-Point Route Auto-Drive (selectable from the multi-route BENCH_ROUTES registry)
 
 const ROOT_ID = "bng-earth-addons-floating-root"
 const STYLE_ID = "bng-earth-addons-floating-style"
@@ -13,6 +15,13 @@ const EFFORT_PROFILES = [
   { id: "auto_fps", label: "Auto-FPS" },
 ]
 
+const DEFAULT_ROUTES = [
+  { id: "ventoux_d974", shortName: "Mont Ventoux D974 (Climb)", duration: 45 },
+  { id: "tavel_vineyards", shortName: "Tavel Vineyards -> Village", duration: 45 },
+  { id: "lirac_tavel", shortName: "Lirac Streets -> Vineyards", duration: 45 },
+  { id: "sault_lavender", shortName: "Sault Lavender Fields (D942)", duration: 45 },
+]
+
 function getState() {
   if (!window.__bngEarthAddonsState) {
     window.__bngEarthAddonsState = {
@@ -23,13 +32,18 @@ function getState() {
       sourceIgnOrtho: true,
       sourceProvenceBiomes: true,
       effortProfile: "balanced",
+      benchMode: "free", // "free" | "route"
+      benchRouteId: "ventoux_d974",
+      routes: DEFAULT_ROUTES,
       note: "",
       benchRunning: false,
+      benchStage: "recording",
       benchElapsed: 0,
       benchDuration: 30,
       benchSummary: "",
       benchFolder: "",
       benchHasUrl: false,
+      issueRepo: "Madderose/BeamNG.Earth",
       benchPollTimer: null,
       posX: 28,
       posY: 84,
@@ -39,9 +53,11 @@ function getState() {
   return window.__bngEarthAddonsState
 }
 
+// Always pass a callback function to bngApi.engineLua so BeamNG wraps expressions in `return (...)`
+// instead of executing them as bare Lua statements.
 function engineLua(code, cb) {
   if (window.bngApi && window.bngApi.engineLua) {
-    window.bngApi.engineLua(code, cb)
+    window.bngApi.engineLua(code, typeof cb === "function" ? cb : () => {})
   }
 }
 
@@ -80,7 +96,7 @@ function injectStyles() {
       border-color: #ff6600;
     }
     .bng-earth-addons-card {
-      width: 368px;
+      width: 376px;
       background: rgba(20, 24, 30, 0.94);
       border: 1px solid rgba(255, 255, 255, 0.12);
       border-radius: 8px;
@@ -188,7 +204,7 @@ function injectStyles() {
       background: rgba(38, 44, 54, 0.85);
       border-radius: 5px;
       padding: 8px 10px;
-      margin-bottom: 8px;
+      margin-bottom: 6px;
     }
     .bng-earth-effort-label {
       font-size: 12px;
@@ -215,6 +231,46 @@ function injectStyles() {
       border-color: #ff6600;
       color: #fff;
       font-weight: 700;
+    }
+    .bng-earth-bench-box {
+      background: rgba(32, 38, 48, 0.88);
+      border: 1px solid rgba(88, 166, 255, 0.25);
+      border-radius: 5px;
+      padding: 8px 10px;
+      margin-bottom: 8px;
+    }
+    .bng-earth-bench-modes {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 5px;
+      margin-bottom: 6px;
+    }
+    .bng-earth-mode-btn {
+      background: rgba(20, 24, 30, 0.85);
+      border: 1px solid rgba(255, 255, 255, 0.16);
+      color: #cfd6e0;
+      border-radius: 4px;
+      padding: 4px 6px;
+      font-size: 11.5px;
+      text-align: center;
+      cursor: pointer;
+    }
+    .bng-earth-mode-btn.active {
+      background: rgba(56, 139, 253, 0.35);
+      border-color: #58a6ff;
+      color: #fff;
+      font-weight: 700;
+    }
+    .bng-earth-route-select {
+      width: 100%;
+      background: rgba(16, 20, 26, 0.95);
+      border: 1px solid rgba(88, 166, 255, 0.45);
+      color: #f0f2f5;
+      border-radius: 4px;
+      padding: 5px 8px;
+      font-size: 12px;
+      outline: none;
+      cursor: pointer;
     }
     .bng-earth-actions-grid {
       display: grid;
@@ -253,7 +309,7 @@ function injectStyles() {
       border-color: #79c0ff;
     }
     .bng-earth-bench-btn.running {
-      background: rgba(255, 153, 0, 0.28);
+      background: rgba(220, 120, 20, 0.35);
       border-color: #ffaa00;
       color: #fff;
     }
@@ -266,6 +322,11 @@ function injectStyles() {
       font-size: 11.5px;
       color: #d6e4f5;
     }
+    .bng-earth-bench-repo {
+      font-size: 10.5px;
+      color: #8b9bb0;
+      margin-top: 3px;
+    }
     .bng-earth-bench-result-btns {
       display: flex;
       gap: 6px;
@@ -277,8 +338,9 @@ function injectStyles() {
       border: 1px solid rgba(255, 255, 255, 0.22);
       color: #fff;
       border-radius: 4px;
-      padding: 4px 6px;
-      font-size: 11px;
+      padding: 5px 6px;
+      font-size: 11.5px;
+      font-weight: 600;
       cursor: pointer;
       text-align: center;
     }
@@ -328,34 +390,59 @@ function pollBenchStatus() {
     if (!stRes) return
     const wasRunning = st.benchRunning
     st.benchRunning = !!stRes.benchRunning
+    st.benchStage = stRes.stage || "recording"
     st.benchElapsed = stRes.elapsed || 0
     st.benchDuration = stRes.duration || 30
     if (stRes.lastSummary) st.benchSummary = stRes.lastSummary
     if (stRes.lastFolder) st.benchFolder = stRes.lastFolder
+    if (stRes.issueRepo) st.issueRepo = stRes.issueRepo
+    if (Array.isArray(stRes.routes) && stRes.routes.length) {
+      st.routes = stRes.routes
+    }
     st.benchHasUrl = !!stRes.lastUrl
     if (wasRunning && !st.benchRunning) {
       if (st.benchPollTimer) {
         clearInterval(st.benchPollTimer)
         st.benchPollTimer = null
       }
-      setNote("30s Benchmark saved to report.json & issue.md!", 4500)
+      setNote("Benchmark saved (report.json & issue.md ready)!", 4500)
     }
     updateDOM()
   })
 }
 
-function startBenchmark() {
+function startOrStopBenchmark() {
   const st = getState()
-  if (st.benchRunning) return
-  engineLua("beamngEarth_report and beamngEarth_report.uiStartBench(30) or nil", res => {
+  if (st.benchRunning) {
+    engineLua("beamngEarth_report and beamngEarth_report.uiStopBench() or nil", res => {
+      if (st.benchPollTimer) {
+        clearInterval(st.benchPollTimer)
+        st.benchPollTimer = null
+      }
+      st.benchRunning = false
+      pollBenchStatus()
+      setNote(res && res.cancelled ? "Benchmark cancelled" : "Benchmark stopped & saved", 3000)
+    })
+    return
+  }
+  const modeArg = st.benchMode === "route"
+    ? `"route", ${JSON.stringify(st.benchRouteId || "ventoux_d974")}`
+    : `"free", 30`
+  engineLua(`beamngEarth_report and beamngEarth_report.uiStartBench(${modeArg}) or nil`, res => {
     if (!res || !res.ok) {
       setNote((res && res.error) || "Load BeamNG.Earth level first", 3500)
       return
     }
     st.benchRunning = true
+    st.benchStage = st.benchMode === "route" ? "staging" : "recording"
     st.benchElapsed = 0
-    st.benchDuration = res.duration || 30
-    setNote("Recording 30s benchmark (keep driving)...", 0)
+    st.benchDuration = st.benchMode === "route" ? (res.stageDur || 8) : (res.duration || 30)
+    setNote(
+      st.benchMode === "route"
+        ? `Teleporting & staging route: ${res.route || st.benchRouteId}...`
+        : "Recording 30s free-drive benchmark (keep driving)...",
+      0
+    )
     if (st.benchPollTimer) clearInterval(st.benchPollTimer)
     st.benchPollTimer = setInterval(pollBenchStatus, 500)
     updateDOM()
@@ -363,11 +450,33 @@ function startBenchmark() {
 }
 
 function openBenchFolder() {
-  engineLua("beamngEarth_report and beamngEarth_report.openLastFolder() or nil")
+  engineLua("beamngEarth_report and beamngEarth_report.openLastFolder() or nil", res => {
+    if (res && res.ok) {
+      setNote("Opened report folder in file explorer", 3000)
+    } else {
+      setNote((res && res.error) || "Could not open folder", 3000)
+    }
+  })
+}
+
+function copyBenchReport() {
+  engineLua("beamngEarth_report and beamngEarth_report.copyLastReport() or nil", res => {
+    if (res && res.ok) {
+      setNote("Copied issue.md report to clipboard", 3000)
+    } else {
+      setNote((res && res.error) || "Could not copy report", 3000)
+    }
+  })
 }
 
 function openBenchIssue() {
-  engineLua("beamngEarth_report and beamngEarth_report.openLastIssueUrl() or nil")
+  engineLua("beamngEarth_report and beamngEarth_report.openLastIssueUrl() or nil", res => {
+    if (res && res.ok) {
+      setNote(`Opened GitHub (${res.repo || "ticket"}) in browser`, 4000)
+    } else {
+      setNote((res && res.error) || "Could not open GitHub ticket", 3000)
+    }
+  })
 }
 
 function toggleBool(key) {
@@ -388,6 +497,12 @@ function setEffort(id) {
   })
 }
 
+function setBenchMode(mode) {
+  const st = getState()
+  st.benchMode = mode
+  updateDOM()
+}
+
 function triggerRefresh() {
   setNote("Refreshing nearby vegetation & buildings...", 0)
   engineLua("beamngEarth_settings and beamngEarth_settings.uiRefreshWorld() or nil", () => {
@@ -399,7 +514,7 @@ function attachDrag(headerEl, rootEl) {
   let dragging = false
   let startX = 0, startY = 0, origX = 0, origY = 0
   headerEl.addEventListener("mousedown", e => {
-    if (e.target.tagName === "BUTTON") return
+    if (e.target.tagName === "BUTTON" || e.target.tagName === "SELECT") return
     const st = getState()
     dragging = true
     startX = e.clientX
@@ -408,7 +523,7 @@ function attachDrag(headerEl, rootEl) {
     origY = st.posY
     const onMove = ev => {
       if (!dragging) return
-      st.posX = Math.max(8, Math.min(window.innerWidth - 375, origX + (ev.clientX - startX)))
+      st.posX = Math.max(8, Math.min(window.innerWidth - 385, origX + (ev.clientX - startX)))
       st.posY = Math.max(8, Math.min(window.innerHeight - 80, origY + (ev.clientY - startY)))
       rootEl.style.left = `${st.posX}px`
       rootEl.style.top = `${st.posY}px`
@@ -435,6 +550,10 @@ function buildDOMOnce() {
 
   const effortBtns = EFFORT_PROFILES.map(p => `
     <button class="bng-earth-effort-btn" data-effort="${p.id}">${p.label}</button>
+  `).join("")
+
+  const routeOptions = (st.routes || DEFAULT_ROUTES).map(r => `
+    <option value="${r.id}">${r.shortName || r.name}</option>
   `).join("")
 
   root.innerHTML = `
@@ -476,14 +595,26 @@ function buildDOMOnce() {
         <div class="bng-earth-effort-label">Ground-Truth Effort Profile (Layer B)</div>
         <div class="bng-earth-effort-pills">${effortBtns}</div>
       </div>
+      <div class="bng-earth-bench-box">
+        <div class="bng-earth-effort-label">Performance Benchmark Mode</div>
+        <div class="bng-earth-bench-modes">
+          <button class="bng-earth-mode-btn" data-mode="free">Free Drive (30s)</button>
+          <button class="bng-earth-mode-btn" data-mode="route">Route A -> B (Auto)</button>
+        </div>
+        <div id="bng-earth-route-row" style="display:none;">
+          <select class="bng-earth-route-select" id="bng-earth-route-select">${routeOptions}</select>
+        </div>
+      </div>
       <div class="bng-earth-actions-grid">
         <button class="bng-earth-refresh-btn" id="bng-earth-addons-refresh">Refresh World</button>
         <button class="bng-earth-bench-btn" id="bng-earth-addons-bench">Benchmark (30s)</button>
       </div>
       <div class="bng-earth-bench-result" id="bng-earth-bench-result" style="display:none;">
         <div id="bng-earth-bench-summary"></div>
+        <div class="bng-earth-bench-repo" id="bng-earth-bench-repo"></div>
         <div class="bng-earth-bench-result-btns">
           <button class="bng-earth-bench-subbtn" id="bng-earth-bench-folder">Open Folder</button>
+          <button class="bng-earth-bench-subbtn" id="bng-earth-bench-copy">Copy Report</button>
           <button class="bng-earth-bench-subbtn" id="bng-earth-bench-issue">Post GitHub Ticket</button>
         </div>
       </div>
@@ -522,9 +653,20 @@ function buildDOMOnce() {
   root.querySelectorAll(".bng-earth-effort-btn").forEach(btn => {
     btn.addEventListener("click", () => setEffort(btn.getAttribute("data-effort")))
   })
+  root.querySelectorAll(".bng-earth-mode-btn").forEach(btn => {
+    btn.addEventListener("click", () => setBenchMode(btn.getAttribute("data-mode")))
+  })
+  const routeSelect = root.querySelector("#bng-earth-route-select")
+  if (routeSelect) {
+    routeSelect.value = st.benchRouteId
+    routeSelect.addEventListener("change", e => {
+      st.benchRouteId = e.target.value
+    })
+  }
   root.querySelector("#bng-earth-addons-refresh").addEventListener("click", triggerRefresh)
-  root.querySelector("#bng-earth-addons-bench").addEventListener("click", startBenchmark)
+  root.querySelector("#bng-earth-addons-bench").addEventListener("click", startOrStopBenchmark)
   root.querySelector("#bng-earth-bench-folder").addEventListener("click", openBenchFolder)
+  root.querySelector("#bng-earth-bench-copy").addEventListener("click", copyBenchReport)
   root.querySelector("#bng-earth-bench-issue").addEventListener("click", openBenchIssue)
 
   updateDOM()
@@ -561,19 +703,38 @@ export function updateDOM() {
   root.querySelectorAll(".bng-earth-effort-btn").forEach(btn => {
     btn.classList.toggle("active", btn.getAttribute("data-effort") === st.effortProfile)
   })
+  root.querySelectorAll(".bng-earth-mode-btn").forEach(btn => {
+    btn.classList.toggle("active", btn.getAttribute("data-mode") === st.benchMode)
+  })
+  const routeRow = root.querySelector("#bng-earth-route-row")
+  if (routeRow) {
+    routeRow.style.display = st.benchMode === "route" ? "block" : "none"
+  }
+  const routeSelect = root.querySelector("#bng-earth-route-select")
+  if (routeSelect && routeSelect.value !== st.benchRouteId) {
+    routeSelect.value = st.benchRouteId
+  }
+
   const benchBtn = root.querySelector("#bng-earth-addons-bench")
   if (benchBtn) {
     benchBtn.classList.toggle("running", !!st.benchRunning)
-    benchBtn.textContent = st.benchRunning
-      ? `Recording ${st.benchElapsed}/${st.benchDuration}s`
-      : "Benchmark (30s)"
+    if (st.benchRunning) {
+      const prefix = st.benchStage === "staging" ? "Staging" : "Stop"
+      benchBtn.textContent = `${prefix} (${st.benchElapsed}/${st.benchDuration}s)`
+    } else {
+      benchBtn.textContent = st.benchMode === "route" ? "Start Route Bench" : "Benchmark (30s)"
+    }
   }
   const resBox = root.querySelector("#bng-earth-bench-result")
   const resSum = root.querySelector("#bng-earth-bench-summary")
+  const resRepo = root.querySelector("#bng-earth-bench-repo")
   if (resBox && resSum) {
     if (!st.benchRunning && st.benchSummary) {
       resBox.style.display = "block"
       resSum.textContent = `Last Benchmark: ${st.benchSummary}`
+      if (resRepo) {
+        resRepo.textContent = `Ticket target: github.com/${st.issueRepo || "Madderose/BeamNG.Earth"}`
+      }
     } else {
       resBox.style.display = "none"
     }

@@ -4,8 +4,15 @@
 -- kinds, labels and the URL truncation.
 local M = {}
 
+-- Maintainer configuration for GitHub ticket routing:
+--   * M.REPO: baseline repository constant ('TecnaGamer/BeamNG.Earth', verified by mod/tests/test_issuefmt.lua).
+--   * M.ISSUE_REPO: active target repository where in-game reports & benchmark tickets are posted:
+--       - Experimental fork / branch: 'Madderose/BeamNG.Earth'
+--       - Upstream main / dev branch: 'TecnaGamer/BeamNG.Earth'
 M.REPO = 'TecnaGamer/BeamNG.Earth'
+M.ISSUE_REPO = 'Madderose/BeamNG.Earth'
 M.URL_MAX = 7000        -- characters of the whole new-issue URL (GitHub refuses ~8 KB)
+M.WIN_URL_MAX = 1950    -- safe URL limit for Windows ShellExecuteW / os.startfile (< 2083 chars)
 
 -- The kinds the user picks from (order = the window's radio buttons). label = the GitHub label.
 M.KINDS = {
@@ -246,6 +253,14 @@ function M.buildIssue(data, hw)
   local v = data.vehicle
   if type(v) == 'table' and num(v.speedMph) then
     p(string.format('**Vehicle:** %s, %.0f mph, heading %.0f°', str(v.name) or '?', v.speedMph, num(v.headingDeg) or 0))
+  end
+  local rt = data.route
+  if type(rt) == 'table' and str(rt.name) then
+    local kmh = num(rt.speedMps) and (rt.speedMps * 3.6) or 0
+    local dkm = num(rt.distanceDrivenM) and (rt.distanceDrivenM / 1000.0) or 0
+    p(string.format('**Benchmark Route:** %s (target %.0f km/h, driven %.2f km)', str(rt.name), kmh, dkm))
+  elseif str(data.benchMode) == 'free' then
+    p('**Benchmark Mode:** Free Drive (30 s)')
   end
   p('**Time:** ' .. (str(data.time) or '?'))
   local fr = M.framesLine(data.recentFrames)

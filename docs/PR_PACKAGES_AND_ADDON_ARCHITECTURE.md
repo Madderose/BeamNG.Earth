@@ -63,3 +63,47 @@ Previously, toggling a world-generation setting in-game had **no visible effect*
 3. **Instant Client + Server Tracker Reset (`Connection.reset_world_trackers()` & `Refresh World`)**:
    - When `cache_invalidated` is true (or when the user clicks **`Refresh World Around You`**), `core.lua` clears active vegetation and building sessions (`trees.clear()`, `roads.newSession()`, `roads.incrementBldGen()`) while `earthd.py` resets `self.veg`, `self.roads`, `self.signs`, and `self.bldfar`/`bldsky`/`brfar`.
    - On the very next `pose` tick (~100 ms later), the server immediately re-streams all surrounding tiles using the newly selected addons and effort profile—allowing players and modders to compare Ground Truth packs and Effort levels live in 1–4 seconds without moving or restarting!
+
+
+---
+
+## 4. Benchmark & GitHub Telemetry Ticketing Configuration (Fork vs. Upstream Maintainer Guide)
+
+### 4.1 Why BeamNG 0.40 Blocked Direct `openWebBrowser` Calls to GitHub
+In BeamNG.drive 0.40+, the engine's C++ `openWebBrowser(url)` function enforces an internal domain whitelist (`E|platform| unable to open webpage due to domain filter: https://github.com/...`). Calling `openWebBrowser` directly from GE Lua silently fails when trying to open GitHub issue pages.
+
+To make **`Post GitHub Ticket`** work reliably across Windows, Linux, and macOS without ever overwriting the user's clipboard automatically:
+1. [`report.lua`](../mod/beamng_earth/lua/ge/extensions/beamngEarth/report.lua) sends `{ type = 'open_page', url = url }` via [`core.lua`](../mod/beamng_earth/lua/ge/extensions/beamngEarth/core.lua) (`beamngEarth_core.openPage(url)`) to the local Python companion server (`server/earthd.py` -> [`server/updates.py`](../server/updates.py) `open_page(url)`).
+2. On Windows, when the URL exceeds Win32 `ShellExecuteW`'s 2,083-character limit (`len(url) > 2000`), `updates.open_page(url)` resolves the user's default HTTPS browser executable via `winreg` (`HKCU\Software\Microsoft\Windows\Shell\Associations\UrlAssociations\https\UserChoice`) and spawns `[browser_exe, url]` via `CreateProcessW` (which supports up to 32,767 characters, passing the full `7,000`-character GitHub issue URL with **zero truncation**).
+3. A separate **`Copy Report`** button (`beamngEarth_report.copyLastReport()`) is provided alongside **`Open Folder`** and **`Post GitHub Ticket`** so the user's clipboard is only modified when they explicitly click **`Copy Report`**.
+
+### 4.2 Where the GitHub Ticket Goes & How to Configure It per Branch
+To ensure experimental branch benchmarks (`Madderose/BeamNG.Earth`) do not spam upstream (`TecnaGamer/BeamNG.Earth`)—while letting the upstream maintainer route tickets to `TecnaGamer/BeamNG.Earth` on upstream branches—the target repository is configured in **three synchronized places**:
+
+| File | Constant / Variable | Value on `Madderose/BeamNG.Earth` (`dev-experimental-branch`) | Value on `TecnaGamer/BeamNG.Earth` (`upstream/dev` & PR branches) |
+| :--- | :--- | :--- | :--- |
+| [`mod/beamng_earth/lua/ge/extensions/beamngEarth/issuefmt.lua`](../mod/beamng_earth/lua/ge/extensions/beamngEarth/issuefmt.lua) | `M.ISSUE_REPO` | `'Madderose/BeamNG.Earth'` | `'TecnaGamer/BeamNG.Earth'` |
+| [`server/updates.py`](../server/updates.py) | `ISSUE_REPO` | `os.environ.get("BEAMNG_EARTH_ISSUE_REPO", "Madderose/BeamNG.Earth")` | `os.environ.get("BEAMNG_EARTH_ISSUE_REPO", "TecnaGamer/BeamNG.Earth")` |
+| [`tools/reports.py`](../tools/reports.py) | `REPO` | `os.environ.get("BEAMNG_EARTH_ISSUE_REPO", "Madderose/BeamNG.Earth")` | `os.environ.get("BEAMNG_EARTH_ISSUE_REPO", "TecnaGamer/BeamNG.Earth")` |
+
+- **Runtime Override (No Code Edit Needed)**: Setting the environment variable `BEAMNG_EARTH_ISSUE_REPO="Owner/Repo"` before launching `launcher.py` or `tools/reports.py` overrides the target GitHub repository at runtime.
+- **Security Whitelist (`updates.OPEN_PREFIXES`)**: `server/updates.py` only permits opening `https://github.com/<REPO>/` and `https://github.com/<ISSUE_REPO>/` URLs, preserving the security guarantee tested by `server/tests/test_updates.py`.
+
+---
+
+## 5. Dual-Mode In-Game Benchmark & Multi-Route Auto-Drive Registry (`BENCH_ROUTES`)
+
+To support both quick spot-checks and reproducible A/B comparisons across hardware and addon configurations, the **`Generation Addons`** floating window (`earthAddonsWindow.js`) and [`report.lua`](../mod/beamng_earth/lua/ge/extensions/beamngEarth/report.lua) provide **two benchmark modes**:
+
+1. **Mode 1 — `Free Drive (30s)` (`mode = "free"`)**:
+   - Immediately records 30 seconds of frame times (`fps`, `avgMs`, `p50`, `p95`, `p99` / `1% low`, `maxMs`), hitches (`> 50 ms` with coordinates), 1 Hz per-second world telemetry, and hardware/addon settings from wherever the player is currently driving.
+2. **Mode 2 — `Route A -> B (Auto-Drive)` (`mode = "route"`)**:
+   - Selects a reproducible point-to-point route from `M.BENCH_ROUTES` in [`report.lua`](../mod/beamng_earth/lua/ge/extensions/beamngEarth/report.lua):
+     - **`ventoux_d974`**: *Mont Ventoux D974 Climb (Malaucène → Hillside)* (`44.171279, 5.139169` → `44.167000, 5.175000`, `45 s`, target `72 km/h`)
+     - **`tavel_vineyards`**: *Tavel Vineyards → Village (Route de la Commanderie)* (`43.994226, 4.740771` → `44.011161, 4.701794`, `45 s`, target `65 km/h`)
+     - **`lirac_tavel`**: *Lirac Narrow Streets → Tavel Vineyards* (`44.036874, 4.690922` → `44.011161, 4.701794`, `45 s`, target `65 km/h`)
+     - **`sault_lavender`**: *Sault Plateau Lavender Fields (D942)* (`44.081847, 5.365593` → `44.091500, 5.355000`, `45 s`, target `80 km/h`)
+   - **Two-Stage Execution**:
+     1. **Staging (`stage = "staging"`, `8 s`)**: Teleports the vehicle to `(startLat, startLon)` and plans the OSRM road route to `(endLat, endLon)` via `gps.setDestination`. Frame times during teleport/staging are excluded so initial spawn loading does not skew driving metrics.
+     2. **Auto-Drive Recording (`stage = "recording"`, `45 s`)**: Sets `gps.speedOverride = route.speedMps`, activates `gps.setAutodrive(true)` along the local road graph, captures `screenshot.jpg`, and records frame times and hitches until the timer completes or the vehicle arrives at Point B.
+   - **Adding New Routes**: Call `beamngEarth_report.registerBenchRoute({ id = '...', name = '...', shortName = '...', startLat = ..., startLon = ..., endLat = ..., endLon = ..., speedMps = 20.0, duration = 45, stageS = 8 })` or append to `M.BENCH_ROUTES` in `report.lua`. The CEF dropdown automatically populates all registered routes via `beamngEarth_report.status().routes`.
