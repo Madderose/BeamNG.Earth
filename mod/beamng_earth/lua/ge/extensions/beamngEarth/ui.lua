@@ -5,14 +5,16 @@
 -- status HUD (status line + quick buttons), hidden at level start unless the settings say otherwise;
 -- "Full window" brings this window back for the session.
 
-local M = {}
+local M = rawget(_G, '__beamngEarth_ui_table') or {}
+rawset(_G, '__beamngEarth_ui_table', M)
 
 M.visible = true
 M.compact = false   -- set by settings.lua once the settings page exists
 M.hudHidden = false -- the window starts hidden at level start (settings: hudVisible off)
+M.addonsVisible = false -- standalone Generation Addons window
 
 local im = nil
-local openPtr, latPtr, lonPtr, rebaseKmPtr = nil, nil, nil, nil
+local openPtr, addonsOpenPtr, latPtr, lonPtr, rebaseKmPtr = nil, nil, nil, nil, nil
 
 local function text(s) im.TextUnformatted(tostring(s)) end
 
@@ -44,8 +46,7 @@ local function drawCompact(view)
     end
     local st = rawget(_G, 'beamngEarth_settings')
     if st and st.get and st.set then
-      local on = st.get('addonProvence') ~= false
-      if im.Button(on and 'Provence: ON' or 'Provence: OFF') then st.set('addonProvence', not on) end
+      if im.Button(M.addonsVisible and 'Addons [Open]' or 'Addons...') then M.addonsVisible = not M.addonsVisible end
       im.SameLine()
       if st.uiRefreshWorld and im.Button('Refresh world') then st.uiRefreshWorld() end
       im.SameLine()
@@ -57,9 +58,71 @@ local function drawCompact(view)
   im.End()
 end
 
+local EFFORT_OPTIONS = {
+  { id = 'low', label = 'Low' },
+  { id = 'balanced', label = 'Balanced' },
+  { id = 'high', label = 'High' },
+  { id = 'ultra', label = 'Ultra' },
+  { id = 'auto_fps', label = 'Auto-FPS' },
+}
+
+local function drawAddonsWindow()
+  if not M.addonsVisible then return end
+  im = im or ui_imgui
+  if not im then return end
+  if not addonsOpenPtr then addonsOpenPtr = im.BoolPtr(true) end
+  addonsOpenPtr[0] = true
+  im.SetNextWindowSize(im.ImVec2(430, 0), im.Cond_FirstUseEver)
+  if im.Begin('BeamNG.Earth - Generation Addons##addons', addonsOpenPtr, im.WindowFlags_AlwaysAutoResize) then
+    local st = rawget(_G, 'beamngEarth_settings')
+    local core = rawget(_G, 'beamngEarth_core')
+    local aStatus = core and core.getAddonsStatus and core.getAddonsStatus() or nil
+    local activeCount = aStatus and aStatus.active and #aStatus.active or 0
+    text(string.format('Layer A Ground Truth Addons  |  Active: %d', activeCount))
+    im.Separator()
+    if st and st.get and st.set then
+      local provOn = st.get('addonProvence') ~= false
+      if im.Button(provOn and '[ON]  France & Provence Ground Truth Pack' or '[OFF] France & Provence Ground Truth Pack') then
+        st.set('addonProvence', not provOn)
+      end
+      if provOn then
+        local rpgOn = st.get('sourceIgnRpg') ~= false
+        if im.Button(rpgOn and '  [ON]  IGN BD TOPO 3D Buildings & RPG Parcels' or '  [OFF] IGN BD TOPO 3D Buildings & RPG Parcels') then
+          st.set('sourceIgnRpg', not rpgOn)
+        end
+        local orthoOn = st.get('sourceIgnOrtho') ~= false
+        if im.Button(orthoOn and '  [ON]  IGN 20 cm Orthophoto Roof Tinting' or '  [OFF] IGN 20 cm Orthophoto Roof Tinting') then
+          st.set('sourceIgnOrtho', not orthoOn)
+        end
+        local bioOn = st.get('sourceProvenceBiomes') ~= false
+        if im.Button(bioOn and '  [ON]  Provence Crops & Mediterranean Biomes' or '  [OFF] Provence Crops & Mediterranean Biomes') then
+          st.set('sourceProvenceBiomes', not bioOn)
+        end
+      end
+      im.Separator()
+      local curEffort = st.get('effortProfile') or 'balanced'
+      text('Layer B Effort Governor: ' .. tostring(curEffort))
+      for i, opt in ipairs(EFFORT_OPTIONS) do
+        if i > 1 then im.SameLine() end
+        local label = (curEffort == opt.id) and ('[' .. opt.label .. ']') or opt.label
+        if im.Button(label) then st.set('effortProfile', opt.id) end
+      end
+      im.Separator()
+      if st.uiRefreshWorld and im.Button('Refresh World Around You Now') then
+        st.uiRefreshWorld()
+      end
+    else
+      text('Settings module not loaded')
+    end
+  end
+  im.End()
+  if not addonsOpenPtr[0] then M.addonsVisible = false end
+end
+
 -- view: plain table of values to show; actions.teleport(lat, lon) is called on the button,
 -- actions.setRebaseDistance(m) when the rebase slider is released.
 function M.draw(view, actions)
+  drawAddonsWindow()
   if not M.visible then return end
   im = im or ui_imgui
   if not im then return end
@@ -117,8 +180,7 @@ function M.draw(view, actions)
     local st = rawget(_G, 'beamngEarth_settings')
     if st and st.get and st.set then
       im.SameLine()
-      local on = st.get('addonProvence') ~= false
-      if im.Button(on and 'Provence Addon: ON' or 'Provence Addon: OFF') then st.set('addonProvence', not on) end
+      if im.Button(M.addonsVisible and 'Addons Window [Open]' or 'Addons Window...') then M.addonsVisible = not M.addonsVisible end
       if st.uiRefreshWorld then
         im.SameLine()
         if im.Button('Refresh world') then st.uiRefreshWorld() end

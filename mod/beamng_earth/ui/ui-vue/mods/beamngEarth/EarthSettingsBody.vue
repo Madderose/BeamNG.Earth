@@ -79,6 +79,9 @@
         <span v-if="worldRefreshNote" class="earth-value">{{ worldRefreshNote }}</span>
         <BngButton :accent="ACCENTS.outlined" @click="triggerWorldRefresh">{{ item.label || "Refresh now" }}</BngButton>
       </div>
+      <div v-else-if="item.type === 'addonsPopup'" class="earth-inline">
+        <BngButton :accent="ACCENTS.outlined" @click="openAddonsFloatingWindow">{{ item.label || "Open floating window" }}</BngButton>
+      </div>
 
       <!-- Clear cache: asks in the row first -->
       <div v-else-if="item.type === 'action'" class="earth-inline">
@@ -126,7 +129,7 @@ import {
   config, dev, help, qualityPresets, devPresets, presetLine, detectedPick, optionConfig, categoryNamed, visibleItems,
   cacheConfirm, cacheBusy, cacheResult, worldRefreshNote, pathText, pathBusy, pathPick, pathMsg,
   setQuality, presetName, valueOf, selectOption, onSwitchChange, onSliderChange, onNumberEnter, onDevChange, infoValue,
-  openFeedback, triggerWorldRefresh,
+  openFeedback, triggerWorldRefresh, openAddonsFloatingWindow,
   confirmClearCache, askClearCache, usePath, sendPath, pathNote, typing, applyDevPreset,
 } from "./earthSettingsStore.js"
 

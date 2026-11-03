@@ -51,14 +51,22 @@ export const settingsSchema = [
       { id: "realGravity", type: "bool", default: true, name: "Real gravity", desc: "Gravity as it really is where you are (it varies a little with latitude, height and the ground below). Off: the usual 9.81 m/s2." },
       { id: "roads", type: "bool", default: true, name: "Roads", desc: "Real roads, bridges and buildings near you from OpenStreetMap and Overture. Off: bare terrain only." },
       { id: "highwaySigns", type: "bool", default: true, name: "Highway signs", desc: "Exit and overhead destination signs, merge warnings and Interstate mile markers along US highways, from the signs mapped in OpenStreetMap. Needs Roads." },
+      { id: "rebaseDistance", type: "float", min: 2000, max: 16000, step: 100, default: 15000, name: "Rebase distance (m)", desc: "Advanced. How far you drive before the world quietly moves back under you (keeps the physics precise). 15 km keeps precision at about 1 mm." },
+    ],
+  },
+  {
+    name: "Addons",
+    intro: "Generation Addons (Layer A Ground Truth) and Effort Governor (Layer B). Toggle installed regional packs, individual data sources, and synthesis density in this dedicated window.",
+    items: [
+      { id: "addonsStatus", type: "info", name: "Active generation addons", desc: "Shows which native BeamNG.Earth Ground Truth addons are currently discovered, approved, and active in the world server." },
       { id: "addonProvence", type: "bool", default: true, name: "France & Provence Ground Truth Pack", desc: "Enables the native Provence / Occitanie Ground Truth addon (beamng_earth_provence): IGN BD TOPO 3D building footprints, IGN RPG agricultural parcels, 20 cm aerial orthophoto roof tinting, and Mediterranean crops (vineyards, lavender, olive groves, cypress windbreaks)." },
-      { id: "sourceIgnRpg", type: "bool", default: true, name: "IGN BD TOPO & RPG Parcels", desc: "Fetches official French IGN Géoplateforme WFS building heights/materials, RPG crop parcels, and linear hedgerows.", showIf: c => c.addonProvence !== false },
-      { id: "sourceIgnOrtho", type: "bool", default: true, name: "IGN 20 cm Orthophoto Roof Tinting", desc: "Samples 20 cm aerial orthophotos to tint Provence building roofs with real terracotta and limestone hues.", showIf: c => c.addonProvence !== false },
-      { id: "sourceProvenceBiomes", type: "bool", default: true, name: "Provence Crops & Mediterranean Biomes", desc: "Row-oriented vineyards, Sault lavender fields, olive orchards, and Mistral cypress windbreaks.", showIf: c => c.addonProvence !== false },
+      { id: "sourceIgnRpg", type: "bool", default: true, name: "  ↳ IGN BD TOPO & RPG Parcels", desc: "Fetches official French IGN Géoplateforme WFS building heights/materials, RPG crop parcels, and linear hedgerows.", showIf: c => c.addonProvence !== false },
+      { id: "sourceIgnOrtho", type: "bool", default: true, name: "  ↳ IGN 20 cm Orthophoto Roof Tinting", desc: "Samples 20 cm aerial orthophotos to tint Provence building roofs with real terracotta and limestone hues.", showIf: c => c.addonProvence !== false },
+      { id: "sourceProvenceBiomes", type: "bool", default: true, name: "  ↳ Provence Crops & Mediterranean Biomes", desc: "Row-oriented vineyards, Sault lavender fields, olive orchards, and Mistral cypress windbreaks.", showIf: c => c.addonProvence !== false },
       { id: "effortProfile", type: "select", default: "balanced", name: "Ground-Truth Effort Profile", desc: "Layer B Effort Governor: controls how densely Ground Truth crops, trees, and aerial roof samples are synthesized without changing what exists in the world.",
         options: [ { label: "Low (Steam Deck / APU)", value: "low" }, { label: "Balanced (60 FPS Default)", value: "balanced" }, { label: "High", value: "high" }, { label: "Ultra Ground-Truth", value: "ultra" }, { label: "Auto-FPS Governor", value: "auto_fps" } ] },
       { id: "refreshWorld", type: "worldRefresh", virtual: true, label: "Refresh now", name: "Refresh world around you", desc: "Clears and re-streams nearby vegetation, crops, buildings, and roads using your active Ground Truth addons and Effort profile." },
-      { id: "rebaseDistance", type: "float", min: 2000, max: 16000, step: 100, default: 15000, name: "Rebase distance (m)", desc: "Advanced. How far you drive before the world quietly moves back under you (keeps the physics precise). 15 km keeps precision at about 1 mm." },
+      { id: "openAddonsWindow", type: "addonsPopup", virtual: true, label: "Open floating window", name: "Floating Addons window (in-game)", desc: "Opens a standalone floating Generation Addons window on screen so you can toggle addons, data sources, and Effort profiles live while driving without opening the pause menu." },
     ],
   },
   {
@@ -152,7 +160,7 @@ export const settingsSchema = [
 
 // Each page's icon (the pause menu's side buttons take the icon's name, LayoutMenu's tabs the icon) and its button id
 // (the first keeps the old Mods-tab button's id: settings.lua M.BUTTON_ID, pageExists)
-export const PAGE_ICONS = { Graphics: "eyeOutlineOpened", World: "globe", Interface: "cogOutline",
+export const PAGE_ICONS = { Graphics: "eyeOutlineOpened", World: "globe", Addons: "puzzleModule", Interface: "cogOutline",
   Multiplayer: "peopleOutline", Storage: "floppyDisk", Feedback: "bug", About: "info", Developer: "code" }
 export const pageId = (name, i) => i === 0 ? "beamngEarth-settings" : "beamngEarth-settings-" + name.toLowerCase()
 
@@ -243,6 +251,11 @@ export function infoValue(item) {
   if (item.id === "deshadow") return s.deshadow || "off"
   if (item.id === "colormatch") return s.colormatch || "off"
   if (item.id === "cacheUsage") return (s.cache && s.cache.line) || "-"
+  if (item.id === "addonsStatus") {
+    const a = s.addons
+    if (!a || !Array.isArray(a.active)) return config.value.addonProvence !== false ? "provence (active)" : "None active"
+    return a.active.length ? a.active.join(", ") : "None active"
+  }
   return ""
 }
 
@@ -398,6 +411,10 @@ export function triggerWorldRefresh() {
       worldRefreshNote.value = (res && res.error) || "mod not loaded"
     }
   })
+}
+
+export function openAddonsFloatingWindow() {
+  engineLua("beamngEarth_settings and beamngEarth_settings.uiOpenAddonsWindow() or nil")
 }
 
 export function selectOption(item, val) {

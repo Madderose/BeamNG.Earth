@@ -630,6 +630,7 @@ function M.uiState()
   status.gravity = w and w.gravityLine and w.gravityLine() or nil
   status.deshadow = st and st.deshadow or 'off'
   status.colormatch = st and st.colormatch or 'off'
+  status.addons = core and core.getAddonsStatus and core.getAddonsStatus() or nil
   -- the download cache: the server's last numbers, fresh ones asked every CACHE_POLL-th call (the page
   -- polls every 2 s while it is open)
   cachePolls = cachePolls + 1
@@ -1140,13 +1141,20 @@ function M.uiWelcomeDone()
   return { ok = true }
 end
 
--- World page's "Refresh world" button: re-syncs addon toggles and clears/re-streams nearby vegetation, roads & buildings.
+-- World / Addons page's "Refresh world" button: re-syncs addon toggles and clears/re-streams nearby vegetation, roads & buildings.
 function M.uiRefreshWorld()
   local core = ext('beamngEarth_core')
   if not core then return { ok = false, error = 'mod not loaded' } end
   if core.syncAddons then pcall(core.syncAddons) end
   if core.refreshWorld then pcall(core.refreshWorld) end
   return { ok = true }
+end
+
+-- Opens the standalone floating ImGui "BeamNG.Earth - Generation Addons" window and returns to gameplay.
+function M.uiOpenAddonsWindow()
+  ui.addonsVisible = true
+  M.navigate('play')
+  return { ok = true, addonsVisible = ui.addonsVisible }
 end
 
 -- Automation (tools/benchmark.py, autodrive_perf.py: mcp.quiet_ui) keeps the page away for this game session only; the
