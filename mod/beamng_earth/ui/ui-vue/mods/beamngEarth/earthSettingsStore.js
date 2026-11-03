@@ -67,6 +67,7 @@ export const settingsSchema = [
         options: [ { label: "Low (Steam Deck / APU)", value: "low" }, { label: "Balanced (60 FPS Default)", value: "balanced" }, { label: "High", value: "high" }, { label: "Ultra Ground-Truth", value: "ultra" }, { label: "Auto-FPS Governor", value: "auto_fps" } ] },
       { id: "refreshWorld", type: "worldRefresh", virtual: true, label: "Refresh now", name: "Refresh world around you", desc: "Clears and re-streams nearby vegetation, crops, buildings, and roads using your active Ground Truth addons and Effort profile." },
       { id: "openAddonsWindow", type: "addonsPopup", virtual: true, label: "Open floating window", name: "Floating Addons window (in-game)", desc: "Opens a standalone floating Generation Addons window on screen so you can toggle addons, data sources, and Effort profiles live while driving without opening the pause menu." },
+      { id: "addonsBench", type: "feedback", what: "profiler", label: "Benchmark (30s)", name: "Run 30s performance benchmark", desc: "Closes this menu and records 30 s of frame times, hitches, VRAM/RAM usage, CPU/GPU specs, and your active Layer A Ground Truth Addons & Layer B Effort Profile into a ready-to-post GitHub ticket (report.json, hardware.json, issue.md, screenshot.jpg). Also Ctrl+Shift+Y while driving." },
     ],
   },
   {

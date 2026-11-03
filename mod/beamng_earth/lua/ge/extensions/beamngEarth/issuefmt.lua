@@ -183,6 +183,12 @@ function M.formatHardware(hw)
   local app = (hw.server or {}).appVersion
   if app and app ~= '' then add('BeamNG.Earth', tostring(app))
   elseif hw.modVersion then add('BeamNG.Earth', 'mod ' .. tostring(hw.modVersion)) end
+  if str(hw.activeAddons) then
+    add('Generation Addons (Layer A)', str(hw.activeAddons))
+  end
+  if str(hw.effortProfile) then
+    add('Effort Profile (Layer B)', str(hw.effortProfile))
+  end
   local srv = hw.server or {}
   if next(srv) then
     local sp = {}

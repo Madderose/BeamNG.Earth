@@ -1,6 +1,6 @@
 // Standalone floating "Generation Addons" window in the CEF UI layer.
 // Single-instance, in-place DOM updates (never rebuilds innerHTML on a timer, never resets drag position),
-// with both Minimize ("-") and full Close ("✕") buttons.
+// with Minimize ("Min"), Close ("X"), Refresh World, and integrated 30s Hardware/Addon Benchmark Ticket controls.
 
 const ROOT_ID = "bng-earth-addons-floating-root"
 const STYLE_ID = "bng-earth-addons-floating-style"
@@ -24,6 +24,13 @@ function getState() {
       sourceProvenceBiomes: true,
       effortProfile: "balanced",
       note: "",
+      benchRunning: false,
+      benchElapsed: 0,
+      benchDuration: 30,
+      benchSummary: "",
+      benchFolder: "",
+      benchHasUrl: false,
+      benchPollTimer: null,
       posX: 28,
       posY: 84,
       noteTimer: null,
@@ -73,7 +80,7 @@ function injectStyles() {
       border-color: #ff6600;
     }
     .bng-earth-addons-card {
-      width: 360px;
+      width: 368px;
       background: rgba(20, 24, 30, 0.94);
       border: 1px solid rgba(255, 255, 255, 0.12);
       border-radius: 8px;
@@ -209,20 +216,75 @@ function injectStyles() {
       color: #fff;
       font-weight: 700;
     }
+    .bng-earth-actions-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 6px;
+    }
     .bng-earth-refresh-btn {
       width: 100%;
       background: rgba(255, 102, 0, 0.18);
       border: 1px solid #ff6600;
       color: #ffffff;
       border-radius: 5px;
-      padding: 7px 10px;
-      font-size: 13px;
+      padding: 7px 8px;
+      font-size: 12.5px;
       font-weight: 600;
       cursor: pointer;
       text-align: center;
     }
     .bng-earth-refresh-btn:hover {
       background: #ff6600;
+    }
+    .bng-earth-bench-btn {
+      width: 100%;
+      background: rgba(56, 139, 253, 0.18);
+      border: 1px solid rgba(88, 166, 255, 0.8);
+      color: #e6f0ff;
+      border-radius: 5px;
+      padding: 7px 8px;
+      font-size: 12.5px;
+      font-weight: 600;
+      cursor: pointer;
+      text-align: center;
+    }
+    .bng-earth-bench-btn:hover {
+      background: rgba(56, 139, 253, 0.45);
+      border-color: #79c0ff;
+    }
+    .bng-earth-bench-btn.running {
+      background: rgba(255, 153, 0, 0.28);
+      border-color: #ffaa00;
+      color: #fff;
+    }
+    .bng-earth-bench-result {
+      margin-top: 8px;
+      padding: 8px 10px;
+      background: rgba(26, 32, 42, 0.92);
+      border: 1px solid rgba(88, 166, 255, 0.45);
+      border-radius: 5px;
+      font-size: 11.5px;
+      color: #d6e4f5;
+    }
+    .bng-earth-bench-result-btns {
+      display: flex;
+      gap: 6px;
+      margin-top: 6px;
+    }
+    .bng-earth-bench-subbtn {
+      flex: 1;
+      background: rgba(255, 255, 255, 0.1);
+      border: 1px solid rgba(255, 255, 255, 0.22);
+      color: #fff;
+      border-radius: 4px;
+      padding: 4px 6px;
+      font-size: 11px;
+      cursor: pointer;
+      text-align: center;
+    }
+    .bng-earth-bench-subbtn:hover {
+      background: rgba(255, 102, 0, 0.35);
+      border-color: #ff6600;
     }
     .bng-earth-addons-note {
       font-size: 11.5px;
@@ -258,6 +320,54 @@ export function syncFromLua() {
     st.effortProfile = res.effortProfile || "balanced"
     updateDOM()
   })
+}
+
+function pollBenchStatus() {
+  engineLua("beamngEarth_report and beamngEarth_report.status() or nil", stRes => {
+    const st = getState()
+    if (!stRes) return
+    const wasRunning = st.benchRunning
+    st.benchRunning = !!stRes.benchRunning
+    st.benchElapsed = stRes.elapsed || 0
+    st.benchDuration = stRes.duration || 30
+    if (stRes.lastSummary) st.benchSummary = stRes.lastSummary
+    if (stRes.lastFolder) st.benchFolder = stRes.lastFolder
+    st.benchHasUrl = !!stRes.lastUrl
+    if (wasRunning && !st.benchRunning) {
+      if (st.benchPollTimer) {
+        clearInterval(st.benchPollTimer)
+        st.benchPollTimer = null
+      }
+      setNote("30s Benchmark saved to report.json & issue.md!", 4500)
+    }
+    updateDOM()
+  })
+}
+
+function startBenchmark() {
+  const st = getState()
+  if (st.benchRunning) return
+  engineLua("beamngEarth_report and beamngEarth_report.uiStartBench(30) or nil", res => {
+    if (!res || !res.ok) {
+      setNote((res && res.error) || "Load BeamNG.Earth level first", 3500)
+      return
+    }
+    st.benchRunning = true
+    st.benchElapsed = 0
+    st.benchDuration = res.duration || 30
+    setNote("Recording 30s benchmark (keep driving)...", 0)
+    if (st.benchPollTimer) clearInterval(st.benchPollTimer)
+    st.benchPollTimer = setInterval(pollBenchStatus, 500)
+    updateDOM()
+  })
+}
+
+function openBenchFolder() {
+  engineLua("beamngEarth_report and beamngEarth_report.openLastFolder() or nil")
+}
+
+function openBenchIssue() {
+  engineLua("beamngEarth_report and beamngEarth_report.openLastIssueUrl() or nil")
 }
 
 function toggleBool(key) {
@@ -298,7 +408,7 @@ function attachDrag(headerEl, rootEl) {
     origY = st.posY
     const onMove = ev => {
       if (!dragging) return
-      st.posX = Math.max(8, Math.min(window.innerWidth - 370, origX + (ev.clientX - startX)))
+      st.posX = Math.max(8, Math.min(window.innerWidth - 375, origX + (ev.clientX - startX)))
       st.posY = Math.max(8, Math.min(window.innerHeight - 80, origY + (ev.clientY - startY)))
       rootEl.style.left = `${st.posX}px`
       rootEl.style.top = `${st.posY}px`
@@ -366,7 +476,17 @@ function buildDOMOnce() {
         <div class="bng-earth-effort-label">Ground-Truth Effort Profile (Layer B)</div>
         <div class="bng-earth-effort-pills">${effortBtns}</div>
       </div>
-      <button class="bng-earth-refresh-btn" id="bng-earth-addons-refresh">Refresh World Around You</button>
+      <div class="bng-earth-actions-grid">
+        <button class="bng-earth-refresh-btn" id="bng-earth-addons-refresh">Refresh World</button>
+        <button class="bng-earth-bench-btn" id="bng-earth-addons-bench">Benchmark (30s)</button>
+      </div>
+      <div class="bng-earth-bench-result" id="bng-earth-bench-result" style="display:none;">
+        <div id="bng-earth-bench-summary"></div>
+        <div class="bng-earth-bench-result-btns">
+          <button class="bng-earth-bench-subbtn" id="bng-earth-bench-folder">Open Folder</button>
+          <button class="bng-earth-bench-subbtn" id="bng-earth-bench-issue">Post GitHub Ticket</button>
+        </div>
+      </div>
       <div class="bng-earth-addons-note" id="bng-earth-addons-note"></div>
     </div>
   `
@@ -403,6 +523,9 @@ function buildDOMOnce() {
     btn.addEventListener("click", () => setEffort(btn.getAttribute("data-effort")))
   })
   root.querySelector("#bng-earth-addons-refresh").addEventListener("click", triggerRefresh)
+  root.querySelector("#bng-earth-addons-bench").addEventListener("click", startBenchmark)
+  root.querySelector("#bng-earth-bench-folder").addEventListener("click", openBenchFolder)
+  root.querySelector("#bng-earth-bench-issue").addEventListener("click", openBenchIssue)
 
   updateDOM()
 }
@@ -438,6 +561,23 @@ export function updateDOM() {
   root.querySelectorAll(".bng-earth-effort-btn").forEach(btn => {
     btn.classList.toggle("active", btn.getAttribute("data-effort") === st.effortProfile)
   })
+  const benchBtn = root.querySelector("#bng-earth-addons-bench")
+  if (benchBtn) {
+    benchBtn.classList.toggle("running", !!st.benchRunning)
+    benchBtn.textContent = st.benchRunning
+      ? `Recording ${st.benchElapsed}/${st.benchDuration}s`
+      : "Benchmark (30s)"
+  }
+  const resBox = root.querySelector("#bng-earth-bench-result")
+  const resSum = root.querySelector("#bng-earth-bench-summary")
+  if (resBox && resSum) {
+    if (!st.benchRunning && st.benchSummary) {
+      resBox.style.display = "block"
+      resSum.textContent = `Last Benchmark: ${st.benchSummary}`
+    } else {
+      resBox.style.display = "none"
+    }
+  }
   const noteEl = root.querySelector("#bng-earth-addons-note")
   if (noteEl) {
     noteEl.textContent = st.note || ""
@@ -451,6 +591,7 @@ export function open() {
   st.minimized = false
   if (!document.getElementById(ROOT_ID)) buildDOMOnce()
   syncFromLua()
+  pollBenchStatus()
   updateDOM()
 }
 
@@ -466,6 +607,7 @@ export function toggle() {
   if (st.visible) {
     st.minimized = false
     syncFromLua()
+    pollBenchStatus()
   }
   updateDOM()
 }
@@ -475,9 +617,15 @@ export function start() {
   window.bngEarthAddonsWindow = { open, close, toggle, updateDOM, syncFromLua, stop }
   buildDOMOnce()
   syncFromLua()
+  pollBenchStatus()
 }
 
 export function stop() {
+  const st = getState()
+  if (st.benchPollTimer) {
+    clearInterval(st.benchPollTimer)
+    st.benchPollTimer = null
+  }
   const root = document.getElementById(ROOT_ID)
   if (root) root.remove()
 }

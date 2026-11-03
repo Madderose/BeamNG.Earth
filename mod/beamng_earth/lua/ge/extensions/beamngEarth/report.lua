@@ -130,6 +130,29 @@ function M.collectHardware()
   local core = rawget(_G, 'beamngEarth_core')
   hw.modVersion = core and core.MOD_VERSION
   hw.server = core and try(core.serverHello) or nil
+  local bngSettings = rawget(_G, 'beamngEarth_settings')
+  if bngSettings and type(bngSettings.getAll) == 'function' then
+    local allS = try(bngSettings.getAll)
+    if type(allS) == 'table' then
+      hw.effortProfile = allS.effortProfile or 'balanced'
+      hw.addonsConfig = {
+        addonProvence = allS.addonProvence ~= false,
+        sourceIgnRpg = allS.sourceIgnRpg ~= false,
+        sourceIgnOrtho = allS.sourceIgnOrtho ~= false,
+        sourceProvenceBiomes = allS.sourceProvenceBiomes ~= false,
+      }
+      local parts = {}
+      if allS.addonProvence ~= false then
+        parts[#parts + 1] = 'provence=ON'
+        parts[#parts + 1] = 'ign_rpg=' .. (allS.sourceIgnRpg ~= false and 'ON' or 'OFF')
+        parts[#parts + 1] = 'ign_ortho=' .. (allS.sourceIgnOrtho ~= false and 'ON' or 'OFF')
+        parts[#parts + 1] = 'biomes=' .. (allS.sourceProvenceBiomes ~= false and 'ON' or 'OFF')
+      else
+        parts[#parts + 1] = 'provence=OFF (base global)'
+      end
+      hw.activeAddons = table.concat(parts, ', ')
+    end
+  end
   return hw
 end
 
@@ -204,14 +227,15 @@ local function write(rel, data, quiet)
     writeFile(idx, old .. line .. '\n')
   end
   log('I', 'beamngEarth', 'report saved: ' .. data.folder)
-  if quiet then return end
   local url = nil
   if okI then
     local k = fmt.kind(data.kind)
     local title, body = fmt.splitIssue(issue)
     url = fmt.issueUrl(title, body, k.label)
   end
-  saved = { folder = data.folder, dir = rel, url = url, untilT = now() + M.SAVED_S, kind = fmt.kind(data.kind).name }
+  local summary = data.bench and fmt.framesLine(data.bench) or (data.recentFrames and fmt.framesLine(data.recentFrames)) or nil
+  saved = { folder = data.folder, dir = rel, url = url, summary = summary, untilT = now() + M.SAVED_S, kind = fmt.kind(data.kind).name }
+  if quiet then return end
 end
 
 local function openForm(rel, data, kind)
@@ -327,7 +351,47 @@ end
 
 function M.status()
   return { formOpen = form ~= nil, noteOpen = form ~= nil, profilerRunning = prof ~= nil,
-    benchRunning = prof ~= nil, saved = count, lastFolder = saved and saved.folder }
+    benchRunning = prof ~= nil, saved = count, lastFolder = saved and saved.folder,
+    elapsed = prof and math.max(0, math.floor(now() - prof.t0)) or 0,
+    duration = prof and prof.dur or M.BENCH_S,
+    lastSummary = saved and saved.summary or nil,
+    lastUrl = saved and saved.url or nil }
+end
+
+function M.uiStartBench(seconds)
+  onLevel()
+  if not ourLevel then return { ok = false, error = 'Not in BeamNG.Earth level' } end
+  if prof then return { ok = true, alreadyRunning = true } end
+  local bngSettings = rawget(_G, 'beamngEarth_settings')
+  local allS = bngSettings and bngSettings.getAll and bngSettings.getAll() or {}
+  local addonTag = (allS.addonProvence ~= false) and 'provence=ON' or 'provence=OFF'
+  local effortTag = tostring(allS.effortProfile or 'balanced')
+  local rel = newDir('profile')
+  local start = capture()
+  start.screenshot = screenshot(rel)
+  start.kind = 'perf'
+  start.title = string.format('Benchmark (%s, effort=%s)', addonTag, effortTag)
+  start.note = string.format('Automated 30s in-game performance benchmark ticket (%s, effortProfile=%s).', addonTag, effortTag)
+  prof = { t0 = now(), dur = tonumber(seconds) or M.BENCH_S, dts = {}, track = {}, hitches = {}, dir = rel,
+    lastSample = -1, start = start, form = { data = start, kind = 'perf' } }
+  toast, toastUntil = string.format('Performance profiler: recording %d s (keep driving)', prof.dur), now() + 3
+  return { ok = true, duration = prof.dur }
+end
+
+function M.openLastFolder()
+  if saved and saved.dir and Engine and Engine.Platform and Engine.Platform.exploreFolder then
+    pcall(Engine.Platform.exploreFolder, '/' .. saved.dir)
+    return { ok = true, folder = saved.folder }
+  end
+  return { ok = false }
+end
+
+function M.openLastIssueUrl()
+  if saved and saved.url and openWebBrowser then
+    pcall(openWebBrowser, saved.url)
+    return { ok = true }
+  end
+  return { ok = false }
 end
 
 function M.onPreRender(dtReal)
