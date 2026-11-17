@@ -428,6 +428,68 @@ pub fn geo_placement(slat: f64, slon: f64, dlat: f64, dlon: f64, px: f64, py_: f
     (r.iter().flatten().copied().collect(), t.to_vec(), c.to_vec())
 }
 
+const SCALE_MIN: f64 = 0.5;
+const SCALE_MAX: f64 = 3.0;
+const EFFORT_MIN: f64 = 0.5;
+const EFFORT_MAX: f64 = 2.0;
+const BASE_SIZES: [i64; 3] = [1024, 2048, 4096];
+
+fn clamp_scale(v: f64) -> f64 {
+    if !v.is_finite() { 1.0 } else { v.clamp(SCALE_MIN, SCALE_MAX) }
+}
+
+fn round6(v: f64) -> f64 {
+    (v * 1e6).round() / 1e6
+}
+
+/// Deterministic effort/density scaling for `Connection.set_graphics` via `dm::Dm` (`dpowf`).
+/// Converts `(lod_scale, tree_scale, building_scale, photo_px, effort)` into clamped
+/// `(lod_scale, tree_scale, building_scale, photo_px)` without touching `revisit` plan keys.
+pub fn scale_graphics_effort_core(
+    lod_scale: f64,
+    tree_scale: f64,
+    building_scale: f64,
+    photo_px: i64,
+    effort: f64,
+) -> (f64, f64, f64, i64) {
+    let lod0 = clamp_scale(lod_scale);
+    let tree0 = clamp_scale(tree_scale);
+    let bld0 = clamp_scale(building_scale);
+    let eff = if !effort.is_finite() || effort <= 0.0 {
+        1.0
+    } else {
+        effort.clamp(EFFORT_MIN, EFFORT_MAX)
+    };
+    let idx0 = BASE_SIZES.iter().position(|&s| s == photo_px).unwrap_or(1);
+    if (eff - 1.0).abs() < 1e-12 {
+        return (lod0, tree0, bld0, BASE_SIZES[idx0]);
+    }
+    let lod = clamp_scale(round6(lod0 * eff.dpowf(0.5)));
+    let reach_factor = eff.dpowf(0.75);
+    let tree = clamp_scale(round6(tree0 * reach_factor));
+    let bld = clamp_scale(round6(bld0 * reach_factor));
+    let idx = if eff <= 0.65 {
+        idx0.saturating_sub(1)
+    } else if eff >= 1.5 {
+        (idx0 + 1).min(BASE_SIZES.len() - 1)
+    } else {
+        idx0
+    };
+    (lod, tree, bld, BASE_SIZES[idx])
+}
+
+#[pyfunction]
+#[pyo3(signature = (lod_scale, tree_scale, building_scale, photo_px, effort=1.0))]
+pub fn scale_graphics_effort(
+    lod_scale: f64,
+    tree_scale: f64,
+    building_scale: f64,
+    photo_px: i64,
+    effort: f64,
+) -> (f64, f64, f64, i64) {
+    scale_graphics_effort_core(lod_scale, tree_scale, building_scale, photo_px, effort)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -471,5 +533,23 @@ mod tests {
         let got = near(&f, 17, 0.0, 0.0, 0.0);
         assert_eq!(got.len(), 1);
         assert_eq!((got[0].0, got[0].1), (x, y));
+    }
+
+    #[test]
+    fn graphics_effort_scaling() {
+        assert_eq!(scale_graphics_effort_core(1.0, 1.0, 1.0, 2048, 1.0), (1.0, 1.0, 1.0, 2048));
+        assert_eq!(scale_graphics_effort_core(1.3, 1.5, 1.5, 4096, f64::NAN), (1.3, 1.5, 1.5, 4096));
+        let (l_low, t_low, b_low, px_low) = scale_graphics_effort_core(1.0, 1.0, 1.0, 2048, 0.5);
+        assert!(l_low >= 0.5 && l_low < 1.0);
+        assert!(t_low >= 0.5 && t_low < l_low);
+        assert_eq!(t_low, b_low);
+        assert_eq!(px_low, 1024);
+        let (l_hi, t_hi, b_hi, px_hi) = scale_graphics_effort_core(1.6, 1.5, 1.5, 2048, 2.0);
+        assert!(l_hi > 1.6 && l_hi <= 3.0);
+        assert!(t_hi > 1.5 && t_hi <= 3.0);
+        assert_eq!(t_hi, b_hi);
+        assert_eq!(px_hi, 4096);
+        let (l_cap, t_cap, b_cap, _) = scale_graphics_effort_core(2.8, 2.8, 2.8, 4096, 2.0);
+        assert_eq!((l_cap, t_cap, b_cap), (3.0, 3.0, 3.0));
     }
 }

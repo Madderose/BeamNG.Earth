@@ -65,6 +65,7 @@ M.SCHEMA = {
   -- distant ground allowed on screen when a piece switches detail, in pixels of this screen and field of view. 0: off
   -- (the distance rule above alone); with it on, smooth ground stays coarser and rough ground finer to keep under it
   lodPx = { kind = 'number', default = 0, min = 0, max = 8, label = 'Terrain pixel error (px, 0: off)' },
+  effortScale = { kind = 'number', default = 1, min = 0.5, max = 2, label = 'Graphics effort scale' },
   -- how far the far buildings, the skyline and the far bridges reach (M.BUILDING_DISTANCE: buildingScale)
   buildingDistance = { kind = 'enum', default = 'normal', values = { 'near', 'normal', 'far', 'max' },
     label = 'Building draw distance' },
@@ -213,7 +214,7 @@ M.SCHEMA = {
   updateDismissed = { kind = 'string', default = '', maxLen = 40, label = 'Update notice dismissed (version)' },
   devNoticeSeen = { kind = 'string', default = '', maxLen = 40, label = 'Development build notice seen (version)' },
 }
-M.ORDER = { 'quality', 'terrainDetail', 'lodPx', 'groundPhoto', 'groundGrid', 'terrainShadows', 'trees', 'treeDistance', 'buildingDistance', 'objectDetail',
+M.ORDER = { 'quality', 'terrainDetail', 'lodPx', 'effortScale', 'groundPhoto', 'groundGrid', 'terrainShadows', 'trees', 'treeDistance', 'buildingDistance', 'objectDetail',
   'grassDistance', 'nightLights', 'roadDetail', 'distantTraffic', 'distantTrafficWithoutTraffic', 'distantTrafficQuality', 'rebaseDistance',
   'viewDistanceMode', 'viewDistanceKm', 'hazeStrength', 'skyMode', 'clouds',
   'weatherMode', 'realGravity', 'lowFuelPrompt', 'groundCover', 'groundCoverDensity', 'rocks', 'roads', 'highwaySigns', 'directionSigns', 'roadSigns', 'germanJunctionSigns', 'rumbleStrips', 'softDrag', 'deckGuard', 'townSigns', 'adaptiveTraffic', 'models3dmr',
@@ -558,6 +559,7 @@ function M.serverGraphics()
   return {
     lodScale = M.TERRAIN_DETAIL[values.terrainDetail] or 1.0,
     lodPx = tonumber(values.lodPx) or 0,
+    effortScale = tonumber(values.effortScale) or 1.0,
     treeScale = okT and trees.distanceScale and trees.distanceScale(values.treeDistance) or 1.0,
     buildingScale = M.BUILDING_DISTANCE[values.buildingDistance] or 1.0,
     photoPx = okR and terrain.photoSize and terrain.photoSize() or tonumber(values.groundPhoto),
@@ -611,6 +613,7 @@ M.APPLY = {
   end,
   terrainDetail = sendGraphics,
   lodPx = sendGraphics,
+  effortScale = sendGraphics,
   buildingDistance = sendGraphics,
   groundPhoto = function(v)
     require('beamngEarth/terrain').setPhotoSize(tonumber(v))

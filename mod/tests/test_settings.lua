@@ -734,4 +734,21 @@ do
   T.check(settings.uiMapPreload(1, 2, true).ok == false, 'no core: nothing')
   beamngEarth_core = core0
 end
+
+-- graphics effort scale: clamped to [0.5, 2], default 1, forwarded in serverGraphics and applied via sendGraphics
+do
+  local sent = {}
+  local core0 = beamngEarth_core
+  beamngEarth_core = {
+    sendGraphics = function() sent[#sent + 1] = settings.serverGraphics() end,
+    _state = function() return { inOurLevel = true } end,
+  }
+  T.check(settings.get('effortScale') == 1, 'effortScale default is 1')
+  T.check(settings.validate('effortScale', 0.25) == 0.5 and settings.validate('effortScale', 5) == 2, 'effortScale clamped to 0.5..2')
+  local r = settings.set('effortScale', 1.5)
+  T.check(r.ok and settings.serverGraphics().effortScale == 1.5 and #sent == 1 and sent[1].effortScale == 1.5,
+    'effortScale updates serverGraphics and triggers sendGraphics')
+  settings.set('effortScale', 1)
+  beamngEarth_core = core0
+end
 T.done('test_settings')

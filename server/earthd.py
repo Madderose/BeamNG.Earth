@@ -9226,13 +9226,27 @@ class Connection:
         skyline's and the far bridges' (buildings.FAR_SEND_M / SKY_SEND_M / BRIDGE_FAR_SEND_M times it), photoPx the
         ground photo's size (Server.set_base_px). Scales are clamped to GRAPHICS_SCALE; the far field is selected
         again at once, the trackers send and drop by their new reach at the next pose."""
-        def scale(name, cur):
+        def scale(name, cur, bounds=GRAPHICS_SCALE):
             v = msg.get(name)
             if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v):
                 return cur
-            return min(GRAPHICS_SCALE[1], max(GRAPHICS_SCALE[0], float(v)))
-        lod, tree, bld = (scale("lodScale", self.lod_scale), scale("treeScale", self.tree_scale),
-                          scale("buildingScale", self.building_scale))
+            return min(bounds[1], max(bounds[0], float(v)))
+        base_lod = scale("lodScale", getattr(self, "_base_lod_scale", self.lod_scale))
+        base_tree = scale("treeScale", getattr(self, "_base_tree_scale", self.tree_scale))
+        base_bld = scale("buildingScale", getattr(self, "_base_building_scale", self.building_scale))
+        self._base_lod_scale, self._base_tree_scale, self._base_building_scale = base_lod, base_tree, base_bld
+        effort = scale("effortScale", getattr(self, "effort_scale", 1.0), (0.5, 2.0))
+        self.effort_scale = effort
+        raw_px = msg.get("photoPx")
+        try:
+            px_in = int(raw_px) if raw_px is not None and not isinstance(raw_px, bool) else int(self.s.base_px)
+        except (TypeError, ValueError):
+            px_in = int(self.s.base_px)
+        if effort != 1.0 or msg.get("effortScale") is not None:
+            import fast
+            lod, tree, bld, px_scaled = fast.scale_graphics_effort(base_lod, base_tree, base_bld, px_in, effort)
+        else:
+            lod, tree, bld, px_scaled = base_lod, base_tree, base_bld, px_in
         far = lod != self.lod_scale
         self.lod_scale = lod
         if tree != self.tree_scale:
@@ -9250,8 +9264,10 @@ class Connection:
             if self.brfar is not None:
                 self.brfar.send_m = buildingsmod.BRIDGE_FAR_SEND_M * bld
                 self.brfar.drop_m = self.brfar.send_m + (buildingsmod.BRIDGE_FAR_DROP_M - buildingsmod.BRIDGE_FAR_SEND_M)
-        if msg.get("photoPx") is not None:
-            self.s.set_base_px(msg.get("photoPx"))
+        if raw_px is not None and (isinstance(raw_px, bool) or px_in not in BASE_SIZES):
+            pass
+        elif raw_px is not None or msg.get("effortScale") is not None:
+            self.s.set_base_px(px_scaled if effort != 1.0 else raw_px)
         v = msg.get("lodPx")
         if isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v):
             v = min(LOD_PX_MAX, max(0.0, float(v)))

@@ -6520,6 +6520,8 @@ fn earthfast(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(railxing::corridor_ground, m)?)?;
     // 372: railxing::corridor_ground (railxing.corridor_ground, BNE_RAIL_XING: a grid over the tracks' points, not
     // numpy's distance matrix per pair of lines; the same bits)
-    m.add("VERSION", 372)?;
+    // 373: geotiles::scale_graphics_effort (deterministic effort/density scaling for Connection.set_graphics via dm::Dm)
+    m.add_function(wrap_pyfunction!(geotiles::scale_graphics_effort, m)?)?;
+    m.add("VERSION", 373)?;
     Ok(())
 }

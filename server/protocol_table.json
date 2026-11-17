@@ -276,7 +276,8 @@
     "buildingScale": {"type": "num", "optional": true},
     "photoPx": {"type": "num", "optional": true},
     "viewM": {"type": "num", "optional": true},
-    "lodPx": {"type": "num", "optional": true}
+    "lodPx": {"type": "num", "optional": true},
+    "effortScale": {"type": "num", "optional": true}
    }
   },
   "map_tiles": {

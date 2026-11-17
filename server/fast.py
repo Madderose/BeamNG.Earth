@@ -16,7 +16,7 @@ except ImportError:         # no binary for this platform / Python: require() sa
     _ef = None
 
 AVAILABLE = _ef is not None
-MIN_VERSION = 372 # the newest kernel signature the server calls (earthd checks it at start)
+MIN_VERSION = 373 # the newest kernel signature the server calls (earthd checks it at start)
 
 
 class NativeMissing(RuntimeError):
@@ -317,3 +317,10 @@ def deck_capped(pts, z, la, box, test_box, flat, max_m, side_m, min_cross):
     return _ef.deck_capped(pts, np.ascontiguousarray(z, np.float64), np.ascontiguousarray(la, np.float64),
                            np.ascontiguousarray(box, np.float64), bool(test_box), off, q, sv,
                            np.ascontiguousarray(lb, np.float64), half, float(max_m), float(side_m), float(min_cross))
+
+
+def scale_graphics_effort(lod_scale, tree_scale, building_scale, photo_px, effort=1.0):
+    """(lod_scale, tree_scale, building_scale, photo_px) scaled deterministically by effort (geotiles.rs)."""
+    require(373, "scale_graphics_effort")
+    return _ef.scale_graphics_effort(float(lod_scale), float(tree_scale), float(building_scale), int(photo_px),
+                                     float(effort))
