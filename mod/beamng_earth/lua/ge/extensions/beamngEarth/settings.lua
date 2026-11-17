@@ -80,6 +80,8 @@ M.SCHEMA = {
   -- cast theirs, the block did not, so a ridge's shadow stopped at the block's edge and its shaded slopes were lit). Each
   -- block move redraws the sun's cached shadow map (~6-14 ms once): off on the Low and Medium presets
   terrainShadows = { kind = 'bool', default = true, label = 'Ground shadows' },
+  -- opt-in adaptive shadow distance and burst tightening (shadowctl.lua): off by default
+  shadowControl = { kind = 'bool', default = false, label = 'Adaptive shadow distance (experimental)' },
   -- the grass's reach (groundcover.lua DISTANCE)
   grassDistance = { kind = 'enum', default = 'normal', values = { 'near', 'normal', 'far' }, label = 'Grass draw distance' },
   -- the engine's shape detail in our level (enginepref.lua: $pref::TS::detailAdjust; 'game': the game's Mesh Quality)
@@ -213,7 +215,7 @@ M.SCHEMA = {
   updateDismissed = { kind = 'string', default = '', maxLen = 40, label = 'Update notice dismissed (version)' },
   devNoticeSeen = { kind = 'string', default = '', maxLen = 40, label = 'Development build notice seen (version)' },
 }
-M.ORDER = { 'quality', 'terrainDetail', 'lodPx', 'groundPhoto', 'groundGrid', 'terrainShadows', 'trees', 'treeDistance', 'buildingDistance', 'objectDetail',
+M.ORDER = { 'quality', 'terrainDetail', 'lodPx', 'groundPhoto', 'groundGrid', 'terrainShadows', 'shadowControl', 'trees', 'treeDistance', 'buildingDistance', 'objectDetail',
   'grassDistance', 'nightLights', 'roadDetail', 'distantTraffic', 'distantTrafficWithoutTraffic', 'distantTrafficQuality', 'rebaseDistance',
   'viewDistanceMode', 'viewDistanceKm', 'hazeStrength', 'skyMode', 'clouds',
   'weatherMode', 'realGravity', 'lowFuelPrompt', 'groundCover', 'groundCoverDensity', 'rocks', 'roads', 'highwaySigns', 'directionSigns', 'roadSigns', 'germanJunctionSigns', 'rumbleStrips', 'softDrag', 'deckGuard', 'townSigns', 'adaptiveTraffic', 'models3dmr',
@@ -243,23 +245,23 @@ M.PRESETS = {
   low = { trees = 'low', treeDistance = 'near', groundCover = false, groundCoverDensity = 'low', grassDistance = 'near',
     rocks = true, nightLights = 'few', viewDistanceMode = 'fixed', viewDistanceKm = 40, terrainDetail = 'low',
     buildingDistance = 'near', groundPhoto = '1024', objectDetail = 'game', distantTrafficQuality = 'low', roadDetail = 'off',
-    groundGrid = '2', terrainShadows = false },
+    groundGrid = '2', terrainShadows = false, shadowControl = false },
   medium = { trees = 'medium', treeDistance = 'medium', groundCover = true, groundCoverDensity = 'low',
     grassDistance = 'normal', rocks = true, nightLights = 'few', viewDistanceMode = 'horizon', viewDistanceKm = 100,
     terrainDetail = 'normal', buildingDistance = 'normal', groundPhoto = '2048', objectDetail = 'game', distantTrafficQuality = 'medium',
-    roadDetail = 'basic', groundGrid = '2', terrainShadows = false },
+    roadDetail = 'basic', groundGrid = '2', terrainShadows = false, shadowControl = false },
   high = { trees = 'normal', treeDistance = 'normal', groundCover = true, groundCoverDensity = 'normal',
     grassDistance = 'normal', rocks = true, nightLights = 'normal', viewDistanceMode = 'horizon', viewDistanceKm = 100,
     terrainDetail = 'normal', buildingDistance = 'normal', groundPhoto = '2048', objectDetail = 'game', distantTrafficQuality = 'high',
-    roadDetail = 'full', groundGrid = '1', terrainShadows = true },
+    roadDetail = 'full', groundGrid = '1', terrainShadows = true, shadowControl = false },
   ultra = { trees = 'high', treeDistance = 'far', groundCover = true, groundCoverDensity = 'high', grassDistance = 'normal',
     rocks = true, nightLights = 'many', viewDistanceMode = 'horizon', viewDistanceKm = 100, terrainDetail = 'high',
     buildingDistance = 'far', groundPhoto = '2048', objectDetail = 'game', distantTrafficQuality = 'high', roadDetail = 'full',
-    groundGrid = '1', terrainShadows = true },
+    groundGrid = '1', terrainShadows = true, shadowControl = false },
   extreme = { trees = 'extreme', treeDistance = 'max', groundCover = true, groundCoverDensity = 'high',
     grassDistance = 'far', rocks = true, nightLights = 'many', viewDistanceMode = 'horizon', viewDistanceKm = 100,
     terrainDetail = 'extreme', buildingDistance = 'max', groundPhoto = '4096', objectDetail = 'extreme', distantTrafficQuality = 'high',
-    roadDetail = 'full', groundGrid = '1', terrainShadows = true },
+    roadDetail = 'full', groundGrid = '1', terrainShadows = true, shadowControl = false },
 }
 M.PRESET_ORDER = { 'low', 'medium', 'high', 'ultra', 'extreme' }
 
@@ -618,6 +620,11 @@ M.APPLY = {
   end,
   grassDistance = function(v) require('beamngEarth/groundcover').setDistance(v) end,
   terrainShadows = function(v) require('beamngEarth/terrain').setCastShadows(v) end,
+  shadowControl = function(v)
+    local core = ext('beamngEarth_core')
+    if core and core.setShadowControl then core.setShadowControl(v)
+    else require('beamngEarth/shadowctl').setEnabled(v) end
+  end,
   objectDetail = function(v) require('beamngEarth/enginepref').setLevel(v, inOurLevel()) end,
   nightLights = function(v) require('beamngEarth/nightlights').setLightCount(v) end,
   distantTraffic = function(v) require('beamngEarth/trafficvisuals').setEnabled(v) end,

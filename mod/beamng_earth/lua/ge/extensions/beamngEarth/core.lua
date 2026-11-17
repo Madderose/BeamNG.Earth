@@ -443,6 +443,7 @@ local function activateWorld()
   if scenetree.theLevelInfo and not fixed then scenetree.theLevelInfo.visibleDistance = VISIBLE_DISTANCE end
   terrain.hideGroundPlanes()
   applyHorizon()
+  if M._shadowctl and M._shadowctl.isEnabled() then pcall(M._shadowctl.apply) end
 end
 
 local function sendCommits(anchorId, cx, cy)
@@ -3195,8 +3196,20 @@ end
 M._devbuild = require('beamngEarth/devbuild')    -- the development build's notice (a field: the 200-local limit)
 M._pacer = require('beamngEarth/framepacer')    -- even frame pacing (fields: the main chunk's 200-local limit)
 M._gcpace = require('beamngEarth/gcpace')       -- Lua garbage collection pacing (onUpdate)
+M._shadowctl = require('beamngEarth/shadowctl') -- opt-in adaptive shadow profile (off by default)
 M._paceClock = stopwatch.clock()
+function M.setShadowControl(on)
+  if not M._shadowctl then return false end
+  local enabled = M._shadowctl.setEnabled(on == true)
+  if enabled and st.inOurLevel and st.active then pcall(M._shadowctl.apply) end
+  return enabled
+end
 local function onPreRender(dtReal, dtSim)
+  -- opt-in shadow distance & burst control (no-op unless settings.shadowControl is true)
+  if st.inOurLevel and M._shadowctl and M._shadowctl.isEnabled() then
+    local pl = st.player
+    pcall(M._shadowctl.applyGlobalProfile, (pl and pl.speed) or 0, gov, dtReal)
+  end
   -- frame pacing (framepacer.lua: only where the engine patch dtsmooth is not applied): our level, playing (not
   -- paused, not loading), not BeamMP
   local now = M._paceClock()
@@ -3338,6 +3351,7 @@ local function onClientEndMission()
   hudapps.unhookMinimapNorth()
   require('beamngEarth/minimaproads').unhook()
   levelinfo.unhookSpawnPois()
+  if M._shadowctl and M._shadowctl.restore then pcall(M._shadowctl.restore) end
   postfx.restore()
   require('beamngEarth/enginepref').restore()
   pcall(terrainpatch.clear)
@@ -3414,6 +3428,7 @@ local function onExtensionUnloaded()
   ambience.clear()
   terrain.delete()
   -- M1h: the level stays loaded; give it back its sky and view distance
+  if M._shadowctl and M._shadowctl.restore then pcall(M._shadowctl.restore) end
   horizon.restoreSky()
   if st.visibleDistance and horizon.setVisibleDistance(VISIBLE_DISTANCE) then st.visibleDistance = nil end
 end
