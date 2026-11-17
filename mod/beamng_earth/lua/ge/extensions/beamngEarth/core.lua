@@ -1706,6 +1706,10 @@ local function onMessage(msg)
     -- the server's answer to the settings page's "Restart world server" (srvrestart.lua; server srvrestart.py)
     M._srvrestart.answer(M._restart, st.clock, msg.ok == true, msg.error)
     if msg.ok ~= true then log('W', 'beamngEarth', 'world server restart refused: ' .. tostring(msg.error)) end
+  elseif t == 'world_reload' then
+    M._lastWorldReload = { ok = msg.ok == true, scopes = msg.scopes, epoch = msg.epoch,
+      plansEpoch = msg.plansEpoch, evicted = msg.evicted, error = msg.error }
+    if msg.ok ~= true then log('W', 'beamngEarth', 'world reload refused: ' .. tostring(msg.error)) end
   elseif t == 'memory' then
     -- the world server's memory and its limit (server memwatch.status): the settings page's line
     M._memoryInfo = { usedMB = tonumber(msg.usedMB) or 0, limitMB = tonumber(msg.limitMB) or 0,
@@ -3823,6 +3827,17 @@ function M.restartServer()
   if not net.send({ type = 'server_restart', key = key }) then return false, 'the world server is not connected' end
   sr.request(r, st.clock, st.sessionId)
   log('I', 'beamngEarth', 'world server restart asked (the settings page)')
+  return true
+end
+function M.reloadWorld(scopes, clearCells, config)
+  if not (net.isConnected() and st.sessionId) then return false, 'the world server is not connected' end
+  local key = M.restartKey()
+  if not key then
+    return false, 'the restart key of the world server is missing'
+  end
+  if not net.send({ type = 'world_reload', key = key, scopes = scopes, clear_cells = clearCells, config = config }) then
+    return false, 'the world server is not connected'
+  end
   return true
 end
 -- For the settings page (settings.uiState): the settings waiting for a restart (values: the player's; order: theirs),

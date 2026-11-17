@@ -6639,6 +6639,46 @@ class PlanStore:
         import geotiles
         return self.planner(geotiles.region_of_cell(key))
 
+    def late_reset(self, cells=None):
+        """Drop cached planning state in memory. When cells is None, drops every planner; when cells is an iterable of
+        CellKey or (z, x, y), evicts only those cells from the regions' planners and leaves all other cells intact."""
+        import mapcells
+        with self.lock:
+            if cells is None:
+                self.planners.clear()
+                return 0
+            targets = {k if isinstance(k, mapcells.CellKey) else mapcells.CellKey(int(k[0]), int(k[1]), int(k[2]))
+                       for k in cells}
+            planners = list(self.planners.values())
+        evicted = 0
+        for pl in planners:
+            hit = False
+            with pl.lock:
+                for ck in targets:
+                    if ck in pl.cells:
+                        evicted += 1
+                        hit = True
+                    pl.cells.pop(ck, None)
+                    pl.failed.pop(ck, None)
+                    pl.covers.pop(ck, None)
+                    pl.keeps.pop(ck, None)
+                    pl.opens.pop(ck, None)
+                    pl.dgcells.pop(ck, None)
+                    pl.short.discard(ck)
+                    pl.stage_short.discard(ck)
+                    for attr in ("_road_stages", "_road_kept", "_stage_decks", "_dg_cell_packs", "_dg_near_packs",
+                                 "_dg_near_cells", "end_cache", "enu_cache", "enu_short"):
+                        d = pl.__dict__.get(attr)
+                        if isinstance(d, dict):
+                            d.pop(ck, None)
+                    rc = pl.__dict__.get("_ramp_ctx")
+                    if isinstance(rc, dict):
+                        rc.pop(str(ck), None)
+                if hit:
+                    for attr in ("_plan_sets", "_chains"):
+                        pl.__dict__.pop(attr, None)
+        return evicted
+
     def planners_of(self, lat, lon):
         """[(planner, index array)] of the points' regions (most calls: one)."""
         import geotiles

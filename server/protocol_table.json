@@ -147,6 +147,15 @@
     "key": {"type": "str"}
    }
   },
+  "world_reload": {
+   "doc": "hot-reload world generation scopes around the active anchor without restarting the server process (reload.rs; gated by srvrestart.key_ok)",
+   "fields": {
+    "key": {"type": "str"},
+    "scopes": {"type": "list"},
+    "clear_cells": {"type": "list", "optional": true},
+    "config": {"type": ["str", "dict"], "optional": true}
+   }
+  },
   "report_context": {
    "doc": "2026-11-12: the in-game reports (report.lua / reportsend.lua; server reportsend.py): the moment's server part (where the camera, the centre's aim point and the car are), the mod's files written (scrubbed), and the player's \"Send to the developers\" (only the folder's name: never a path)",
    "fields": {
@@ -1320,6 +1329,17 @@
    "doc": "the answer to 'server_restart': ok, the server stops now and is started again; else why not (error)",
    "fields": {
     "ok": {"type": "bool"},
+    "error": {"type": "str", "optional": true}
+   }
+  },
+  "world_reload": {
+   "doc": "the answer to 'world_reload': ok, canonical scopes reloaded, epoch and evicted plan cells; else why not (error)",
+   "fields": {
+    "ok": {"type": "bool"},
+    "scopes": {"type": "list", "optional": true},
+    "epoch": {"type": "str", "optional": true},
+    "plansEpoch": {"type": "str", "nullable": true, "optional": true},
+    "evicted": {"type": "list", "optional": true},
     "error": {"type": "str", "optional": true}
    }
   },

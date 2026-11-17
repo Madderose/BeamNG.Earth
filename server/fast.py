@@ -16,7 +16,7 @@ except ImportError:         # no binary for this platform / Python: require() sa
     _ef = None
 
 AVAILABLE = _ef is not None
-MIN_VERSION = 372 # the newest kernel signature the server calls (earthd checks it at start)
+MIN_VERSION = 373 # the newest kernel signature the server calls (earthd checks it at start)
 
 
 class NativeMissing(RuntimeError):
@@ -317,3 +317,24 @@ def deck_capped(pts, z, la, box, test_box, flat, max_m, side_m, min_cross):
     return _ef.deck_capped(pts, np.ascontiguousarray(z, np.float64), np.ascontiguousarray(la, np.float64),
                            np.ascontiguousarray(box, np.float64), bool(test_box), off, q, sv,
                            np.ascontiguousarray(lb, np.float64), half, float(max_m), float(side_m), float(min_cross))
+
+
+def reload_scope_mask(scopes):
+    """Bitmask of canonical reload scopes ('plans', 'roads', 'veg', 'surface', 'signs', 'nav'); native reload.rs."""
+    require(373, "reload_scope_mask")
+    return _ef.reload_scope_mask([str(s) for s in scopes])
+
+
+def reload_config_digests(config_json=None):
+    """(full_digest, plans_digest) of a declarative JSON config object (PLAN_NEUTRAL excluded from plans_digest)."""
+    require(373, "reload_config_digests")
+    return _ef.reload_config_digests(None if config_json is None else str(config_json))
+
+
+def reload_plan(scopes, clear_cells=None, active_cells=None, config_json=None, serial=1):
+    """Deterministic reload plan dict {scopes, mask, invalidates_plans, epoch, plans_epoch, evict_cells, ...}."""
+    require(373, "reload_plan")
+    cc = None if clear_cells is None else [(int(z), int(x), int(y)) for z, x, y in clear_cells]
+    ac = None if active_cells is None else [(int(z), int(x), int(y)) for z, x, y in active_cells]
+    cfg = None if config_json is None else str(config_json)
+    return _ef.reload_plan([str(s) for s in scopes], cc, ac, cfg, int(serial))

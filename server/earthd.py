@@ -5642,6 +5642,17 @@ class Server:
             return "the world server is still starting"
         return srvrestartmod.budget_refusal()
 
+    def reload_refusal(self, conn, msg):
+        """Why a 'world_reload' request on connection conn with message msg is refused, or None. Validated with the
+        same capability key (srvrestart.key_ok / restart.key) and connection lease check as server_restart."""
+        lease = getattr(conn, "lease", None)
+        if lease is None or lease.connection is not conn:
+            return "only the game's own connection may reload the world (no hello on this one)"
+        if not srvrestartmod.key_ok(self.restart_key, msg.get("key")):
+            return ("the request did not carry this world server's restart key (the game reads it from its "
+                    "temp/beamngEarth folder: does the server write to another user folder?)")
+        return None
+
     def request_restart(self, delay_s=0.5):
         """Stop serving (main_async's stop) after delay_s, so the answers sent before go out first; main() then exits
         with srvrestart.EXIT_CODE and the supervisor starts this server again. Idempotent."""
@@ -9144,6 +9155,8 @@ class Connection:
                             "starts it again")
                 self.send({"type": "server_restart", "ok": True})
                 self.s.request_restart()
+        elif kind == "world_reload":            # scoped hot-reload without restarting the server process (reload.rs)
+            self.world_reload(msg)
         elif kind == "app_path":                # the settings page's folders: the cache's, the BeamMP launcher's
             self.spawn(self.app_path(msg))
         elif kind == "runtime_profiler":
@@ -9214,6 +9227,110 @@ class Connection:
                 self.roads = road_tracker(self)
         else:
             log.debug("ignoring message type %r", kind)
+
+    def world_reload(self, msg):
+        """Hot-reload world generation scopes around the active anchor without restarting the server process (reload.rs).
+        Gated by srvrestart.key_ok (restart.key). Non-plan scopes ('roads', 'veg', 'surface', 'signs', 'nav') never
+        invalidate road plans (PLAN_NEUTRAL); 'plans' triggers PlanStore.late_reset only on the targeted/active cells."""
+        import fast
+        import mapcells
+        why = self.s.reload_refusal(self, msg)
+        if why:
+            log.info("world_reload: refused (%s)", why)
+            self.send({"type": "world_reload", "ok": False, "error": why})
+            return
+        raw_scopes = msg.get("scopes")
+        if not isinstance(raw_scopes, list) or not all(isinstance(s, str) for s in raw_scopes):
+            self.send({"type": "world_reload", "ok": False, "error": "world_reload: scopes must be a list of strings"})
+            return
+        raw_cells = msg.get("clear_cells")
+        clear_cells = None
+        if raw_cells is not None:
+            if not isinstance(raw_cells, list):
+                self.send({"type": "world_reload", "ok": False, "error": "world_reload: clear_cells must be a list"})
+                return
+            try:
+                clear_cells = [(int(c[0]), int(c[1]), int(c[2])) for c in raw_cells]
+            except (TypeError, ValueError, IndexError):
+                self.send({"type": "world_reload", "ok": False,
+                           "error": "world_reload: clear_cells must be [z, x, y] triples"})
+                return
+        cfg = msg.get("config")
+        if isinstance(cfg, dict):
+            cfg_json = json.dumps(cfg, sort_keys=True, separators=(",", ":"))
+        elif cfg is None or isinstance(cfg, str):
+            cfg_json = cfg
+        else:
+            self.send({"type": "world_reload", "ok": False, "error": "world_reload: config must be a dict or JSON str"})
+            return
+        active_cells = []
+        ps = getattr(self.s, "plan_store", None)
+        if ps is not None:
+            with ps.lock:
+                planners = list(ps.planners.values())
+            for pl in planners:
+                with pl.lock:
+                    active_cells.extend((ck.z, ck.x, ck.y) for ck in pl.cells)
+        for a in getattr(self.s, "anchors", {}).values():
+            gr = getattr(a, "grader", None)
+            if gr is not None and hasattr(gr, "_mapped"):
+                with gr.lock:
+                    active_cells.extend((ck.z, ck.x, ck.y) for ck in gr._mapped)
+            st = getattr(gr, "store", None)
+            if st is not None and st is not ps:
+                with st.lock:
+                    pls = list(st.planners.values())
+                for pl in pls:
+                    with pl.lock:
+                        active_cells.extend((ck.z, ck.x, ck.y) for ck in pl.cells)
+        serial = self.s.reload_serial = getattr(self.s, "reload_serial", 0) + 1
+        try:
+            plan = fast.reload_plan(raw_scopes, clear_cells=clear_cells, active_cells=active_cells,
+                                    config_json=cfg_json, serial=serial)
+        except (ValueError, TypeError) as e:
+            self.send({"type": "world_reload", "ok": False, "error": str(e)})
+            return
+        scopes = set(plan["scopes"])
+        evict = [mapcells.CellKey(int(z), int(x), int(y)) for z, x, y in plan["evict_cells"]]
+        self.s.reload_epoch = plan["epoch"]
+        if plan["invalidates_plans"]:
+            self.s.plans_reload_epoch = plan["plans_epoch"]
+            if ps is not None:
+                ps.late_reset(evict)
+            for a in getattr(self.s, "anchors", {}).values():
+                gr = getattr(a, "grader", None)
+                if gr is not None and hasattr(gr, "_mapped"):
+                    with gr.lock:
+                        for ck in evict:
+                            gr._mapped.pop(ck, None)
+                st = getattr(gr, "store", None)
+                if st is not None and st is not ps and hasattr(st, "late_reset"):
+                    st.late_reset(evict)
+            if getattr(blockworker, "_s", None) is not None:
+                blockworker._s.late_reset(evict)
+        if "roads" in scopes or "plans" in scopes:
+            self.roads.close()
+            self.roads = road_tracker(self)
+        if "signs" in scopes or "roads" in scopes:
+            self.signs.refresh()
+        if "veg" in scopes and self.veg is not None:
+            self.veg.forget()
+        if "nav" in scopes:
+            self.nav.refresh()
+        if "surface" in scopes and self.active in getattr(self.s, "anchors", {}):
+            if hasattr(self.s, "base_stale") and hasattr(self.s, "hm"):
+                self.s.base_stale.update(k for k in self.s.hm if k[0] == self.active)
+            anchor = self.s.anchors[self.active]
+            if getattr(self, "swap_gen", False) and getattr(anchor, "stale", None):
+                self.spawn(self.stale_swap(anchor, anchor.stale[0], time.monotonic()))
+        self.send({
+            "type": "world_reload",
+            "ok": True,
+            "scopes": list(plan["scopes"]),
+            "epoch": plan["epoch"],
+            "plansEpoch": plan["plans_epoch"],
+            "evicted": [[ck.z, ck.x, ck.y] for ck in evict],
+        })
 
     def set_graphics(self, msg):
         """The settings page's graphics (the user, 2026-10-28: "give player much more control in the graphics settings

@@ -135,11 +135,33 @@ class _State:
             for c in self.chunks.values():
                 c.clear()
 
-    def late_reset(self):
+    def late_reset(self, cells=None):
         """A late process drops its whole planning state (late_job): the plan store with every planner's memory (cells'
         plans, road stages, kept geometry, deck corrections, packs, plan sets, tunnel networks), the chain stores made
         on its plans, the anchors' and the geotile frames' graders with their mapped copies. The next job starts
-        from the disk alone."""
+        from the disk alone. When cells is given (world_reload), only those cells are evicted from PlanStore and the
+        graders' mapped copies."""
+        import mapcells
+        if cells is not None:
+            targets = {k if isinstance(k, mapcells.CellKey) else mapcells.CellKey(int(k[0]), int(k[1]), int(k[2]))
+                       for k in cells}
+            with self.lock:
+                ps = self.__dict__.get("plan_store")
+                if ps is not None:
+                    ps.late_reset(targets)
+                for gr in self.graders.values():
+                    if gr is not None and hasattr(gr, "_mapped"):
+                        with gr.lock:
+                            for ck in targets:
+                                gr._mapped.pop(ck, None)
+                self.late_resets = self.__dict__.get("late_resets", 0) + 1
+            with _geo_lock:
+                for gr in _geo_graders.values():
+                    if gr is not None and hasattr(gr, "_mapped"):
+                        with gr.lock:
+                            for ck in targets:
+                                gr._mapped.pop(ck, None)
+            return
         with self.lock:
             self.__dict__.pop("plan_store", None)
             self.__dict__.get("chain_stores", {}).clear()
